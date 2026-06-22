@@ -1,0 +1,1083 @@
+import Combine
+import SwiftUI
+import AppKit
+import GhosttyTerminal
+
+// MARK: - Helpers
+
+/// Ghostty may hand back a "file://host/path" URI from OSC 7; extract the path.
+private func resolveCWD(_ raw: String?) -> String? {
+    guard let raw else { return nil }
+    if raw.hasPrefix("file://") { return URL(string: raw)?.path }
+    return raw
+}
+
+private func makeLauncherConfig() -> TerminalConfiguration {
+    let launcher = NSHomeDirectory() + "/.srota/zsh-launcher.sh"
+    return TerminalConfiguration(configure: { b in b.withCustom("command", launcher) })
+}
+
+/// Smart tab/pane title from CWD:
+///   - git repo  → "reponame/branch"
+///   - otherwise → "…/parent/dir"
+private func smartTitle(for path: String?) -> String {
+    guard let path, !path.isEmpty else { return "Terminal" }
+    var url = URL(fileURLWithPath: path)
+    while url.path != "/" {
+        if FileManager.default.fileExists(atPath: url.appendingPathComponent(".git").path) {
+            let name = gitRepoName(at: url) ?? url.lastPathComponent
+            if let branch = gitBranch(at: url) { return "\(name)/\(branch)" }
+            return name
+        }
+        let parent = url.deletingLastPathComponent()
+        if parent == url { break }
+        url = parent
+    }
+    let comps = URL(fileURLWithPath: path).pathComponents.filter { $0 != "/" && !$0.isEmpty }
+    switch comps.count {
+    case 0: return "Terminal"
+    case 1: return comps[0]
+    case 2: return "\(comps[0])/\(comps[1])"
+    default: return "…/\(comps[comps.count-2])/\(comps[comps.count-1])"
+    }
+}
+
+private func gitBranch(at url: URL) -> String? {
+    guard let head = try? String(contentsOf: url.appendingPathComponent(".git/HEAD"), encoding: .utf8) else { return nil }
+    let t = head.trimmingCharacters(in: .whitespacesAndNewlines)
+    if t.hasPrefix("ref: refs/heads/") { return String(t.dropFirst(16)) }
+    return t.count >= 7 ? String(t.prefix(7)) : nil
+}
+
+private func gitRepoName(at url: URL) -> String? {
+    guard let cfg = try? String(contentsOf: url.appendingPathComponent(".git/config"), encoding: .utf8) else { return nil }
+    for line in cfg.components(separatedBy: "\n") {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard t.hasPrefix("url = ") else { continue }
+        let remote = String(t.dropFirst(6))
+        // last path component handles both https://…/repo.git and git@host:user/repo.git
+        let raw = remote.components(separatedBy: "/").last ?? remote
+        return raw.hasSuffix(".git") ? String(raw.dropLast(4)) : raw
+    }
+    return nil
+}
+
+/// Transparent overlay that intercepts double-clicks natively via NSView.
+/// Single-clicks pass through to SwiftUI gestures underneath.
+private struct DoubleClickOverlay: NSViewRepresentable {
+    var action: () -> Void
+    func makeNSView(context: Context) -> DCView { DCView() }
+    func updateNSView(_ v: DCView, context: Context) { v.action = action }
+
+    class DCView: NSView {
+        var action: (() -> Void)?
+        override func mouseDown(with event: NSEvent) {
+            if event.clickCount == 2 { action?() } else { super.mouseDown(with: event) }
+        }
+    }
+}
+
+// MARK: - Model
+
+enum PaneRef: Equatable {
+    case primary
+    case secondary(UUID)
+}
+
+enum DropSide { case left, right, top, bottom }
+
+struct PaneLayout {
+    var x: CGFloat = 0
+    var y: CGFloat = 0
+    var w: CGFloat = 1
+    var h: CGFloat = 1
+}
+
+final class PaneEntry: Identifiable {
+    let id = UUID()
+    let viewState: TerminalViewState
+    init(viewState: TerminalViewState) { self.viewState = viewState }
+}
+
+// Each pane owns a fractional rect (0–1) of the content area.
+// Splitting right/bottom halves the focused pane and places the new one adjacent.
+@MainActor
+final class TerminalTab: Identifiable, ObservableObject {
+    let id = UUID()
+    @Published var customName: String = "" {
+        didSet { if customName.isEmpty { titleFromCWD = smartTitle(for: resolveCWD(focusedViewState.workingDirectory)) } }
+    }
+    let viewState: TerminalViewState
+    @Published var secondaryPanes: [PaneEntry] = []
+    @Published var layouts:      [UUID: PaneLayout] = [:]
+    @Published var primaryPaneName: String = ""
+    @Published var paneNames:    [UUID: String]     = [:]
+    @Published var primaryLayout = PaneLayout()
+    @Published var focusedPaneID: UUID? = nil {
+        didSet {
+            if customName.isEmpty {
+                titleFromCWD = smartTitle(for: resolveCWD(focusedViewState.workingDirectory))
+            }
+            bindTitleSink()
+        }
+    }
+    @Published var primaryExited = false
+    @Published private(set) var titleFromCWD: String = "Terminal"
+    private var titleSink: AnyCancellable?
+    var closeTabCallback: (() -> Void)?
+
+    init(colorScheme: ColorScheme, workingDirectory: String? = nil) {
+        let state = TerminalViewState(terminalConfiguration: makeLauncherConfig())
+        state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: workingDirectory)
+        state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
+        viewState = state
+        bindTitleSink()
+    }
+
+    private func bindTitleSink() {
+        titleSink = focusedViewState.$workingDirectory
+            .receive(on: RunLoop.main)
+            .sink { [weak self] cwd in
+                guard let self, self.customName.isEmpty else { return }
+                self.titleFromCWD = smartTitle(for: resolveCWD(cwd))
+            }
+    }
+
+    var displayName: String {
+        if !customName.isEmpty { return customName }
+        if let fid = focusedPaneID {
+            if let name = paneNames[fid], !name.isEmpty { return name }
+        } else if !primaryPaneName.isEmpty {
+            return primaryPaneName
+        }
+        return titleFromCWD
+    }
+
+    var focusedViewState: TerminalViewState {
+        if let fid = focusedPaneID,
+           let entry = secondaryPanes.first(where: { $0.id == fid }) {
+            return entry.viewState
+        }
+        return viewState
+    }
+
+    func splitRight(colorScheme: ColorScheme) {
+        guard let fl = focusedLayout else { return }
+        let half = fl.w / 2
+        setFocusedLayout(PaneLayout(x: fl.x, y: fl.y, w: half, h: fl.h))
+        addPane(colorScheme: colorScheme,
+                layout: PaneLayout(x: fl.x + half, y: fl.y, w: half, h: fl.h),
+                workingDirectory: resolveCWD(focusedViewState.workingDirectory))
+    }
+
+    func splitBottom(colorScheme: ColorScheme) {
+        guard let fl = focusedLayout else { return }
+        let half = fl.h / 2
+        setFocusedLayout(PaneLayout(x: fl.x, y: fl.y, w: fl.w, h: half))
+        addPane(colorScheme: colorScheme,
+                layout: PaneLayout(x: fl.x, y: fl.y + half, w: fl.w, h: half),
+                workingDirectory: resolveCWD(focusedViewState.workingDirectory))
+    }
+
+    func rename(ref: PaneRef, to name: String) {
+        switch ref {
+        case .primary:           primaryPaneName = name
+        case .secondary(let id): paneNames[id] = name
+        }
+    }
+
+    func removePane(id: UUID) {
+        expandNeighbor(of: .secondary(id))
+        secondaryPanes.removeAll { $0.id == id }
+        layouts.removeValue(forKey: id)
+        if focusedPaneID == id { focusedPaneID = nil }
+        if secondaryPanes.isEmpty {
+            if primaryExited { closeTabCallback?() }
+            else { primaryLayout = PaneLayout() }
+        }
+    }
+
+    func collapsePrimary() {
+        expandNeighbor(of: .primary)
+        primaryLayout = PaneLayout(x: 0, y: 0, w: 0, h: 0)
+        primaryExited = true
+    }
+
+    func closePrimaryPane() {
+        if secondaryPanes.isEmpty { closeTabCallback?() }
+        else { collapsePrimary() }
+    }
+
+    func swapLayouts(_ a: PaneRef, _ b: PaneRef) {
+        guard a != b else { return }
+        let la = layout(for: a), lb = layout(for: b)
+        setLayout(lb, for: a)
+        setLayout(la, for: b)
+    }
+
+    func performDrop(source: PaneRef, target: PaneRef, side: DropSide) {
+        guard source != target else { return }
+        // Expand first — target may absorb source's old space, giving a larger split area
+        expandNeighbor(of: source)
+        let tl = layout(for: target)   // re-read AFTER expansion
+        var newTarget: PaneLayout
+        var newSource: PaneLayout
+        switch side {
+        case .left:
+            let half = tl.w / 2
+            newSource = PaneLayout(x: tl.x, y: tl.y, w: half, h: tl.h)
+            newTarget = PaneLayout(x: tl.x + half, y: tl.y, w: half, h: tl.h)
+        case .right:
+            let half = tl.w / 2
+            newTarget = PaneLayout(x: tl.x, y: tl.y, w: half, h: tl.h)
+            newSource = PaneLayout(x: tl.x + half, y: tl.y, w: half, h: tl.h)
+        case .top:
+            let half = tl.h / 2
+            newSource = PaneLayout(x: tl.x, y: tl.y, w: tl.w, h: half)
+            newTarget = PaneLayout(x: tl.x, y: tl.y + half, w: tl.w, h: half)
+        case .bottom:
+            let half = tl.h / 2
+            newTarget = PaneLayout(x: tl.x, y: tl.y, w: tl.w, h: half)
+            newSource = PaneLayout(x: tl.x, y: tl.y + half, w: tl.w, h: half)
+        }
+        setLayout(newTarget, for: target)
+        setLayout(newSource, for: source)
+    }
+
+    // MARK: - Private
+
+    private func layout(for ref: PaneRef) -> PaneLayout {
+        switch ref {
+        case .primary:           return primaryLayout
+        case .secondary(let id): return layouts[id] ?? PaneLayout()
+        }
+    }
+
+    private func setLayout(_ l: PaneLayout, for ref: PaneRef) {
+        switch ref {
+        case .primary:           primaryLayout = l
+        case .secondary(let id): layouts[id]   = l
+        }
+    }
+
+    private var focusedLayout: PaneLayout? {
+        if let fid = focusedPaneID { return layouts[fid] }
+        return primaryLayout
+    }
+
+    private func setFocusedLayout(_ l: PaneLayout) {
+        if let fid = focusedPaneID { layouts[fid] = l }
+        else { primaryLayout = l }
+    }
+
+    private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirectory: String? = nil) {
+        let state = TerminalViewState(terminalConfiguration: makeLauncherConfig())
+        state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: workingDirectory)
+        state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
+        let entry = PaneEntry(viewState: state)
+        state.onClose = { [weak self, weak entry] _ in
+            guard let self, let entry else { return }
+            self.removePane(id: entry.id)
+        }
+        layouts[entry.id] = layout
+        secondaryPanes.append(entry)
+        focusedPaneID = entry.id
+    }
+
+    // Expand a neighbor into ref's vacated space. Checks all 4 directions.
+    private func expandNeighbor(of ref: PaneRef) {
+        let rl = layout(for: ref)
+        let eps: CGFloat = 0.001
+
+        var others: [(PaneRef, PaneLayout)] = []
+        if ref != .primary { others.append((.primary, primaryLayout)) }
+        for e in secondaryPanes {
+            if case .secondary(let eid) = ref, eid == e.id { continue }
+            guard let l = layouts[e.id] else { continue }
+            others.append((.secondary(e.id), l))
+        }
+
+        for (otherRef, var nl) in others {
+            // left neighbor
+            if abs(nl.x + nl.w - rl.x) < eps && abs(nl.y - rl.y) < eps && abs(nl.h - rl.h) < eps {
+                nl.w += rl.w; setLayout(nl, for: otherRef); return
+            }
+            // top neighbor
+            if abs(nl.y + nl.h - rl.y) < eps && abs(nl.x - rl.x) < eps && abs(nl.w - rl.w) < eps {
+                nl.h += rl.h; setLayout(nl, for: otherRef); return
+            }
+            // right neighbor
+            if abs(nl.x - (rl.x + rl.w)) < eps && abs(nl.y - rl.y) < eps && abs(nl.h - rl.h) < eps {
+                nl.x = rl.x; nl.w += rl.w; setLayout(nl, for: otherRef); return
+            }
+            // bottom neighbor
+            if abs(nl.y - (rl.y + rl.h)) < eps && abs(nl.x - rl.x) < eps && abs(nl.w - rl.w) < eps {
+                nl.y = rl.y; nl.h += rl.h; setLayout(nl, for: otherRef); return
+            }
+        }
+    }
+}
+
+@MainActor
+final class Workspace: Identifiable, ObservableObject {
+    let id = UUID()
+    @Published var name: String
+    @Published var tabs: [TerminalTab] = []
+    @Published var selectedTabID: UUID?
+    private var lastColorScheme: ColorScheme = .dark
+
+    init(name: String) { self.name = name }
+
+    var selectedTab: TerminalTab? { tabs.first { $0.id == selectedTabID } }
+
+    var currentWorkingDirectory: String? {
+        resolveCWD(selectedTab?.focusedViewState.workingDirectory)
+    }
+
+    func addTab(colorScheme: ColorScheme, workingDirectory: String? = nil) {
+        lastColorScheme = colorScheme
+        let tab = TerminalTab(colorScheme: colorScheme, workingDirectory: workingDirectory)
+        tab.closeTabCallback = { [weak self, weak tab] in
+            guard let self, let tab else { return }
+            self.closeTab(id: tab.id)
+        }
+        tab.viewState.onClose = { [weak self, weak tab] _ in
+            guard let self, let tab else { return }
+            if tab.secondaryPanes.isEmpty {
+                self.closeTab(id: tab.id)
+            } else {
+                tab.collapsePrimary()
+            }
+        }
+        tabs.append(tab)
+        selectedTabID = tab.id
+    }
+
+    // Removes one tab. Workspace itself is never closed here —
+    // only closeWorkspace() on TerminalManager does that.
+    func closeTab(id: UUID) {
+        if selectedTabID == id {
+            if let idx = tabs.firstIndex(where: { $0.id == id }) {
+                let next = tabs.indices.contains(idx + 1) ? tabs[idx + 1].id
+                         : idx > 0 ? tabs[idx - 1].id : nil
+                selectedTabID = next
+            }
+        }
+        tabs.removeAll { $0.id == id }
+    }
+}
+
+@MainActor
+final class TerminalManager: ObservableObject {
+    @Published var workspaces: [Workspace] = []
+    @Published var selectedWorkspaceID: UUID?
+
+    var selectedWorkspace: Workspace? {
+        workspaces.first { $0.id == selectedWorkspaceID }
+    }
+
+    func addWorkspace(colorScheme: ColorScheme) {
+        let ws = Workspace(name: "Workspace \(workspaces.count + 1)")
+        ws.addTab(colorScheme: colorScheme)
+        workspaces.append(ws)
+        selectedWorkspaceID = ws.id
+    }
+
+    func closeWorkspace(id: UUID) {
+        if selectedWorkspaceID == id {
+            if let idx = workspaces.firstIndex(where: { $0.id == id }) {
+                let next = workspaces.indices.contains(idx + 1) ? workspaces[idx + 1].id
+                         : idx > 0 ? workspaces[idx - 1].id : nil
+                selectedWorkspaceID = next
+            }
+        }
+        workspaces.removeAll { $0.id == id }
+    }
+}
+
+// MARK: - Design tokens
+
+private extension Color {
+    static let tabBarBg     = Color(red: 0.08, green: 0.08, blue: 0.09)
+    static let tabActiveBg  = Color(red: 0.17, green: 0.17, blue: 0.19)
+    static let tabHoverBg   = Color(red: 0.13, green: 0.13, blue: 0.15)
+    static let accentOrange = Color(red: 1.0, green: 0.45, blue: 0.15)
+    static let labelPrimary = Color(red: 0.92, green: 0.92, blue: 0.93)
+    static let labelMuted   = Color(red: 0.92, green: 0.92, blue: 0.93).opacity(0.40)
+}
+
+// MARK: - Root
+
+struct ContentView: View {
+    @StateObject private var manager = TerminalManager()
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var sidebarVisible = true
+
+    var body: some View {
+        HStack(spacing: 0) {
+            SidebarView(
+                manager: manager,
+                onAdd: { manager.addWorkspace(colorScheme: colorScheme) }
+            )
+            .frame(width: sidebarVisible ? 220 : 0)
+            .clipped()
+            .allowsHitTesting(sidebarVisible)
+
+            Rectangle()
+                .fill(Color.white.opacity(0.06))
+                .frame(width: 1)
+                .opacity(sidebarVisible ? 1 : 0)
+
+            VStack(spacing: 0) {
+                if let ws = manager.selectedWorkspace {
+                    TabBarView(workspace: ws, colorScheme: colorScheme, sidebarVisible: $sidebarVisible)
+                } else {
+                    HStack {
+                        Button(action: { sidebarVisible.toggle() }) {
+                            Image(systemName: "sidebar.left")
+                                .font(.system(size: 13))
+                                .foregroundStyle(Color.labelMuted)
+                                .frame(width: 32, height: 32)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.leading, 6)
+                        Spacer()
+                    }
+                    .frame(height: 38)
+                    .background(Color.tabBarBg)
+                    .overlay(alignment: .bottom) {
+                        Rectangle().fill(Color.white.opacity(0.05)).frame(height: 1)
+                    }
+                }
+
+                ZStack {
+                    Color.black.ignoresSafeArea()
+                    if manager.workspaces.isEmpty {
+                        Text("No workspace open")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(manager.workspaces) { ws in
+                        WorkspaceContent(workspace: ws,
+                                         selectedWorkspaceID: manager.selectedWorkspaceID)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .animation(.spring(duration: 0.22, bounce: 0.0), value: sidebarVisible)
+        .onAppear {
+            if manager.workspaces.isEmpty { manager.addWorkspace(colorScheme: colorScheme) }
+        }
+    }
+}
+
+// MARK: - Sidebar
+
+private extension Color {
+    static let sidebarBg      = Color(red: 0.067, green: 0.067, blue: 0.075)
+    static let rowSelected    = Color(red: 1, green: 1, blue: 1).opacity(0.06)
+    static let rowHover       = Color(red: 1, green: 1, blue: 1).opacity(0.035)
+    static let accentRail     = Color(red: 1.0, green: 0.45, blue: 0.15)
+    static let dotRunning     = Color(red: 0.24, green: 0.84, blue: 0.55)
+    static let labelSecondary = Color(red: 0.92, green: 0.92, blue: 0.93).opacity(0.45)
+    static let sectionHeader  = Color(red: 0.92, green: 0.92, blue: 0.93).opacity(0.28)
+}
+
+private struct SidebarView: View {
+    @ObservedObject var manager: TerminalManager
+    let onAdd: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Button(action: onAdd) {
+                HStack(spacing: 7) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("New Workspace")
+                        .font(.system(size: 13, weight: .regular))
+                    Spacer()
+                }
+                .foregroundStyle(Color.labelSecondary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+            }
+            .buttonStyle(.plain)
+
+            HStack(alignment: .firstTextBaseline, spacing: 0) {
+                Text("WORKSPACES")
+                    .font(.system(size: 11, weight: .medium))
+                    .tracking(0.8)
+                    .foregroundStyle(Color.sectionHeader)
+                Spacer()
+                Text("\(manager.workspaces.count)")
+                    .font(.system(size: 11, weight: .regular).monospacedDigit())
+                    .foregroundStyle(Color.sectionHeader.opacity(0.7))
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 5)
+
+            ScrollView(.vertical, showsIndicators: false) {
+                LazyVStack(spacing: 0) {
+                    ForEach(manager.workspaces) { ws in
+                        WorkspaceRow(
+                            workspace: ws,
+                            isSelected: manager.selectedWorkspaceID == ws.id,
+                            onSelect: { manager.selectedWorkspaceID = ws.id },
+                            onClose:  { manager.closeWorkspace(id: ws.id) }
+                        )
+                    }
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxHeight: .infinity)
+        .background(Color.sidebarBg)
+    }
+}
+
+private struct WorkspaceRow: View {
+    @ObservedObject var workspace: Workspace
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+
+    @State private var isHovered = false
+    @State private var isRenaming = false
+    @State private var editText = ""
+    @FocusState private var fieldFocused: Bool
+
+    private func startRename() {
+        editText = workspace.name
+        isRenaming = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { fieldFocused = true }
+    }
+
+    private func commitRename() {
+        let t = editText.trimmingCharacters(in: .whitespaces)
+        if !t.isEmpty { workspace.name = t }
+        isRenaming = false
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Rectangle()
+                .fill(isSelected ? Color.accentRail : .clear)
+                .frame(width: 3)
+
+            HStack(spacing: 9) {
+                Image(systemName: "square.stack")
+                    .font(.system(size: 10))
+                    .foregroundStyle(isSelected ? Color.accentOrange : Color.labelSecondary)
+
+                if isRenaming {
+                    TextField("", text: $editText)
+                        .font(.system(size: 13, weight: isSelected ? .medium : .regular))
+                        .foregroundStyle(Color.labelPrimary)
+                        .textFieldStyle(.plain)
+                        .focused($fieldFocused)
+                        .onSubmit { commitRename() }
+                        .onExitCommand { isRenaming = false }
+                } else {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(workspace.name)
+                            .font(.system(size: 13, weight: isSelected ? .medium : .regular))
+                            .foregroundStyle(isSelected ? Color.labelPrimary : Color.labelSecondary)
+                            .lineLimit(1)
+                        Text("\(workspace.tabs.count) tab\(workspace.tabs.count == 1 ? "" : "s")")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color.sectionHeader)
+                    }
+                }
+
+                Spacer(minLength: 4)
+
+                if isHovered && !isRenaming {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(Color.labelSecondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.leading, 12)
+            .padding(.trailing, 10)
+            .padding(.vertical, 9)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isSelected ? Color.rowSelected : isHovered ? Color.rowHover : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture { if !isRenaming { onSelect() } }
+        .onHover { isHovered = $0 }
+        .contextMenu {
+            Button("Rename") { startRename() }
+            Divider()
+            Button("Close Workspace", role: .destructive) { onClose() }
+        }
+    }
+}
+
+// MARK: - Tab bar
+
+private struct TabBarView: View {
+    @ObservedObject var workspace: Workspace
+    let colorScheme: ColorScheme
+    @Binding var sidebarVisible: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: { sidebarVisible.toggle() }) {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 13))
+                    .foregroundStyle(sidebarVisible ? Color.labelPrimary : Color.labelMuted)
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 6)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 1) {
+                    ForEach(workspace.tabs) { tab in
+                        TabChip(
+                            tab: tab,
+                            isActive: workspace.selectedTabID == tab.id,
+                            onSelect: { workspace.selectedTabID = tab.id },
+                            onClose:  { workspace.closeTab(id: tab.id) }
+                        )
+                    }
+
+                    Button(action: { workspace.addTab(colorScheme: colorScheme, workingDirectory: workspace.currentWorkingDirectory) }) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Color.labelMuted)
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.leading, 4)
+                }
+                .padding(.horizontal, 6)
+            }
+
+            Spacer(minLength: 0)
+
+            if let tab = workspace.selectedTab {
+                HStack(spacing: 2) {
+                    SplitButton(icon: "rectangle.split.2x1", tooltip: "Split Right",
+                                active: !tab.secondaryPanes.isEmpty) {
+                        tab.splitRight(colorScheme: colorScheme)
+                    }
+                    SplitButton(icon: "rectangle.split.1x2", tooltip: "Split Bottom",
+                                active: !tab.secondaryPanes.isEmpty) {
+                        tab.splitBottom(colorScheme: colorScheme)
+                    }
+                }
+                .padding(.trailing, 12)
+            }
+        }
+        .frame(height: 38)
+        .background(Color.tabBarBg)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.white.opacity(0.05)).frame(height: 1)
+        }
+    }
+}
+
+private struct WorkspaceContent: View {
+    @ObservedObject var workspace: Workspace
+    let selectedWorkspaceID: UUID?
+
+    var body: some View {
+        ForEach(workspace.tabs) { tab in
+            TerminalContentView(tab: tab)
+                .opacity(workspace.id == selectedWorkspaceID && tab.id == workspace.selectedTabID ? 1 : 0)
+        }
+    }
+}
+
+private struct TabChip: View {
+    @ObservedObject var tab: TerminalTab
+    let isActive: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+
+    @State private var isHovered   = false
+    @State private var isRenaming  = false
+    @State private var editText    = ""
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "terminal")
+                .font(.system(size: 10.5))
+                .foregroundStyle(isActive ? Color.accentOrange : Color.labelMuted)
+
+            if isRenaming {
+                TextField("", text: $editText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.labelPrimary)
+                    .focused($fieldFocused)
+                    .onSubmit { commit() }
+                    .onExitCommand { isRenaming = false }
+                    .onAppear { DispatchQueue.main.async { fieldFocused = true } }
+            } else {
+                Text(tab.displayName)
+                    .font(.system(size: 12, weight: isActive ? .medium : .regular))
+                    .foregroundStyle(isActive ? Color.labelPrimary : Color.labelMuted)
+                    .lineLimit(1)
+            }
+
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(Color.labelMuted)
+                    .frame(width: 14, height: 14)
+            }
+            .buttonStyle(.plain)
+            .opacity(isHovered || isActive ? 1 : 0)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 28)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(isActive ? Color.tabActiveBg : (isHovered ? Color.tabHoverBg : Color.clear))
+        )
+        .overlay(alignment: .bottom) {
+            if isActive {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.accentOrange)
+                    .frame(height: 2)
+                    .padding(.horizontal, 6)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .contextMenu {
+            Button("Rename") { startRename() }
+            Divider()
+            Button("Close", role: .destructive) { onClose() }
+        }
+        .onHover { isHovered = $0 }
+    }
+
+    private func startRename() {
+        onSelect()
+        editText = tab.customName
+        isRenaming = true
+    }
+
+    private func commit() {
+        tab.customName = editText
+        isRenaming = false
+    }
+}
+
+private struct SplitButton: View {
+    let icon: String
+    let tooltip: String
+    let active: Bool
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 13))
+                .foregroundStyle(active ? Color.accentOrange : (isHovered ? Color.labelPrimary : Color.labelMuted))
+                .frame(width: 28, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(active ? Color.accentOrange.opacity(0.12) :
+                              isHovered ? Color.white.opacity(0.06) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help(tooltip)
+    }
+}
+
+// MARK: - Terminal content (split-aware)
+// Primary is always ZStack child 0. Named coordinate space "panes" lets drag gestures
+// report absolute positions — no manual offset math needed.
+
+private struct TerminalContentView: View {
+    @ObservedObject var tab: TerminalTab
+    @State private var isDragging  = false
+    @State private var dragSource: PaneRef? = nil
+    @State private var dragHover:  PaneRef? = nil
+    @State private var dropSide:   DropSide? = nil
+
+    var body: some View {
+        GeometryReader { geo in
+            let sz = geo.size
+            let pl = tab.primaryLayout
+
+            ZStack(alignment: .topLeading) {
+                // Primary — always child 0
+                paneView(
+                    ref: .primary, state: tab.viewState, layout: pl,
+                    onClose: { tab.closePrimaryPane() }, sz: sz,
+                    focused: tab.focusedPaneID == nil
+                )
+                .simultaneousGesture(TapGesture().onEnded { tab.focusedPaneID = nil })
+
+                ForEach(tab.secondaryPanes) { entry in
+                    if let l = tab.layouts[entry.id] {
+                        paneView(
+                            ref: .secondary(entry.id), state: entry.viewState, layout: l,
+                            onClose: { tab.removePane(id: entry.id) }, sz: sz,
+                            focused: tab.focusedPaneID == entry.id
+                        )
+                        .simultaneousGesture(TapGesture().onEnded {
+                            tab.focusedPaneID = entry.id
+                        })
+                    }
+                }
+            }
+            .coordinateSpace(name: "panes")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func paneView(ref: PaneRef, state: TerminalViewState,
+                          layout l: PaneLayout, onClose: (() -> Void)?,
+                          sz: CGSize, focused: Bool) -> some View {
+        let isSource = isDragging && dragSource == ref
+        let isTarget = isDragging && dragHover  == ref && dragSource != ref
+
+        ZStack(alignment: .top) {
+            Color.black
+            TerminalSurfaceView(context: state)
+                .padding(.top, 30)
+                .opacity(isSource ? 0.45 : 1)
+            if isTarget {
+                switch dropSide {
+                case .left:
+                    HStack(spacing: 0) { Color.accentOrange.opacity(0.22); Color.clear }
+                case .right:
+                    HStack(spacing: 0) { Color.clear; Color.accentOrange.opacity(0.22) }
+                case .top:
+                    VStack(spacing: 0) { Color.accentOrange.opacity(0.22); Color.clear }
+                case .bottom:
+                    VStack(spacing: 0) { Color.clear; Color.accentOrange.opacity(0.22) }
+                case nil:
+                    Color.accentOrange.opacity(0.18)
+                }
+                Rectangle().strokeBorder(Color.accentOrange, lineWidth: 2)
+            }
+        }
+        .overlay(alignment: .top) {
+            let customName: String = {
+                switch ref {
+                case .primary:           return tab.primaryPaneName
+                case .secondary(let id): return tab.paneNames[id] ?? ""
+                }
+            }()
+            ReactivePaneHeader(
+                state: state,
+                customName: customName,
+                focused: focused,
+                showClose: onClose != nil,
+                onClose: onClose ?? {},
+                onRename: { tab.rename(ref: ref, to: $0) },
+                onDragChanged: { loc in
+                    isDragging = true
+                    dragSource = ref
+                    let h = paneAt(loc, in: sz)
+                    if let h = h, h != ref {
+                        dragHover = h
+                        dropSide = sideOf(loc, pane: h, in: sz)
+                    } else {
+                        dragHover = nil
+                        dropSide  = nil
+                    }
+                },
+                onDragEnded: { loc in
+                    let t = paneAt(loc, in: sz)
+                    if let t = t, t != ref {
+                        if let side = dropSide { tab.performDrop(source: ref, target: t, side: side) }
+                        else                   { tab.swapLayouts(ref, t) }
+                    }
+                    isDragging = false; dragSource = nil; dragHover = nil; dropSide = nil
+                }
+            )
+        }
+        .overlay(
+            Rectangle()
+                .strokeBorder(
+                    focused ? Color.accentOrange.opacity(0.55) : Color.white.opacity(0.06),
+                    lineWidth: focused ? 1.5 : 1
+                )
+        )
+        .frame(width: sz.width * l.w, height: sz.height * l.h)
+        .offset(x: sz.width * l.x, y: sz.height * l.y)
+    }
+
+    private func paneAt(_ p: CGPoint, in sz: CGSize) -> PaneRef? {
+        for entry in tab.secondaryPanes.reversed() {
+            if let l = tab.layouts[entry.id] {
+                if CGRect(x: sz.width * l.x, y: sz.height * l.y,
+                          width: sz.width * l.w, height: sz.height * l.h).contains(p) {
+                    return .secondary(entry.id)
+                }
+            }
+        }
+        let pl = tab.primaryLayout
+        if CGRect(x: sz.width * pl.x, y: sz.height * pl.y,
+                  width: sz.width * pl.w, height: sz.height * pl.h).contains(p) {
+            return .primary
+        }
+        return nil
+    }
+
+    private func sideOf(_ p: CGPoint, pane: PaneRef, in sz: CGSize) -> DropSide? {
+        let l: PaneLayout
+        switch pane {
+        case .primary: l = tab.primaryLayout
+        case .secondary(let id):
+            guard let ll = tab.layouts[id] else { return nil }
+            l = ll
+        }
+        let cx = sz.width  * (l.x + l.w / 2)
+        let cy = sz.height * (l.y + l.h / 2)
+        let dx = abs(p.x - cx) / (sz.width  * l.w)
+        let dy = abs(p.y - cy) / (sz.height * l.h)
+        if dx > dy { return p.x < cx ? .left : .right }
+        return p.y < cy ? .top : .bottom
+    }
+}
+
+/// Wraps PaneHeader, observing TerminalViewState so the title reacts to CWD changes.
+private struct ReactivePaneHeader: View {
+    @ObservedObject var state: TerminalViewState
+    let customName: String
+    let focused: Bool
+    let showClose: Bool
+    let onClose: () -> Void
+    let onRename: (String) -> Void
+    let onDragChanged: (CGPoint) -> Void
+    let onDragEnded:   (CGPoint) -> Void
+
+    var body: some View {
+        let title = customName.isEmpty ? smartTitle(for: resolveCWD(state.workingDirectory)) : customName
+        PaneHeader(
+            title: title,
+            focused: focused,
+            showClose: showClose,
+            onClose: onClose,
+            onRename: onRename,
+            onDragChanged: onDragChanged,
+            onDragEnded: onDragEnded
+        )
+    }
+}
+
+private struct PaneHeader: View {
+    let title: String
+    let focused: Bool
+    let showClose: Bool
+    let onClose: () -> Void
+    let onRename: (String) -> Void
+    let onDragChanged: (CGPoint) -> Void
+    let onDragEnded:   (CGPoint) -> Void
+
+    @State private var isHovered  = false
+    @State private var isRenaming = false
+    @State private var editText   = ""
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            HStack(spacing: 6) {
+                Image(systemName: "terminal")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(focused ? Color.accentOrange : Color.labelMuted)
+
+                if isRenaming {
+                    TextField("", text: $editText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.labelPrimary)
+                        .focused($fieldFocused)
+                        .onSubmit { commitRename() }
+                        .onExitCommand { isRenaming = false }
+                        .onAppear { fieldFocused = true }
+                } else {
+                    Text(title)
+                        .font(.system(size: 12, weight: focused ? .medium : .regular))
+                        .foregroundStyle(focused ? Color.labelPrimary : Color.labelMuted)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+
+                if showClose && !isRenaming {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(Color.labelMuted)
+                            .frame(width: 14, height: 14)
+                    }
+                    .buttonStyle(.plain)
+                    .opacity(isHovered ? 1 : 0)
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(Color.tabBarBg)
+            .contentShape(Rectangle())
+            .onHover { isHovered = $0 }
+            .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named("panes"))
+                .onChanged { onDragChanged($0.location) }
+                .onEnded   { onDragEnded($0.location)   })
+            .contextMenu {
+                Button("Rename") { startRename() }
+                if showClose {
+                    Divider()
+                    Button("Close", role: .destructive) { onClose() }
+                }
+            }
+
+            Rectangle()
+                .fill(focused ? Color.accentOrange : Color.white.opacity(0.05))
+                .frame(height: focused ? 2 : 1)
+        }
+        .frame(height: 30)
+    }
+
+    private func startRename() {
+        editText = title
+        isRenaming = true
+    }
+
+    private func commitRename() {
+        let name = editText.trimmingCharacters(in: .whitespaces)
+        onRename(name)
+        isRenaming = false
+    }
+}
+
+private struct SplitDivider: View {
+    let vertical: Bool
+    @State private var hovering = false
+
+    var body: some View {
+        ZStack {
+            Color.clear
+            Rectangle()
+                .fill(hovering ? Color.white.opacity(0.18) : Color.white.opacity(0.07))
+                .frame(width: vertical ? 1 : nil, height: vertical ? nil : 1)
+        }
+        .onHover { h in
+            hovering = h
+            if vertical { h ? NSCursor.resizeLeftRight.push() : NSCursor.pop() }
+            else        { h ? NSCursor.resizeUpDown.push()    : NSCursor.pop() }
+        }
+    }
+}
+

@@ -1,0 +1,18 @@
+# Xcode user data
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.moved-aside
+
+# Build
+DerivedData/
+build/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.build/
