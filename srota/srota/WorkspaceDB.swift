@@ -61,7 +61,20 @@ struct RepoEntry: Identifiable, Hashable {
     var name: String
     var url: String
     var localPath: String
+}
+
+struct FeatureRepo: Identifiable, Hashable {
+    var id: String
     var featureID: String
+    var repoID: String
+    var branch: String
+}
+
+struct RepoBranch: Identifiable, Hashable {
+    var id: String
+    var repoID: String
+    var name: String
+    var description: String
 }
 
 struct Issue: Identifiable, Hashable {
@@ -84,6 +97,8 @@ final class WorkspaceDB {
     var projects: [Project] = []
     var features: [Feature] = []
     var repos: [RepoEntry] = []
+    var featureRepos: [FeatureRepo] = []
+    var repoBranches: [RepoBranch] = []
     var issues: [Issue] = []
 
     private struct ScannedBranch {
@@ -186,13 +201,12 @@ final class WorkspaceDB {
         refresh()
     }
 
-    func addRepo(name: String, url: String = "", localPath: String = "", featureID: String = "") {
+    func addRepo(name: String, url: String = "", localPath: String = "") {
         upsert("repos", [
             "id": UUID().uuidString,
             "name": name,
             "url": url,
-            "local_path": localPath,
-            "feature_id": featureID
+            "local_path": localPath
         ])
         refresh()
     }
@@ -202,14 +216,55 @@ final class WorkspaceDB {
             "id": repo.id,
             "name": repo.name,
             "url": repo.url,
-            "local_path": repo.localPath,
-            "feature_id": repo.featureID
+            "local_path": repo.localPath
         ])
         refresh()
     }
 
     func deleteRepo(id: String) {
         exec(sql("DELETE", sqlFrom, "repos", sqlWhere, "id = ?"), [id])
+        exec(sql("DELETE", sqlFrom, "feature_repos", sqlWhere, "repo_id = ?"), [id])
+        exec(sql("DELETE", sqlFrom, "repo_branches", sqlWhere, "repo_id = ?"), [id])
+        refresh()
+    }
+
+    func addRepoBranch(repoID: String, name: String, description: String = "") {
+        upsert("repo_branches", [
+            "id": UUID().uuidString,
+            "repo_id": repoID,
+            "name": name,
+            "description": description
+        ])
+        refresh()
+    }
+
+    func updateRepoBranch(_ branch: RepoBranch) {
+        upsert("repo_branches", [
+            "id": branch.id,
+            "repo_id": branch.repoID,
+            "name": branch.name,
+            "description": branch.description
+        ])
+        refresh()
+    }
+
+    func deleteRepoBranch(id: String) {
+        exec(sql("DELETE", sqlFrom, "repo_branches", sqlWhere, "id = ?"), [id])
+        refresh()
+    }
+
+    func addFeatureRepo(featureID: String, repoID: String, branch: String) {
+        upsert("feature_repos", [
+            "id": UUID().uuidString,
+            "feature_id": featureID,
+            "repo_id": repoID,
+            "branch": branch
+        ])
+        refresh()
+    }
+
+    func deleteFeatureRepo(id: String) {
+        exec(sql("DELETE", sqlFrom, "feature_repos", sqlWhere, "id = ?"), [id])
         refresh()
     }
 
@@ -258,8 +313,14 @@ final class WorkspaceDB {
         features = rows(sql("SELECT id, project_id, name, description", sqlFrom, "features", "ORDER BY name")) {
             Feature(id: col($0, 0), projectID: col($0, 1), name: col($0, 2), description: col($0, 3))
         }
-        repos = rows(sql("SELECT id, name, url, local_path, feature_id", sqlFrom, "repos", "ORDER BY name")) {
-            RepoEntry(id: col($0, 0), name: col($0, 1), url: col($0, 2), localPath: col($0, 3), featureID: col($0, 4))
+        repos = rows(sql("SELECT id, name, url, local_path", sqlFrom, "repos", "ORDER BY name")) {
+            RepoEntry(id: col($0, 0), name: col($0, 1), url: col($0, 2), localPath: col($0, 3))
+        }
+        featureRepos = rows(sql("SELECT id, feature_id, repo_id, branch", sqlFrom, "feature_repos", "ORDER BY branch")) {
+            FeatureRepo(id: col($0, 0), featureID: col($0, 1), repoID: col($0, 2), branch: col($0, 3))
+        }
+        repoBranches = rows(sql("SELECT id, repo_id, name, description", sqlFrom, "repo_branches", "ORDER BY name")) {
+            RepoBranch(id: col($0, 0), repoID: col($0, 1), name: col($0, 2), description: col($0, 3))
         }
         issues = rows(sql("SELECT id, title, body, status, org_id, feature_id", sqlFrom, "issues", "ORDER BY title")) {
             Issue(id: col($0, 0), title: col($0, 1), body: col($0, 2), status: col($0, 3), orgID: col($0, 4), featureID: col($0, 5))
@@ -279,7 +340,11 @@ final class WorkspaceDB {
         (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS repos
         (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL DEFAULT '',
-         local_path TEXT NOT NULL DEFAULT '', feature_id TEXT NOT NULL DEFAULT '');
+         local_path TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS feature_repos
+        (id TEXT PRIMARY KEY, feature_id TEXT NOT NULL, repo_id TEXT NOT NULL, branch TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS repo_branches
+        (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS issues
         (id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
          status TEXT NOT NULL DEFAULT 'open', org_id TEXT NOT NULL DEFAULT '', feature_id TEXT NOT NULL DEFAULT '');

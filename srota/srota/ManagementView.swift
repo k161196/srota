@@ -341,6 +341,146 @@ private struct MGPicker<T: Identifiable & Hashable>: View {
     }
 }
 
+// MARK: - Shared split-panel scaffold
+
+private struct SelectableRow<T: Identifiable & Hashable, Content: View>: View {
+    let item: T
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onDelete: () -> Void
+    @ViewBuilder var content: () -> Content
+    @State private var hovered = false
+
+    var body: some View {
+        HStack {
+            content()
+                .padding(.vertical, 8)
+            Spacer()
+            if hovered {
+                Button(action: onDelete) {
+                    Image(systemName: "trash").font(.system(size: 10))
+                        .foregroundStyle(Color.red.opacity(0.7)).frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, minHeight: 40)
+        .background(isSelected ? Color.mgAccent.opacity(0.12) : hovered ? Color.mgRowHover : Color.mgRow)
+        .overlay(alignment: .leading) {
+            if isSelected { Rectangle().fill(Color.mgAccent).frame(width: 2) }
+        }
+        .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .onHover { hovered = $0 }
+    }
+}
+
+private struct SplitPanel<T: Identifiable & Hashable, Row: View, Detail: View, Form: View>: View {
+    let title: String
+    let items: [T]
+    let emptyHint: String
+    let onDelete: (T) -> Void
+    @ViewBuilder var rowContent: (T) -> Row
+    @ViewBuilder var detail: (T) -> Detail
+    @ViewBuilder var addForm: (Binding<Bool>) -> Form
+
+    @State private var selected: T?
+    @State private var showAdd = false
+
+    var body: some View {
+        HSplitView {
+            VStack(spacing: 0) {
+                HStack {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.mgLabel)
+                    Text("\(items.count)")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(Color.mgMuted)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Color.mgSurface).clipShape(Capsule())
+                    Spacer()
+                    Button { showAdd = true } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.mgAccent)
+                            .frame(width: 28, height: 28)
+                            .background(Color.mgAccent.opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 10)
+                .background(Color.mgBg)
+                .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
+
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(items) { item in
+                            SelectableRow(
+                                item: item,
+                                isSelected: selected?.id == item.id,
+                                onSelect: { selected = item },
+                                onDelete: {
+                                    onDelete(item)
+                                    if selected?.id == item.id { selected = nil }
+                                }
+                            ) { rowContent(item) }
+                        }
+                        if items.isEmpty {
+                            Text(emptyHint).font(.system(size: 13))
+                                .foregroundStyle(Color.mgMuted).frame(maxWidth: .infinity).padding(.vertical, 40)
+                        }
+                    }
+                }
+                .background(Color.mgBg)
+            }
+            .frame(minWidth: 200, maxWidth: 280)
+
+            if let sel = selected, items.contains(where: { $0.id == sel.id }) {
+                detail(sel)
+            } else {
+                Color.mgBg.overlay(
+                    Text("Select an item").font(.system(size: 13)).foregroundStyle(Color.mgMuted)
+                )
+            }
+        }
+        .sheet(isPresented: $showAdd) { addForm($showAdd) }
+        .onChange(of: items) { selected = items.first { $0.id == selected?.id } }
+    }
+}
+
+private struct EditDetailScaffold<Content: View>: View {
+    let heading: String
+    let onSave: () -> Void
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text(heading)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Color.mgLabel)
+                content()
+                HStack {
+                    Spacer()
+                    Button("Save", action: onSave)
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 14).padding(.vertical, 7)
+                        .background(Color.mgAccent)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+            }
+            .padding(24)
+        }
+        .background(Color.mgBg)
+    }
+}
+
 // MARK: - Organizations panel
 
 private struct OrganizationsPanel: View {
@@ -349,16 +489,18 @@ private struct OrganizationsPanel: View {
     @State private var newPath = ""
 
     var body: some View {
-        EntityList(
+        SplitPanel(
             title: "Organizations",
             items: db.organizations,
+            emptyHint: "No organizations — press +",
             onDelete: { db.deleteOrganization(id: $0.id) }
         ) { org in
             VStack(alignment: .leading, spacing: 2) {
                 RowPrimary(text: org.name)
                 if !org.path.isEmpty { RowSecondary(text: org.path) }
             }
-            .padding(.vertical, 8)
+        } detail: { org in
+            OrganizationDetailView(org: org, db: db)
         } addForm: { isPresented in
             AddSheet(title: "New Organization", isPresented: isPresented) {
                 db.addOrganization(name: newName, path: newPath)
@@ -368,6 +510,25 @@ private struct OrganizationsPanel: View {
                 MGField(label: "Path (optional)", text: $newPath)
             }
         }
+    }
+}
+
+private struct OrganizationDetailView: View {
+    let org: Organization
+    let db: WorkspaceDB
+    @State private var name = ""
+    @State private var path = ""
+
+    var body: some View {
+        EditDetailScaffold(heading: org.name) {
+            var updated = org; updated.name = name; updated.path = path
+            db.updateOrganization(updated)
+        } content: {
+            MGField(label: "Name", text: $name)
+            MGField(label: "Path", text: $path)
+        }
+        .onAppear { name = org.name; path = org.path }
+        .onChange(of: org.id) { name = org.name; path = org.path }
     }
 }
 
@@ -797,9 +958,10 @@ private struct FeaturesPanel: View {
     @State private var selectedProject: Project?
 
     var body: some View {
-        EntityList(
+        SplitPanel(
             title: "Features",
             items: db.features,
+            emptyHint: "No features — press +",
             onDelete: { db.deleteFeature(id: $0.id) }
         ) { feature in
             VStack(alignment: .leading, spacing: 2) {
@@ -807,7 +969,8 @@ private struct FeaturesPanel: View {
                 let projName = db.projects.first { $0.id == feature.projectID }?.name ?? feature.projectID
                 RowSecondary(text: feature.description.isEmpty ? projName : "\(projName) · \(feature.description)")
             }
-            .padding(.vertical, 8)
+        } detail: { feature in
+            FeatureDetailView(feature: feature, db: db)
         } addForm: { isPresented in
             AddSheet(title: "New Feature", isPresented: isPresented) {
                 db.addFeature(name: newName, projectID: selectedProject?.id ?? "", description: newDesc)
@@ -821,6 +984,149 @@ private struct FeaturesPanel: View {
     }
 }
 
+private struct FeatureDetailView: View {
+    let feature: Feature
+    let db: WorkspaceDB
+    @State private var name = ""
+    @State private var desc = ""
+    @State private var selectedProject: Project?
+    @State private var showAddRepo = false
+
+    var linkedFeatureRepos: [FeatureRepo] { db.featureRepos.filter { $0.featureID == feature.id } }
+
+    var body: some View {
+        EditDetailScaffold(heading: feature.name) {
+            var updated = feature
+            updated.name = name
+            updated.description = desc
+            updated.projectID = selectedProject?.id ?? feature.projectID
+            db.updateFeature(updated)
+        } content: {
+            MGField(label: "Name", text: $name)
+            MGPicker(label: "Project", items: db.projects, displayName: \.name, selected: $selectedProject)
+            MGField(label: "Description", text: $desc)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("REPOS")
+                        .font(.system(size: 10, weight: .medium)).tracking(0.8)
+                        .foregroundStyle(Color.mgMuted)
+                    Spacer()
+                    Button { showAddRepo = true } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Color.mgAccent)
+                            .frame(width: 22, height: 22)
+                            .background(Color.mgAccent.opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                }
+                if linkedFeatureRepos.isEmpty {
+                    Text("No repos — press + to add")
+                        .font(.system(size: 12)).foregroundStyle(Color.mgMuted)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(linkedFeatureRepos) { fr in
+                            let repo = db.repos.first { $0.id == fr.repoID }
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(repo?.name ?? fr.repoID)
+                                        .font(.system(size: 13)).foregroundStyle(Color.mgLabel).lineLimit(1)
+                                    if !fr.branch.isEmpty {
+                                        Text(fr.branch)
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .foregroundStyle(Color.mgAccent.opacity(0.8)).lineLimit(1)
+                                    }
+                                }
+                                Spacer()
+                                Button { db.deleteFeatureRepo(id: fr.id) } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 9)).foregroundStyle(Color.mgMuted)
+                                        .frame(width: 20, height: 20)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Remove")
+                            }
+                            .padding(.horizontal, 10).padding(.vertical, 7)
+                            .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
+                        }
+                    }
+                    .background(Color.mgSurface)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+                }
+            }
+        }
+        .sheet(isPresented: $showAddRepo) {
+            AddFeatureRepoSheet(feature: feature, db: db, isPresented: $showAddRepo)
+        }
+        .onAppear { load() }
+        .onChange(of: feature.id) { load() }
+    }
+
+    private func load() {
+        name = feature.name; desc = feature.description
+        selectedProject = db.projects.first { $0.id == feature.projectID }
+    }
+}
+
+private struct AddFeatureRepoSheet: View {
+    let feature: Feature
+    let db: WorkspaceDB
+    @Binding var isPresented: Bool
+    @State private var selectedRepo: RepoEntry?
+    @State private var selectedBranch: RepoBranch?
+
+    var availableBranches: [RepoBranch] {
+        guard let repo = selectedRepo else { return [] }
+        return db.repoBranches.filter { $0.repoID == repo.id }
+    }
+
+    var canAdd: Bool { selectedRepo != nil && selectedBranch != nil }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Add Repo")
+                .font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.mgLabel)
+            if db.repos.isEmpty {
+                Text("No repos yet. Create one in the Repos tab.")
+                    .font(.system(size: 13)).foregroundStyle(Color.mgMuted)
+            } else {
+                MGPicker(label: "Repo", items: db.repos, displayName: \.name, selected: $selectedRepo)
+                    .onChange(of: selectedRepo) { selectedBranch = nil }
+
+                if let _ = selectedRepo {
+                    if availableBranches.isEmpty {
+                        Text("No branches on this repo. Add them in the Repos tab.")
+                            .font(.system(size: 12)).foregroundStyle(Color.mgMuted)
+                    } else {
+                        MGPicker(label: "Branch", items: availableBranches, displayName: \.name, selected: $selectedBranch)
+                    }
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { isPresented = false }
+                    .buttonStyle(.plain).foregroundStyle(Color.mgMuted)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                Button("Add") {
+                    if let repo = selectedRepo, let branch = selectedBranch {
+                        db.addFeatureRepo(featureID: feature.id, repoID: repo.id, branch: branch.name)
+                    }
+                    isPresented = false
+                }
+                .buttonStyle(.plain).foregroundStyle(.black)
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(canAdd ? Color.mgAccent : Color.mgMuted)
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .disabled(!canAdd)
+            }
+        }
+        .padding(28).frame(width: 340).background(Color.mgBg)
+    }
+}
+
 // MARK: - Repos panel
 
 private struct ReposPanel: View {
@@ -828,12 +1134,12 @@ private struct ReposPanel: View {
     @State private var newName = ""
     @State private var newURL  = ""
     @State private var newPath = ""
-    @State private var selectedFeature: Feature?
 
     var body: some View {
-        EntityList(
+        SplitPanel(
             title: "Repos",
             items: db.repos,
+            emptyHint: "No repos — press +",
             onDelete: { db.deleteRepo(id: $0.id) }
         ) { repo in
             VStack(alignment: .leading, spacing: 2) {
@@ -841,22 +1147,181 @@ private struct ReposPanel: View {
                 let sub = [repo.url, repo.localPath].filter { !$0.isEmpty }.first ?? ""
                 if !sub.isEmpty { RowSecondary(text: sub) }
             }
-            .padding(.vertical, 8)
+        } detail: { repo in
+            RepoDetailView(repo: repo, db: db)
         } addForm: { isPresented in
             AddSheet(title: "New Repo", isPresented: isPresented) {
-                db.addRepo(name: newName, url: newURL, localPath: newPath, featureID: selectedFeature?.id ?? "")
-                newName = ""; newURL = ""; newPath = ""; selectedFeature = nil
+                db.addRepo(name: newName, url: newURL, localPath: newPath)
+                newName = ""; newURL = ""; newPath = ""
             } content: {
                 MGField(label: "Name", text: $newName)
                 MGField(label: "Git URL", text: $newURL)
                 MGField(label: "Local path (optional)", text: $newPath)
-                MGPicker(label: "Feature (optional)", items: db.features, displayName: \.name, selected: $selectedFeature)
             }
         }
     }
 }
 
+private struct RepoDetailView: View {
+    let repo: RepoEntry
+    let db: WorkspaceDB
+    @State private var name = ""
+    @State private var repoURL = ""
+    @State private var localPath = ""
+    @State private var showAddBranch = false
+    @State private var editingBranch: RepoBranch?
+
+    var branches: [RepoBranch] { db.repoBranches.filter { $0.repoID == repo.id } }
+
+    var body: some View {
+        EditDetailScaffold(heading: repo.name) {
+            var updated = repo
+            updated.name = name; updated.url = repoURL; updated.localPath = localPath
+            db.updateRepo(updated)
+        } content: {
+            MGField(label: "Name", text: $name)
+            MGField(label: "Git URL", text: $repoURL)
+            MGField(label: "Local path", text: $localPath)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("BRANCHES")
+                        .font(.system(size: 10, weight: .medium)).tracking(0.8)
+                        .foregroundStyle(Color.mgMuted)
+                    Spacer()
+                    Button { showAddBranch = true } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Color.mgAccent)
+                            .frame(width: 22, height: 22)
+                            .background(Color.mgAccent.opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                }
+                if branches.isEmpty {
+                    Text("No branches — press + to add")
+                        .font(.system(size: 12)).foregroundStyle(Color.mgMuted)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(branches) { branch in
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(branch.name)
+                                        .font(.system(size: 12, design: .monospaced))
+                                        .foregroundStyle(Color.mgLabel).lineLimit(1)
+                                    if !branch.description.isEmpty {
+                                        Text(branch.description.components(separatedBy: "\n").first ?? "")
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(Color.mgMuted).lineLimit(1)
+                                    }
+                                }
+                                Spacer()
+                                Button { editingBranch = branch } label: {
+                                    Image(systemName: "pencil")
+                                        .font(.system(size: 9)).foregroundStyle(Color.mgMuted)
+                                        .frame(width: 20, height: 20)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Edit")
+                                Button { db.deleteRepoBranch(id: branch.id) } label: {
+                                    Image(systemName: "trash")
+                                        .font(.system(size: 9)).foregroundStyle(Color.red.opacity(0.6))
+                                        .frame(width: 20, height: 20)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Delete")
+                            }
+                            .padding(.horizontal, 10).padding(.vertical, 7)
+                            .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
+                        }
+                    }
+                    .background(Color.mgSurface)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+                }
+            }
+        }
+        .sheet(isPresented: $showAddBranch) {
+            RepoBranchSheet(repoID: repo.id, existing: nil, db: db, isPresented: $showAddBranch)
+        }
+        .sheet(item: $editingBranch) { branch in
+            RepoBranchSheet(repoID: repo.id, existing: branch, db: db,
+                            isPresented: Binding(get: { editingBranch != nil }, set: { if !$0 { editingBranch = nil } }))
+        }
+        .onAppear { load() }
+        .onChange(of: repo.id) { load() }
+    }
+
+    private func load() {
+        name = repo.name; repoURL = repo.url; localPath = repo.localPath
+    }
+}
+
+private struct RepoBranchSheet: View {
+    let repoID: String
+    let existing: RepoBranch?
+    let db: WorkspaceDB
+    @Binding var isPresented: Bool
+    @State private var branchName = ""
+    @State private var desc = ""
+
+    var isEditing: Bool { existing != nil }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text(isEditing ? "Edit Branch" : "Add Branch")
+                .font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.mgLabel)
+
+            MGField(label: "Branch name", text: $branchName)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("DESCRIPTION (MARKDOWN)")
+                    .font(.system(size: 10, weight: .medium)).tracking(0.8)
+                    .foregroundStyle(Color.mgMuted)
+                TextEditor(text: $desc)
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(Color.mgLabel)
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .frame(minHeight: 160)
+                    .background(Color.mgSurface)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { isPresented = false }
+                    .buttonStyle(.plain).foregroundStyle(Color.mgMuted)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                Button(isEditing ? "Save" : "Add") {
+                    if let b = existing {
+                        var updated = b; updated.name = branchName; updated.description = desc
+                        db.updateRepoBranch(updated)
+                    } else {
+                        db.addRepoBranch(repoID: repoID, name: branchName, description: desc)
+                    }
+                    isPresented = false
+                }
+                .buttonStyle(.plain).foregroundStyle(.black)
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(branchName.isEmpty ? Color.mgMuted : Color.mgAccent)
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .disabled(branchName.isEmpty)
+            }
+        }
+        .padding(28).frame(width: 420).background(Color.mgBg)
+        .onAppear {
+            branchName = existing?.name ?? ""
+            desc = existing?.description ?? ""
+        }
+    }
+}
+
 // MARK: - Issues panel
+
+private let issueStatuses = ["open", "in_progress", "closed"]
 
 private struct IssuesPanel: View {
     @Environment(WorkspaceDB.self) var db
@@ -866,21 +1331,23 @@ private struct IssuesPanel: View {
     @State private var selectedFeature: Feature?
 
     var body: some View {
-        EntityList(
+        SplitPanel(
             title: "Issues",
             items: db.issues,
+            emptyHint: "No issues — press +",
             onDelete: { db.deleteIssue(id: $0.id) }
         ) { issue in
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     RowPrimary(text: issue.title)
                     let ctx = contextLabel(issue)
                     if !ctx.isEmpty { RowSecondary(text: ctx) }
                 }
-                .padding(.vertical, 8)
                 Spacer()
                 StatusBadge(status: issue.status)
             }
+        } detail: { issue in
+            IssueDetailView(issue: issue, db: db)
         } addForm: { isPresented in
             AddSheet(title: "New Issue", isPresented: isPresented) {
                 db.addIssue(title: newTitle, body: newBody, orgID: selectedOrg?.id ?? "", featureID: selectedFeature?.id ?? "")
@@ -896,15 +1363,63 @@ private struct IssuesPanel: View {
 
     private func contextLabel(_ issue: Issue) -> String {
         var parts: [String] = []
-        if !issue.orgID.isEmpty,
-           let org = db.organizations.first(where: { $0.id == issue.orgID }) {
-            parts.append(org.name)
-        }
-        if !issue.featureID.isEmpty,
-           let f = db.features.first(where: { $0.id == issue.featureID }) {
-            parts.append(f.name)
-        }
+        if !issue.orgID.isEmpty, let org = db.organizations.first(where: { $0.id == issue.orgID }) { parts.append(org.name) }
+        if !issue.featureID.isEmpty, let f = db.features.first(where: { $0.id == issue.featureID }) { parts.append(f.name) }
         return parts.joined(separator: " · ")
+    }
+}
+
+private struct IssueDetailView: View {
+    let issue: Issue
+    let db: WorkspaceDB
+    @State private var title = ""
+    @State private var issueBody = ""
+    @State private var status = "open"
+    @State private var selectedOrg: Organization?
+    @State private var selectedFeature: Feature?
+
+    var body: some View {
+        EditDetailScaffold(heading: issue.title) {
+            var updated = issue
+            updated.title = title; updated.body = issueBody; updated.status = status
+            updated.orgID = selectedOrg?.id ?? ""; updated.featureID = selectedFeature?.id ?? ""
+            db.updateIssue(updated)
+        } content: {
+            MGField(label: "Title", text: $title)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("STATUS")
+                    .font(.system(size: 11, weight: .medium)).tracking(0.8)
+                    .foregroundStyle(Color.mgMuted)
+                Picker("", selection: $status) {
+                    ForEach(issueStatuses, id: \.self) { Text($0).tag($0) }
+                }
+                .pickerStyle(.segmented)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("BODY")
+                    .font(.system(size: 11, weight: .medium)).tracking(0.8)
+                    .foregroundStyle(Color.mgMuted)
+                TextEditor(text: $issueBody)
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(Color.mgLabel)
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .frame(minHeight: 100)
+                    .background(Color.mgSurface)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            MGPicker(label: "Organization (optional)", items: db.organizations, displayName: \.name, selected: $selectedOrg)
+            MGPicker(label: "Feature (optional)", items: db.features, displayName: \.name, selected: $selectedFeature)
+        }
+        .onAppear { load() }
+        .onChange(of: issue.id) { load() }
+    }
+
+    private func load() {
+        title = issue.title; issueBody = issue.body; status = issue.status
+        selectedOrg = db.organizations.first { $0.id == issue.orgID }
+        selectedFeature = db.features.first { $0.id == issue.featureID }
     }
 }
 
