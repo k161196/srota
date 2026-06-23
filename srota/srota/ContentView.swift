@@ -2,6 +2,7 @@ import Combine
 import SwiftUI
 import AppKit
 import GhosttyTerminal
+import UniformTypeIdentifiers
 
 // MARK: - Helpers
 
@@ -388,10 +389,14 @@ final class TerminalManager: ObservableObject {
         allWorkspaces.first { $0.id == selectedWorkspaceID }
     }
 
-    func addWorkspace(colorScheme: ColorScheme) {
+    func addWorkspace(colorScheme: ColorScheme, inFolder folderID: UUID? = nil) {
         let ws = Workspace(name: "Workspace \(allWorkspaces.count + 1)")
         ws.addTab(colorScheme: colorScheme)
-        workspaces.append(ws)
+        if let folderID, let folder = folders.first(where: { $0.id == folderID }) {
+            folder.workspaces.append(ws)
+        } else {
+            workspaces.append(ws)
+        }
         selectedWorkspaceID = ws.id
     }
 
@@ -533,6 +538,7 @@ private struct SidebarView: View {
     @ObservedObject var manager: TerminalManager
     let onAdd: () -> Void
     @State private var newFolderID: UUID? = nil
+    @State private var isDragTargetUnfiled = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -568,7 +574,7 @@ private struct SidebarView: View {
                 Text("WORKSPACES")
                     .font(.system(size: 11, weight: .medium))
                     .tracking(0.8)
-                    .foregroundStyle(Color.sectionHeader)
+                    .foregroundStyle(isDragTargetUnfiled ? Color.accentOrange : Color.sectionHeader)
                 Spacer()
                 Text("\(manager.allWorkspaces.count)")
                     .font(.system(size: 11, weight: .regular).monospacedDigit())
@@ -576,6 +582,10 @@ private struct SidebarView: View {
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 5)
+            .background(isDragTargetUnfiled ? Color.accentOrange.opacity(0.08) : Color.clear)
+            .onDrop(of: [UTType.plainText], isTargeted: $isDragTargetUnfiled) { providers in
+                dropWorkspace(providers, toFolder: nil, manager: manager)
+            }
 
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(spacing: 0) {
@@ -612,9 +622,11 @@ private struct FolderRow: View {
     let startRenaming: Bool
     let onRenameHandled: () -> Void
 
-    @State private var isHovered   = false
-    @State private var isRenaming  = false
-    @State private var editText    = ""
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var isHovered    = false
+    @State private var isDragTarget = false
+    @State private var isRenaming   = false
+    @State private var editText     = ""
     @FocusState private var fieldFocused: Bool
 
     var body: some View {
@@ -627,9 +639,9 @@ private struct FolderRow: View {
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(Color.sectionHeader)
                         .frame(width: 10)
-                    Image(systemName: "folder")
+                    Image(systemName: isDragTarget ? "folder.fill" : "folder")
                         .font(.system(size: 10))
-                        .foregroundStyle(Color.labelSecondary)
+                        .foregroundStyle(isDragTarget ? Color.accentOrange : Color.labelSecondary)
                     if isRenaming {
                         TextField("", text: $editText)
                             .font(.system(size: 13))
@@ -641,23 +653,47 @@ private struct FolderRow: View {
                     } else {
                         Text(folder.name)
                             .font(.system(size: 13))
-                            .foregroundStyle(Color.labelSecondary)
+                            .foregroundStyle(isDragTarget ? Color.accentOrange : Color.labelSecondary)
                             .lineLimit(1)
                     }
                     Spacer(minLength: 4)
-                    Text("\(folder.workspaces.count)")
-                        .font(.system(size: 10).monospacedDigit())
-                        .foregroundStyle(Color.sectionHeader.opacity(0.7))
+                    if isHovered && !isRenaming {
+                        Button {
+                            manager.addWorkspace(colorScheme: colorScheme, inFolder: folder.id)
+                            folder.isExpanded = true
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Color.labelSecondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Add workspace to folder")
+                    } else {
+                        Text("\(folder.workspaces.count)")
+                            .font(.system(size: 10).monospacedDigit())
+                            .foregroundStyle(Color.sectionHeader.opacity(0.7))
+                    }
                 }
                 .padding(.leading, 10)
                 .padding(.trailing, 10)
                 .padding(.vertical, 7)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isHovered ? Color.rowHover : Color.clear)
+            .background(
+                isDragTarget ? Color.accentOrange.opacity(0.12) :
+                isHovered    ? Color.rowHover : Color.clear
+            )
+            .overlay(
+                isDragTarget ? RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color.accentOrange.opacity(0.5), lineWidth: 1)
+                    .padding(.horizontal, 4) : nil
+            )
             .contentShape(Rectangle())
             .onTapGesture { if !isRenaming { folder.isExpanded.toggle() } }
             .onHover { isHovered = $0 }
+            .onDrop(of: [UTType.plainText], isTargeted: $isDragTarget) { providers in
+                dropWorkspace(providers, toFolder: folder.id, manager: manager)
+            }
             .contextMenu {
                 Button("Rename") { beginRename() }
                 Divider()
@@ -695,6 +731,15 @@ private struct FolderRow: View {
         if !t.isEmpty { folder.name = t }
         isRenaming = false
     }
+}
+
+private func dropWorkspace(_ providers: [NSItemProvider], toFolder folderID: UUID?, manager: TerminalManager) -> Bool {
+    guard let provider = providers.first else { return false }
+    provider.loadObject(ofClass: NSString.self) { obj, _ in
+        guard let str = obj as? String, let wsID = UUID(uuidString: str) else { return }
+        DispatchQueue.main.async { manager.moveWorkspace(id: wsID, toFolder: folderID) }
+    }
+    return true
 }
 
 private struct WorkspaceRow: View {
@@ -778,6 +823,7 @@ private struct WorkspaceRow: View {
         .contentShape(Rectangle())
         .onTapGesture { if !isRenaming { onSelect() } }
         .onHover { isHovered = $0 }
+        .onDrag { NSItemProvider(object: workspace.id.uuidString as NSString) }
         .contextMenu {
             Button("Rename") { startRename() }
 
