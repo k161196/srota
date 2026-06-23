@@ -13,8 +13,24 @@ private func resolveCWD(_ raw: String?) -> String? {
     return raw
 }
 
-private func makeLauncherConfig() -> TerminalConfiguration {
-    let launcher = NSHomeDirectory() + "/.srota/zsh-launcher.sh"
+private func makePaneLauncher(tabID: String, paneID: String) -> String {
+    let dir = NSHomeDirectory() + "/.srota/launchers"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    let path = dir + "/\(tabID)-\(paneID).sh"
+    let script = """
+#!/bin/sh
+export SROTA_TAB_ID="\(tabID)"
+export SROTA_PANE_ID="\(paneID)"
+export ZDOTDIR="$HOME/.srota"
+exec /bin/zsh -i "$@"
+"""
+    try? script.write(toFile: path, atomically: true, encoding: .utf8)
+    try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+    return path
+}
+
+private func makeLauncherConfig(tabID: String, paneID: String) -> TerminalConfiguration {
+    let launcher = makePaneLauncher(tabID: tabID, paneID: paneID)
     return TerminalConfiguration(configure: { b in b.withCustom("command", launcher) })
 }
 
@@ -94,11 +110,50 @@ struct PaneLayout {
     var h: CGFloat = 1
 }
 
+enum AgentRunStatus: String, Codable {
+    case working
+    case waitingForResponse
+    case completed
+
+    init?(event: String) {
+        switch event {
+        case "Start", "SessionStart", "Attached", "PreToolUse", "PostToolUse":
+            self = .working
+        case "PermissionRequest":
+            self = .waitingForResponse
+        case "Stop", "SessionEnd", "Detached":
+            self = .completed
+        default:
+            return nil
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .working: return "Working"
+        case .waitingForResponse: return "Waiting for response"
+        case .completed: return "Completed"
+        }
+    }
+}
+
+struct AgentHookEvent: Codable {
+    var event: String
+    var cwd: String
+    var agent: String
+    var tabID: String?
+    var paneID: String?
+    var summary: String?
+    var timestamp: Double
+}
+
 final class PaneEntry: Identifiable {
     let id = UUID()
+    let hookPaneID: String
     let viewState: TerminalViewState
     var initialCWD: String?
-    init(viewState: TerminalViewState, initialCWD: String? = nil) {
+    init(hookPaneID: String, viewState: TerminalViewState, initialCWD: String? = nil) {
+        self.hookPaneID = hookPaneID
         self.viewState  = viewState
         self.initialCWD = initialCWD
     }
@@ -118,6 +173,11 @@ final class TerminalTab: Identifiable, ObservableObject {
     @Published var primaryPaneName: String = ""
     @Published var paneNames:    [UUID: String]     = [:]
     @Published var primaryLayout = PaneLayout()
+    @Published var agentStatus: AgentRunStatus? = nil
+    @Published var agentStatusUpdatedAt: Double = 0
+    @Published var agentSummary: String = ""
+    let hookTabID = UUID().uuidString
+    let primaryPaneHookID = UUID().uuidString
     @Published var focusedPaneID: UUID? = nil {
         didSet {
             if customName.isEmpty {
@@ -135,7 +195,9 @@ final class TerminalTab: Identifiable, ObservableObject {
 
     init(colorScheme: ColorScheme, workingDirectory: String? = nil) {
         self.initialWorkingDirectory = workingDirectory
-        let state = TerminalViewState(terminalConfiguration: makeLauncherConfig())
+        let state = TerminalViewState(
+            terminalConfiguration: makeLauncherConfig(tabID: hookTabID, paneID: primaryPaneHookID)
+        )
         state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: workingDirectory)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
         viewState = state
@@ -159,6 +221,21 @@ final class TerminalTab: Identifiable, ObservableObject {
             return primaryPaneName
         }
         return titleFromCWD
+    }
+
+    func applyAgentStatus(_ status: AgentRunStatus, summary: String?, at timestamp: Double, paneHookID: String?) -> Bool {
+        if let paneHookID, paneHookID != primaryPaneHookID,
+           !secondaryPanes.contains(where: { $0.hookPaneID == paneHookID }) {
+            return false
+        }
+        agentStatus = status
+        if let summary, !summary.isEmpty, !summary.contains("<") { agentSummary = summary }
+        agentStatusUpdatedAt = timestamp
+        return true
+    }
+
+    var statusPath: String? {
+        resolveCWD(focusedViewState.workingDirectory) ?? initialWorkingDirectory
     }
 
     var focusedViewState: TerminalViewState {
@@ -283,12 +360,15 @@ final class TerminalTab: Identifiable, ObservableObject {
     }
 
     /// Restore a saved secondary pane at its last known CWD.
-    func restorePane(record: PaneRecord, colorScheme: ColorScheme) {
-        let cwd = record.initialCWD.isEmpty ? nil : record.initialCWD
-        let state = TerminalViewState(terminalConfiguration: makeLauncherConfig())
-        state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: cwd)
-        state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
-        let entry = PaneEntry(viewState: state, initialCWD: cwd)
+func restorePane(record: PaneRecord, colorScheme: ColorScheme) {
+ let cwd = record.initialCWD.isEmpty ? nil : record.initialCWD
+ let paneHookID = UUID().uuidString
+ let state = TerminalViewState(
+ terminalConfiguration: makeLauncherConfig(tabID: hookTabID, paneID: paneHookID)
+ )
+ state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: cwd)
+ state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
+ let entry = PaneEntry(hookPaneID: paneHookID, viewState: state, initialCWD: cwd)
         state.onClose = { [weak self, weak entry] _ in
             guard let self, let entry else { return }
             self.removePane(id: entry.id)
@@ -300,11 +380,14 @@ final class TerminalTab: Identifiable, ObservableObject {
         focusedPaneID = entry.id
     }
 
-    private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirectory: String? = nil) {
-        let state = TerminalViewState(terminalConfiguration: makeLauncherConfig())
-        state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: workingDirectory)
-        state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
-        let entry = PaneEntry(viewState: state, initialCWD: workingDirectory)
+private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirectory: String? = nil) {
+ let paneHookID = UUID().uuidString
+ let state = TerminalViewState(
+ terminalConfiguration: makeLauncherConfig(tabID: hookTabID, paneID: paneHookID)
+ )
+ state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: workingDirectory)
+ state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
+ let entry = PaneEntry(hookPaneID: paneHookID, viewState: state, initialCWD: workingDirectory)
         state.onClose = { [weak self, weak entry] _ in
             guard let self, let entry else { return }
             self.removePane(id: entry.id)
@@ -352,9 +435,18 @@ final class TerminalTab: Identifiable, ObservableObject {
 final class Workspace: Identifiable, ObservableObject {
     let id: UUID
     @Published var name: String
-    @Published var tabs: [TerminalTab] = []
+    @Published var tabs: [TerminalTab] = [] {
+        didSet { rebindTabSinks() }
+    }
     @Published var selectedTabID: UUID?
     private var lastColorScheme: ColorScheme = .dark
+    private var tabSinks: [AnyCancellable] = []
+
+    private func rebindTabSinks() {
+        tabSinks = tabs.map { tab in
+            tab.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        }
+    }
 
     init(id: UUID = UUID(), name: String) {
         self.id   = id
@@ -362,6 +454,10 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     var selectedTab: TerminalTab? { tabs.first { $0.id == selectedTabID } }
+
+    var displayStatus: AgentRunStatus? {
+        tabs.max(by: { $0.agentStatusUpdatedAt < $1.agentStatusUpdatedAt })?.agentStatus
+    }
 
     var currentWorkingDirectory: String? {
         resolveCWD(selectedTab?.focusedViewState.workingDirectory)
@@ -569,6 +665,7 @@ struct ContentView: View {
     @State private var managementTab: ManagementTab = .workspaces
     @State private var restoredSessions = false
     @State private var showSettings = false
+    @State private var agentEventTask: Task<Void, Never>? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -699,6 +796,13 @@ struct ContentView: View {
                 saveLayout()
             }
         }
+        .onAppear {
+            startAgentEventMonitor()
+        }
+        .onDisappear {
+            agentEventTask?.cancel()
+            agentEventTask = nil
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             saveLayout()
         }
@@ -809,6 +913,61 @@ struct ContentView: View {
             manager.selectedWorkspaceID = manager.allWorkspaces.first?.id
         }
     }
+    private func startAgentEventMonitor() {
+        guard agentEventTask == nil else { return }
+        agentEventTask = Task {
+            let url = URL(fileURLWithPath: NSHomeDirectory() + "/.srota/agent-events.jsonl")
+            let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            var processedCount = existing.split(separator: "\n", omittingEmptySubsequences: true).count
+            while !Task.isCancelled {
+                if let text = try? String(contentsOf: url, encoding: .utf8) {
+                    let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+                    if lines.count > processedCount {
+                        for line in lines[processedCount...] {
+                            guard let data = line.data(using: .utf8),
+                                  let event = try? JSONDecoder().decode(AgentHookEvent.self, from: data) else { continue }
+                            applyAgentHookEvent(event)
+                        }
+                        processedCount = lines.count
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
+    }
+
+private func applyAgentHookEvent(_ event: AgentHookEvent) {
+ guard let status = AgentRunStatus(event: event.event) else { return }
+ guard let tab = bestMatchingTab(for: event) else { return }
+ guard tab.applyAgentStatus(status, summary: event.summary, at: event.timestamp, paneHookID: event.paneID) else { return }
+}
+
+private func bestMatchingTab(for event: AgentHookEvent) -> TerminalTab? {
+ if let tabID = event.tabID,
+    let matched = manager.allWorkspaces.flatMap(\.tabs).first(where: { $0.hookTabID == tabID }) {
+ return matched
+ }
+ let target = URL(fileURLWithPath: event.cwd).standardizedFileURL.path
+ return manager.allWorkspaces
+ .flatMap(\.tabs)
+            .compactMap { tab -> (TerminalTab, Int)? in
+                guard let path = tab.statusPath else { return nil }
+                let base = URL(fileURLWithPath: path).standardizedFileURL.path
+                let score: Int
+                if target == base {
+                    score = Int.max
+                } else if target.hasPrefix(base + "/") {
+                    score = base.count
+                } else if base.hasPrefix(target + "/") {
+                    score = target.count
+                } else {
+                    return nil
+                }
+                return (tab, score)
+            }
+            .max(by: { $0.1 < $1.1 })?
+            .0
+    }
 }
 
 // MARK: - Sidebar
@@ -819,8 +978,36 @@ private extension Color {
     static let rowHover       = Color(red: 1, green: 1, blue: 1).opacity(0.035)
     static let accentRail     = Color(red: 1.0, green: 0.45, blue: 0.15)
     static let dotRunning     = Color(red: 0.24, green: 0.84, blue: 0.55)
+    static let dotWaiting     = Color(red: 0.96, green: 0.74, blue: 0.24)
+    static let dotCompleted   = Color(red: 0.24, green: 0.84, blue: 0.55)
     static let labelSecondary = Color(red: 0.92, green: 0.92, blue: 0.93).opacity(0.45)
     static let sectionHeader  = Color(red: 0.92, green: 0.92, blue: 0.93).opacity(0.28)
+}
+
+private extension AgentRunStatus {
+    var color: Color {
+        switch self {
+        case .working: return .accentOrange
+        case .waitingForResponse: return .dotWaiting
+        case .completed: return .dotCompleted
+        }
+    }
+}
+
+private struct StatusBadge: View {
+    let status: AgentRunStatus
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(status.color)
+                .frame(width: 6, height: 6)
+            Text(status.label)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(status.color)
+                .lineLimit(1)
+        }
+    }
 }
 
 private struct SidebarView: View {
@@ -879,7 +1066,7 @@ private struct SidebarView: View {
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(spacing: 0) {
                     ForEach(manager.workspaces) { ws in
-                        WorkspaceRow(
+WorkspaceSidebarItem(
                             workspace: ws,
                             manager: manager,
                             isSelected: manager.selectedWorkspaceID == ws.id,
@@ -1001,7 +1188,7 @@ private struct FolderRow: View {
 
             if folder.isExpanded {
                 ForEach(folder.workspaces) { ws in
-                    WorkspaceRow(
+                    WorkspaceSidebarItem(
                         workspace: ws,
                         manager: manager,
                         isSelected: manager.selectedWorkspaceID == ws.id,
@@ -1046,6 +1233,8 @@ private struct WorkspaceRow: View {
     let onSelect: () -> Void
     let onClose: () -> Void
     var indented: Bool = false
+    var isExpanded: Bool? = nil
+    var onToggleExpand: (() -> Void)? = nil
 
     @State private var isHovered = false
     @State private var isRenaming = false
@@ -1102,7 +1291,14 @@ private struct WorkspaceRow: View {
 
                 Spacer(minLength: 4)
 
-                if isHovered && !isRenaming {
+                if let expanded = isExpanded, let toggle = onToggleExpand {
+                    Button(action: toggle) {
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(Color.sectionHeader)
+                    }
+                    .buttonStyle(.plain)
+                } else if isHovered && !isRenaming {
                     Button(action: onClose) {
                         Image(systemName: "xmark")
                             .font(.system(size: 9, weight: .medium))
@@ -1140,6 +1336,82 @@ private struct WorkspaceRow: View {
 
             Divider()
             Button("Close Workspace", role: .destructive) { onClose() }
+        }
+    }
+}
+
+private struct WorkspaceRunsList: View {
+    @ObservedObject var workspace: Workspace
+    let indented: Bool
+
+    var runTabs: [TerminalTab] {
+        workspace.tabs
+            .filter { $0.agentStatus != nil }
+            .sorted { $0.agentStatusUpdatedAt > $1.agentStatusUpdatedAt }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(runTabs) { tab in
+                HStack(spacing: 8) {
+                    Image(systemName: "terminal")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Color.labelSecondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tab.displayName)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Color.labelSecondary)
+                            .lineLimit(1)
+                        if let status = tab.agentStatus {
+                            StatusBadge(status: status)
+                        }
+                        if !tab.agentSummary.isEmpty {
+                            Text(tab.agentSummary)
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color.sectionHeader)
+                                .lineLimit(2)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, indented ? 48 : 34)
+                .padding(.trailing, 10)
+                .padding(.bottom, 8)
+            }
+        }
+    }
+}
+
+private struct WorkspaceSidebarItem: View {
+    @ObservedObject var workspace: Workspace
+    @ObservedObject var manager: TerminalManager
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+    var indented: Bool = false
+
+    @State private var isExpanded = true
+
+    var hasRuns: Bool {
+        workspace.tabs.contains { $0.agentStatus != nil }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            WorkspaceRow(
+                workspace: workspace,
+                manager: manager,
+                isSelected: isSelected,
+                onSelect: onSelect,
+                onClose: onClose,
+                indented: indented,
+                isExpanded: hasRuns ? isExpanded : nil,
+                onToggleExpand: hasRuns ? { isExpanded.toggle() } : nil
+            )
+            if hasRuns && isExpanded {
+                WorkspaceRunsList(workspace: workspace, indented: indented)
+                    .background(isSelected ? Color.rowSelected : Color.clear)
+            }
         }
     }
 }
@@ -1233,39 +1505,45 @@ private struct TabChip: View {
     @State private var editText    = ""
     @FocusState private var fieldFocused: Bool
 
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "terminal")
-                .font(.system(size: 10.5))
-                .foregroundStyle(isActive ? Color.accentOrange : Color.labelMuted)
+ var body: some View {
+ HStack(spacing: 6) {
+ Image(systemName: "terminal")
+ .font(.system(size: 10.5))
+ .foregroundStyle(isActive ? Color.accentOrange : Color.labelMuted)
 
-            if isRenaming {
-                TextField("", text: $editText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color.labelPrimary)
-                    .focused($fieldFocused)
-                    .onSubmit { commit() }
-                    .onExitCommand { isRenaming = false }
-                    .onAppear { DispatchQueue.main.async { fieldFocused = true } }
-            } else {
-                Text(tab.displayName)
-                    .font(.system(size: 12, weight: isActive ? .medium : .regular))
-                    .foregroundStyle(isActive ? Color.labelPrimary : Color.labelMuted)
-                    .lineLimit(1)
-            }
+ if isRenaming {
+ TextField("", text: $editText)
+ .textFieldStyle(.plain)
+ .font(.system(size: 12))
+ .foregroundStyle(Color.labelPrimary)
+ .focused($fieldFocused)
+ .onSubmit { commit() }
+ .onExitCommand { isRenaming = false }
+ .onAppear { DispatchQueue.main.async { fieldFocused = true } }
+ } else {
+ VStack(alignment: .leading, spacing: 1) {
+ Text(tab.displayName)
+ .font(.system(size: 12, weight: isActive ? .medium : .regular))
+ .foregroundStyle(isActive ? Color.labelPrimary : Color.labelMuted)
+ .lineLimit(1)
+ if let status = tab.agentStatus {
+ StatusBadge(status: status)
+ }
+ }
+ }
 
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 8.5, weight: .semibold))
-                    .foregroundStyle(Color.labelMuted)
-                    .frame(width: 14, height: 14)
+ Spacer(minLength: 0)
+ Button(action: onClose) {
+ Image(systemName: "xmark")
+ .font(.system(size: 8.5, weight: .semibold))
+ .foregroundStyle(Color.labelMuted)
+ .frame(width: 14, height: 14)
             }
-            .buttonStyle(.plain)
-            .opacity(isHovered || isActive ? 1 : 0)
-        }
-        .padding(.horizontal, 10)
-        .frame(height: 28)
+ .buttonStyle(.plain)
+ .opacity(isHovered || isActive ? 1 : 0)
+ }
+ .padding(.horizontal, 10)
+ .frame(height: tab.agentStatus == nil ? 28 : 36)
         .background(
             RoundedRectangle(cornerRadius: 5)
                 .fill(isActive ? Color.tabActiveBg : (isHovered ? Color.tabHoverBg : Color.clear))
