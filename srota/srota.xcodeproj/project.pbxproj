@@ -103,11 +103,11 @@
 			);
 			mainGroup = 9F4EF2F32FE98A7E00023A48;
 			minimizedProjectReferenceProxies = 1;
-			preferredProjectObjectVersion = 77;
-			productRefGroup = 9F4EF2FD2FE98A7E00023A48 /* Products */;
 			packageReferences = (
 				77461C3F51E24D16BFD3951E /* XCRemoteSwiftPackageReference "libghostty-spm" */,
 			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 9F4EF2FD2FE98A7E00023A48 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -135,30 +135,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		77461C3F51E24D16BFD3951E /* XCRemoteSwiftPackageReference "libghostty-spm" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/Lakr233/libghostty-spm";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.0.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		F94E58E48C6E47D0A7F2ACD8 /* GhosttyTerminal */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 77461C3F51E24D16BFD3951E /* XCRemoteSwiftPackageReference "libghostty-spm" */;
-			productName = GhosttyTerminal;
-		};
-		82B3BACE48F643C7BE78BC55 /* ShellCraftKit */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 77461C3F51E24D16BFD3951E /* XCRemoteSwiftPackageReference "libghostty-spm" */;
-			productName = ShellCraftKit;
-		};
-/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		9F4EF3072FE98A7E00023A48 /* Debug */ = {
@@ -301,6 +277,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = "-lsqlite3";
 				PRODUCT_BUNDLE_IDENTIFIER = com.kiran.srota;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -333,6 +310,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = "-lsqlite3";
 				PRODUCT_BUNDLE_IDENTIFIER = com.kiran.srota;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -367,6 +345,30 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		77461C3F51E24D16BFD3951E /* XCRemoteSwiftPackageReference "libghostty-spm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Lakr233/libghostty-spm";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		82B3BACE48F643C7BE78BC55 /* ShellCraftKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 77461C3F51E24D16BFD3951E /* XCRemoteSwiftPackageReference "libghostty-spm" */;
+			productName = ShellCraftKit;
+		};
+		F94E58E48C6E47D0A7F2ACD8 /* GhosttyTerminal */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 77461C3F51E24D16BFD3951E /* XCRemoteSwiftPackageReference "libghostty-spm" */;
+			productName = GhosttyTerminal;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 9F4EF2F42FE98A7E00023A48 /* Project object */;
 }

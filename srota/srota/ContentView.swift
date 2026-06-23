@@ -18,6 +18,11 @@ private func makeLauncherConfig() -> TerminalConfiguration {
     return TerminalConfiguration(configure: { b in b.withCustom("command", launcher) })
 }
 
+private func makeTmuxConfig(sessionID: String, sessionName: String, cwd: String?) -> TerminalConfiguration {
+    let launcher = TmuxManager.shared.launcherScript(sessionID: sessionID, sessionName: sessionName, cwd: cwd)
+    return TerminalConfiguration(configure: { b in b.withCustom("command", launcher) })
+}
+
 /// Smart tab/pane title from CWD:
 ///   - git repo  → "reponame/branch"
 ///   - otherwise → "…/parent/dir"
@@ -97,7 +102,15 @@ struct PaneLayout {
 final class PaneEntry: Identifiable {
     let id = UUID()
     let viewState: TerminalViewState
-    init(viewState: TerminalViewState) { self.viewState = viewState }
+    var tmuxID: String?
+    var tmuxName: String?
+    var initialCWD: String?
+    init(viewState: TerminalViewState, tmuxID: String? = nil, tmuxName: String? = nil, initialCWD: String? = nil) {
+        self.viewState = viewState
+        self.tmuxID    = tmuxID
+        self.tmuxName  = tmuxName
+        self.initialCWD = initialCWD
+    }
 }
 
 // Each pane owns a fractional rect (0–1) of the content area.
@@ -126,9 +139,22 @@ final class TerminalTab: Identifiable, ObservableObject {
     @Published private(set) var titleFromCWD: String = "Terminal"
     private var titleSink: AnyCancellable?
     var closeTabCallback: (() -> Void)?
+    let tmuxID: String?
+    let tmuxName: String?
+    let initialWorkingDirectory: String?
+    private var paneCount = 0   // for naming split sessions
 
-    init(colorScheme: ColorScheme, workingDirectory: String? = nil) {
-        let state = TerminalViewState(terminalConfiguration: makeLauncherConfig())
+    init(colorScheme: ColorScheme, workingDirectory: String? = nil, tmuxID: String? = nil, tmuxName: String? = nil) {
+        self.tmuxID   = tmuxID
+        self.tmuxName = tmuxName
+        self.initialWorkingDirectory = workingDirectory
+        let config: TerminalConfiguration
+        if let id = tmuxID, let name = tmuxName, TmuxManager.shared.isAvailable {
+            config = makeTmuxConfig(sessionID: id, sessionName: name, cwd: workingDirectory)
+        } else {
+            config = makeLauncherConfig()
+        }
+        let state = TerminalViewState(terminalConfiguration: config)
         state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: workingDirectory)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
         viewState = state
@@ -162,13 +188,28 @@ final class TerminalTab: Identifiable, ObservableObject {
         return viewState
     }
 
+    var focusedTmuxID: String? {
+        if let fid = focusedPaneID {
+            return secondaryPanes.first(where: { $0.id == fid })?.tmuxID
+        }
+        return tmuxID
+    }
+
+    private func splitCWD() -> String? {
+        // tmux pane_current_path is authoritative — OSC 7 is intercepted by tmux, never reaches Ghostty
+        if let sid = focusedTmuxID {
+            return TmuxManager.shared.currentPath(sessionID: sid)
+        }
+        return resolveCWD(focusedViewState.workingDirectory) ?? initialWorkingDirectory
+    }
+
     func splitRight(colorScheme: ColorScheme) {
         guard let fl = focusedLayout else { return }
         let half = fl.w / 2
         setFocusedLayout(PaneLayout(x: fl.x, y: fl.y, w: half, h: fl.h))
         addPane(colorScheme: colorScheme,
                 layout: PaneLayout(x: fl.x + half, y: fl.y, w: half, h: fl.h),
-                workingDirectory: resolveCWD(focusedViewState.workingDirectory))
+                workingDirectory: splitCWD())
     }
 
     func splitBottom(colorScheme: ColorScheme) {
@@ -177,7 +218,7 @@ final class TerminalTab: Identifiable, ObservableObject {
         setFocusedLayout(PaneLayout(x: fl.x, y: fl.y, w: fl.w, h: half))
         addPane(colorScheme: colorScheme,
                 layout: PaneLayout(x: fl.x, y: fl.y + half, w: fl.w, h: half),
-                workingDirectory: resolveCWD(focusedViewState.workingDirectory))
+                workingDirectory: splitCWD())
     }
 
     func rename(ref: PaneRef, to name: String) {
@@ -188,6 +229,9 @@ final class TerminalTab: Identifiable, ObservableObject {
     }
 
     func removePane(id: UUID) {
+        if let pane = secondaryPanes.first(where: { $0.id == id }), let sid = pane.tmuxID {
+            TmuxManager.shared.killSession(id: sid)
+        }
         expandNeighbor(of: .secondary(id))
         secondaryPanes.removeAll { $0.id == id }
         layouts.removeValue(forKey: id)
@@ -271,11 +315,44 @@ final class TerminalTab: Identifiable, ObservableObject {
         else { primaryLayout = l }
     }
 
+    /// Restore a saved secondary pane — reuses existing tmux session, no new session created.
+    func restorePane(record: PaneRecord, colorScheme: ColorScheme) {
+        let cwd = record.initialCWD.isEmpty ? nil : record.initialCWD
+        let config: TerminalConfiguration
+        if let id = record.tmuxID, let name = record.tmuxName {
+            config = makeTmuxConfig(sessionID: id, sessionName: name, cwd: cwd)
+        } else { config = makeLauncherConfig() }
+        let state = TerminalViewState(terminalConfiguration: config)
+        state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: cwd)
+        state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
+        let entry = PaneEntry(viewState: state, tmuxID: record.tmuxID, tmuxName: record.tmuxName, initialCWD: cwd)
+        state.onClose = { [weak self, weak entry] _ in
+            guard let self, let entry else { return }
+            self.removePane(id: entry.id)
+        }
+        let layout = PaneLayout(x: CGFloat(record.lx), y: CGFloat(record.ly),
+                                w: CGFloat(record.lw), h: CGFloat(record.lh))
+        layouts[entry.id] = layout
+        secondaryPanes.append(entry)
+        focusedPaneID = entry.id
+    }
+
     private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirectory: String? = nil) {
-        let state = TerminalViewState(terminalConfiguration: makeLauncherConfig())
+        paneCount += 1
+        let config: TerminalConfiguration
+        var paneTmuxID: String?
+        var paneTmuxName: String?
+        if let baseName = tmuxName, TmuxManager.shared.isAvailable {
+            paneTmuxName = "\(baseName)__p\(paneCount)"
+            paneTmuxID   = TmuxManager.shared.createSession(name: paneTmuxName!, cwd: workingDirectory)
+            if let id = paneTmuxID {
+                config = makeTmuxConfig(sessionID: id, sessionName: paneTmuxName!, cwd: workingDirectory)
+            } else { config = makeLauncherConfig() }
+        } else { config = makeLauncherConfig() }
+        let state = TerminalViewState(terminalConfiguration: config)
         state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: workingDirectory)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
-        let entry = PaneEntry(viewState: state)
+        let entry = PaneEntry(viewState: state, tmuxID: paneTmuxID, tmuxName: paneTmuxName, initialCWD: workingDirectory)
         state.onClose = { [weak self, weak entry] _ in
             guard let self, let entry else { return }
             self.removePane(id: entry.id)
@@ -321,13 +398,20 @@ final class TerminalTab: Identifiable, ObservableObject {
 
 @MainActor
 final class Workspace: Identifiable, ObservableObject {
-    let id = UUID()
+    let id: UUID
     @Published var name: String
     @Published var tabs: [TerminalTab] = []
     @Published var selectedTabID: UUID?
+    var tmuxID: String?       // tmux session_id e.g. "$3" — stable across renames
+    var tmuxName: String?     // tmux session name — for fallback new-session
     private var lastColorScheme: ColorScheme = .dark
 
-    init(name: String) { self.name = name }
+    init(id: UUID = UUID(), name: String, tmuxID: String? = nil, tmuxName: String? = nil) {
+        self.id       = id
+        self.name     = name
+        self.tmuxID   = tmuxID
+        self.tmuxName = tmuxName
+    }
 
     var selectedTab: TerminalTab? { tabs.first { $0.id == selectedTabID } }
 
@@ -335,9 +419,19 @@ final class Workspace: Identifiable, ObservableObject {
         resolveCWD(selectedTab?.focusedViewState.workingDirectory)
     }
 
+    var currentTmuxDirectory: String? {
+        selectedTab?.focusedTmuxID.flatMap { TmuxManager.shared.currentPath(sessionID: $0) }
+    }
+
     func addTab(colorScheme: ColorScheme, workingDirectory: String? = nil) {
         lastColorScheme = colorScheme
-        let tab = TerminalTab(colorScheme: colorScheme, workingDirectory: workingDirectory)
+        var tID = tmuxID, tName = tmuxName
+        // additional tabs get their own tmux session: {base}__t1, __t2, …
+        if !tabs.isEmpty, let baseName = tmuxName, TmuxManager.shared.isAvailable {
+            tName = "\(baseName)__t\(tabs.count)"
+            tID   = TmuxManager.shared.createSession(name: tName!, cwd: workingDirectory)
+        }
+        let tab = TerminalTab(colorScheme: colorScheme, workingDirectory: workingDirectory, tmuxID: tID, tmuxName: tName)
         tab.closeTabCallback = { [weak self, weak tab] in
             guard let self, let tab else { return }
             self.closeTab(id: tab.id)
@@ -354,9 +448,33 @@ final class Workspace: Identifiable, ObservableObject {
         selectedTabID = tab.id
     }
 
+    /// Restore a saved tab — reuses existing tmux session, no new session created.
+    func addRestoredTab(record: TabRecord, colorScheme: ColorScheme) {
+        lastColorScheme = colorScheme
+        let cwd = record.initialCWD.isEmpty ? nil : record.initialCWD
+        let tab = TerminalTab(colorScheme: colorScheme, workingDirectory: cwd,
+                              tmuxID: record.tmuxID, tmuxName: record.tmuxName)
+        tab.closeTabCallback = { [weak self, weak tab] in
+            guard let self, let tab else { return }
+            self.closeTab(id: tab.id)
+        }
+        tab.viewState.onClose = { [weak self, weak tab] _ in
+            guard let self, let tab else { return }
+            if tab.secondaryPanes.isEmpty { self.closeTab(id: tab.id) }
+            else { tab.collapsePrimary() }
+        }
+        tabs.append(tab)
+        if record.isSelected { selectedTabID = tab.id }
+    }
+
     // Removes one tab. Workspace itself is never closed here —
     // only closeWorkspace() on TerminalManager does that.
     func closeTab(id: UUID) {
+        if let tab = tabs.first(where: { $0.id == id }) {
+            let tmux = TmuxManager.shared
+            for pane in tab.secondaryPanes { if let sid = pane.tmuxID { tmux.killSession(id: sid) } }
+            if let sid = tab.tmuxID { tmux.killSession(id: sid) }
+        }
         if selectedTabID == id {
             if let idx = tabs.firstIndex(where: { $0.id == id }) {
                 let next = tabs.indices.contains(idx + 1) ? tabs[idx + 1].id
@@ -372,9 +490,10 @@ final class Workspace: Identifiable, ObservableObject {
 final class WorkspaceFolder: Identifiable, ObservableObject {
     let id = UUID()
     @Published var name: String
+    @Published var tag: String = ""
     @Published var workspaces: [Workspace] = []
     @Published var isExpanded: Bool = true
-    init(name: String) { self.name = name }
+    init(name: String, tag: String = "") { self.name = name; self.tag = tag }
 }
 
 @MainActor
@@ -401,9 +520,21 @@ final class TerminalManager: ObservableObject {
         allWorkspaces.first { $0.id == selectedWorkspaceID }
     }
 
-    func addWorkspace(colorScheme: ColorScheme, inFolder folderID: UUID? = nil) {
-        let ws = Workspace(name: "Workspace \(allWorkspaces.count + 1)")
-        ws.addTab(colorScheme: colorScheme)
+    func folderID(containingWorkspace wsID: UUID) -> UUID? {
+        folders.first { $0.workspaces.contains { $0.id == wsID } }?.id
+    }
+
+    func addWorkspace(colorScheme: ColorScheme, inFolder folderID: UUID? = nil, workingDirectory: String? = nil, name: String? = nil, tmuxName: String? = nil, tmuxID: String? = nil) {
+        let wsName = name ?? "Workspace \(allWorkspaces.count + 1)"
+        let tmux = TmuxManager.shared
+        var resolvedTmuxName = tmuxName
+        var resolvedTmuxID   = tmuxID
+        if tmux.isAvailable && resolvedTmuxName == nil {
+            resolvedTmuxName = tmux.sessionName(folder: "", workspace: wsName)
+            resolvedTmuxID   = tmux.createSession(name: resolvedTmuxName!, cwd: workingDirectory)
+        }
+        let ws = Workspace(name: wsName, tmuxID: resolvedTmuxID, tmuxName: resolvedTmuxName)
+        ws.addTab(colorScheme: colorScheme, workingDirectory: workingDirectory)
         if let folderID, let folder = folders.first(where: { $0.id == folderID }) {
             folder.workspaces.append(ws)
         } else {
@@ -412,7 +543,26 @@ final class TerminalManager: ObservableObject {
         selectedWorkspaceID = ws.id
     }
 
+    /// Find existing folder by name or create one with optional tag.
+    func folder(named name: String, tag: String = "") -> WorkspaceFolder {
+        if let existing = folders.first(where: { $0.name == name }) {
+            if !tag.isEmpty { existing.tag = tag }
+            return existing
+        }
+        let f = WorkspaceFolder(name: name, tag: tag)
+        folders.append(f)
+        return f
+    }
+
     func closeWorkspace(id: UUID) {
+        if let ws = allWorkspaces.first(where: { $0.id == id }) {
+            let tmux = TmuxManager.shared
+            for tab in ws.tabs {
+                for pane in tab.secondaryPanes { if let sid = pane.tmuxID { tmux.killSession(id: sid) } }
+                if let sid = tab.tmuxID { tmux.killSession(id: sid) }
+            }
+            if let sid = ws.tmuxID { tmux.killSession(id: sid) }
+        }
         if selectedWorkspaceID == id {
             let all = allWorkspaces
             if let idx = all.firstIndex(where: { $0.id == id }) {
@@ -497,14 +647,25 @@ private struct SidebarDivider: View {
 struct ContentView: View {
     @StateObject private var manager = TerminalManager()
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(AppSettings.self) private var settings
+    @Environment(WorkspaceDB.self) private var db
     @State private var sidebarVisible = true
     @State private var sidebarWidth: CGFloat = 220
+    @State private var showBaseDirectoryPicker = false
+    @State private var managementTab: ManagementTab = .workspaces
 
     var body: some View {
+        VStack(spacing: 0) {
+        TopNavBar(selected: $managementTab)
+        ZStack {
         HStack(spacing: 0) {
             SidebarView(
                 manager: manager,
-                onAdd: { manager.addWorkspace(colorScheme: colorScheme) }
+                onAdd: {
+                    let fid = manager.selectedWorkspaceID.flatMap { manager.folderID(containingWorkspace: $0) }
+                    manager.addWorkspace(colorScheme: colorScheme, inFolder: fid)
+                    saveLayout()
+                }
             )
             .frame(width: sidebarVisible ? sidebarWidth : 0)
             .clipped()
@@ -514,7 +675,8 @@ struct ContentView: View {
 
             VStack(spacing: 0) {
                 if let ws = manager.selectedWorkspace {
-                    TabBarView(workspace: ws, colorScheme: colorScheme, sidebarVisible: $sidebarVisible)
+                    TabBarView(workspace: ws, colorScheme: colorScheme, sidebarVisible: $sidebarVisible,
+                               onMutation: { saveLayout() })
                 } else {
                     HStack {
                         Button(action: { sidebarVisible.toggle() }) {
@@ -551,7 +713,211 @@ struct ContentView: View {
         }
         .animation(.spring(duration: 0.22, bounce: 0.0), value: sidebarVisible)
         .onAppear {
-            if manager.workspaces.isEmpty { manager.addWorkspace(colorScheme: colorScheme) }
+            restoreSessionsFromDB(colorScheme: colorScheme)
+            if settings.baseWorkingDirectory == nil { showBaseDirectoryPicker = true }
+            NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
+                                                   object: nil, queue: .main) { _ in saveLayout() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .srotaOpenWorkspace)) { note in
+            guard let path     = note.userInfo?["path"]       as? String else { return }
+            let wsName         = note.userInfo?["name"]        as? String
+            let folderName     = note.userInfo?["folderName"]  as? String
+            let needsWorktree  = note.userInfo?["createWorktree"] as? Bool ?? false
+            let projectPath    = note.userInfo?["projectPath"] as? String ?? ""
+            let branchRef      = note.userInfo?["branchRef"]   as? String ?? (wsName ?? "")
+
+            let folderTag  = note.userInfo?["folderTag"] as? String ?? ""
+            let folder = folderName.map { manager.folder(named: $0, tag: folderTag) }
+            let folderID = folder?.id
+
+            // if workspace with same name already exists in that folder, just select it
+            let candidatePool = folder?.workspaces ?? manager.workspaces
+            if let existing = candidatePool.first(where: { $0.name == wsName }) {
+                manager.selectedWorkspaceID = existing.id
+                managementTab = .workspaces
+                return
+            }
+
+            let tmux = TmuxManager.shared
+            let tName = tmux.isAvailable
+                ? tmux.sessionName(folder: folderName ?? "", workspace: wsName ?? "")
+                : nil
+
+            if needsWorktree {
+                Task.detached {
+                    // git worktree first, then tmux session
+                    let p = Process()
+                    p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                    p.arguments = ["-C", projectPath, "worktree", "add", path, branchRef]
+                    p.standardError = Pipe()
+                    try? p.run(); p.waitUntilExit()
+                    let tID = tName.flatMap { tmux.createSession(name: $0, cwd: path) }
+                    await MainActor.run { [folderID] in
+                        manager.addWorkspace(colorScheme: colorScheme, inFolder: folderID,
+                                             workingDirectory: path, name: wsName,
+                                             tmuxName: tName, tmuxID: tID)
+                        db.saveWorkspaceSession(WorkspaceSession(
+                            id: manager.allWorkspaces.last?.id.uuidString ?? UUID().uuidString,
+                            name: wsName ?? "", folderName: folderName ?? "",
+                            folderTag: folderTag, position: 0,
+                            tmuxID: tID, tmuxName: tName, lastCWD: path,
+                            lastAccessed: Int(Date().timeIntervalSince1970)))
+                        managementTab = .workspaces
+                        saveLayout()
+                        if let baseDir = settings.baseWorkingDirectory { db.scan(baseDir: baseDir) }
+                    }
+                }
+            } else {
+                let tID = tName.flatMap { tmux.createSession(name: $0, cwd: path) }
+                manager.addWorkspace(colorScheme: colorScheme, inFolder: folderID,
+                                     workingDirectory: path, name: wsName,
+                                     tmuxName: tName, tmuxID: tID)
+                if let ws = manager.allWorkspaces.last {
+                    db.saveWorkspaceSession(WorkspaceSession(
+                        id: ws.id.uuidString, name: ws.name,
+                        folderName: folderName ?? "", folderTag: folderTag,
+                        position: candidatePool.count, tmuxID: tID, tmuxName: tName,
+                        lastCWD: path, lastAccessed: Int(Date().timeIntervalSince1970)))
+                }
+                managementTab = .workspaces
+                saveLayout()
+            }
+        }
+        .sheet(isPresented: $showBaseDirectoryPicker) {
+            BaseDirectorySheet { url in
+                settings.baseWorkingDirectory = url.path
+                settings.save()
+                db.scan(baseDir: url.path)
+                showBaseDirectoryPicker = false
+            }
+        }
+        if managementTab != .workspaces {
+            ManagementPanel(tab: managementTab)
+                .environment(db)
+                .environmentObject(manager)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(red: 0.067, green: 0.067, blue: 0.075))
+        }
+        } // end ZStack
+        } // end VStack
+    }
+
+    private func saveLayout() {
+        let allFolders  = manager.folders
+        let unfiledWSes = manager.workspaces
+        func save(ws: Workspace, folderName: String, folderTag: String, position: Int) {
+            db.saveWorkspaceSession(WorkspaceSession(
+                id: ws.id.uuidString, name: ws.name,
+                folderName: folderName, folderTag: folderTag, position: position,
+                tmuxID: ws.tmuxID, tmuxName: ws.tmuxName,
+                lastCWD: ws.currentWorkingDirectory ?? "",
+                lastAccessed: Int(Date().timeIntervalSince1970)))
+            db.deleteTabs(workspaceID: ws.id.uuidString)
+            for (ti, tab) in ws.tabs.enumerated() {
+                db.saveTab(TabRecord(
+                    id: tab.id.uuidString, workspaceID: ws.id.uuidString,
+                    position: ti, tmuxID: tab.tmuxID, tmuxName: tab.tmuxName,
+                    initialCWD: tab.initialWorkingDirectory ?? "",
+                    isSelected: tab.id == ws.selectedTabID))
+                // primary pane
+                db.savePane(PaneRecord(
+                    id: "\(tab.id)_primary", tabID: tab.id.uuidString, isPrimary: true,
+                    lx: Double(tab.primaryLayout.x), ly: Double(tab.primaryLayout.y),
+                    lw: Double(tab.primaryLayout.w), lh: Double(tab.primaryLayout.h),
+                    tmuxID: tab.tmuxID, tmuxName: tab.tmuxName,
+                    initialCWD: tab.initialWorkingDirectory ?? ""))
+                // secondary panes
+                for pane in tab.secondaryPanes {
+                    if let layout = tab.layouts[pane.id] {
+                        db.savePane(PaneRecord(
+                            id: pane.id.uuidString, tabID: tab.id.uuidString, isPrimary: false,
+                            lx: Double(layout.x), ly: Double(layout.y),
+                            lw: Double(layout.w), lh: Double(layout.h),
+                            tmuxID: pane.tmuxID, tmuxName: pane.tmuxName,
+                            initialCWD: pane.initialCWD ?? ""))
+                    }
+                }
+            }
+        }
+        for (i, ws) in unfiledWSes.enumerated() { save(ws: ws, folderName: "", folderTag: "", position: i) }
+        for folder in allFolders {
+            for (i, ws) in folder.workspaces.enumerated() {
+                save(ws: ws, folderName: folder.name, folderTag: folder.tag, position: i)
+            }
+        }
+    }
+
+    private func restoreSessionsFromDB(colorScheme: ColorScheme) {
+        let saved = db.loadWorkspaceSessions()
+        guard !saved.isEmpty else {
+            manager.addWorkspace(colorScheme: colorScheme)
+            return
+        }
+        let tmux = TmuxManager.shared
+        Task.detached {
+            let liveIDs = tmux.liveSessionIDs()
+            await MainActor.run {
+                for session in saved {
+                    let folder = session.folderName.isEmpty
+                        ? nil
+                        : manager.folder(named: session.folderName, tag: session.folderTag)
+
+                    // ensure launcher script exists (idempotent write)
+                    var tmuxID = session.tmuxID
+                    var tmuxName = session.tmuxName
+                    if let id = tmuxID, !liveIDs.contains(id), let name = tmuxName {
+                        // session was killed — create fresh one at last known CWD
+                        let cwd = session.lastCWD.isEmpty ? nil : session.lastCWD
+                        tmuxID = tmux.createSession(name: name, cwd: cwd)
+                    }
+                    if let id = tmuxID, let name = tmuxName {
+                        _ = tmux.launcherScript(sessionID: id, sessionName: name,
+                                                cwd: session.lastCWD.isEmpty ? nil : session.lastCWD)
+                    }
+
+                    let wsID = UUID(uuidString: session.id) ?? UUID()
+                    let ws = Workspace(id: wsID, name: session.name, tmuxID: tmuxID, tmuxName: tmuxName)
+                    let cwd = session.lastCWD.isEmpty ? nil : session.lastCWD
+                    let tabs = db.loadTabs(workspaceID: session.id)
+                    if tabs.isEmpty {
+                        ws.addTab(colorScheme: colorScheme, workingDirectory: cwd)
+                    } else {
+                        for tabRecord in tabs.sorted(by: { $0.position < $1.position }) {
+                            // primary tab (pos 0) IS the workspace session — sync its ID
+                            var rec = tabRecord
+                            if tabRecord.position == 0 {
+                                rec = TabRecord(id: tabRecord.id, workspaceID: tabRecord.workspaceID,
+                                                position: 0, tmuxID: tmuxID, tmuxName: tmuxName,
+                                                initialCWD: tabRecord.initialCWD,
+                                                isSelected: tabRecord.isSelected)
+                            }
+                            ws.addRestoredTab(record: rec, colorScheme: colorScheme)
+                            if let tab = ws.tabs.last {
+                                let panes = db.loadPanes(tabID: tabRecord.id)
+                                for pane in panes where !pane.isPrimary {
+                                    tab.restorePane(record: pane, colorScheme: colorScheme)
+                                }
+                                // restore primary layout if saved
+                                if let primary = panes.first(where: { $0.isPrimary }) {
+                                    tab.primaryLayout = PaneLayout(
+                                        x: CGFloat(primary.lx), y: CGFloat(primary.ly),
+                                        w: CGFloat(primary.lw), h: CGFloat(primary.lh))
+                                }
+                            }
+                        }
+                        if ws.selectedTabID == nil { ws.selectedTabID = ws.tabs.first?.id }
+                    }
+                    if let folder {
+                        folder.workspaces.append(ws)
+                    } else {
+                        manager.workspaces.append(ws)
+                    }
+                }
+                if manager.selectedWorkspaceID == nil {
+                    manager.selectedWorkspaceID = manager.allWorkspaces.first?.id
+                }
+                TmuxManager.shared.applyGlobalOptions()
+            }
         }
     }
 }
@@ -685,10 +1051,18 @@ private struct FolderRow: View {
                             .onSubmit { commitRename() }
                             .onExitCommand { isRenaming = false }
                     } else {
-                        Text(folder.name)
-                            .font(.system(size: 13))
-                            .foregroundStyle(isDragTarget ? Color.accentOrange : Color.labelSecondary)
-                            .lineLimit(1)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(folder.name)
+                                .font(.system(size: 13))
+                                .foregroundStyle(isDragTarget ? Color.accentOrange : Color.labelSecondary)
+                                .lineLimit(1)
+                            if !folder.tag.isEmpty {
+                                Text(folder.tag)
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundStyle(Color.accentOrange.opacity(0.7))
+                                    .lineLimit(1)
+                            }
+                        }
                     }
                     Spacer(minLength: 4)
                     if isHovered && !isRenaming {
@@ -887,6 +1261,7 @@ private struct TabBarView: View {
     @ObservedObject var workspace: Workspace
     let colorScheme: ColorScheme
     @Binding var sidebarVisible: Bool
+    var onMutation: () -> Void = {}
 
     var body: some View {
         HStack(spacing: 0) {
@@ -910,7 +1285,7 @@ private struct TabBarView: View {
                         )
                     }
 
-                    Button(action: { workspace.addTab(colorScheme: colorScheme, workingDirectory: workspace.currentWorkingDirectory) }) {
+                    Button(action: { workspace.addTab(colorScheme: colorScheme, workingDirectory: workspace.currentTmuxDirectory ?? workspace.currentWorkingDirectory); onMutation() }) {
                         Image(systemName: "plus")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(Color.labelMuted)
@@ -928,11 +1303,11 @@ private struct TabBarView: View {
                 HStack(spacing: 2) {
                     SplitButton(icon: "rectangle.split.2x1", tooltip: "Split Right",
                                 active: !tab.secondaryPanes.isEmpty) {
-                        tab.splitRight(colorScheme: colorScheme)
+                        tab.splitRight(colorScheme: colorScheme); onMutation()
                     }
                     SplitButton(icon: "rectangle.split.1x2", tooltip: "Split Bottom",
                                 active: !tab.secondaryPanes.isEmpty) {
-                        tab.splitBottom(colorScheme: colorScheme)
+                        tab.splitBottom(colorScheme: colorScheme); onMutation()
                     }
                 }
                 .padding(.trailing, 12)
@@ -1340,6 +1715,54 @@ private struct SplitDivider: View {
             if vertical { h ? NSCursor.resizeLeftRight.push() : NSCursor.pop() }
             else        { h ? NSCursor.resizeUpDown.push()    : NSCursor.pop() }
         }
+    }
+}
+
+// MARK: - Base directory picker sheet
+
+private struct BaseDirectorySheet: View {
+    let onSelect: (URL) -> Void
+
+    var body: some View {
+        VStack(spacing: 24) {
+            VStack(spacing: 8) {
+                Text("Choose Base Directory")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Color.labelPrimary)
+                Text("Srota will scan this folder for organizations, projects, and branches.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.labelMuted)
+                    .multilineTextAlignment(.center)
+            }
+
+            Button {
+                let panel = NSOpenPanel()
+                panel.canChooseFiles = false
+                panel.canChooseDirectories = true
+                panel.allowsMultipleSelection = false
+                panel.prompt = "Select"
+                panel.message = "Select your base working directory"
+                if panel.runModal() == .OK, let url = panel.url {
+                    onSelect(url)
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "folder.badge.plus")
+                        .font(.system(size: 13))
+                    Text("Select Directory")
+                        .font(.system(size: 13, weight: .medium))
+                }
+                .foregroundStyle(Color.black)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
+                .background(Color.accentOrange)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(40)
+        .frame(width: 380)
+        .background(Color.sidebarBg)
     }
 }
 

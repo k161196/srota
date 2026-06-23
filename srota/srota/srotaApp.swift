@@ -2,11 +2,20 @@ import SwiftUI
 
 @main
 struct srotaApp: App {
+    @State private var settings = AppSettings()
+    @State private var db = WorkspaceDB()
+
     var body: some Scene {
         WindowGroup("Srota - स्रोत") {
             ContentView()
                 .preferredColorScheme(.dark)
-                .onAppear { setupShellIntegration() }
+                .environment(settings)
+                .environment(db)
+                .onAppear {
+                    setupShellIntegration()
+                    TmuxManager.shared.writeConfig()
+                    if let dir = settings.baseWorkingDirectory { db.scan(baseDir: dir) }
+                }
         }
     }
 }
