@@ -43,8 +43,24 @@ struct srotaApp: App {
         if let path = Bundle.main.path(forResource: "check-agent-hooks", ofType: "sh") {
             return path
         }
-        let dev = "\(NSHomeDirectory())/Kiran/organizations/k161196/projects/srota/branches/main/scripts/check-agent-hooks.sh"
-        return FileManager.default.fileExists(atPath: dev) ? dev : nil
+        let fileManager = FileManager.default
+        let sourceRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let candidates = [
+            URL(fileURLWithPath: fileManager.currentDirectoryPath).appendingPathComponent("scripts/check-agent-hooks.sh"),
+            sourceRoot.appendingPathComponent("scripts/check-agent-hooks.sh"),
+        ]
+
+        for candidate in candidates {
+            let path = candidate.standardizedFileURL.path
+            if fileManager.isExecutableFile(atPath: path) || fileManager.fileExists(atPath: path) {
+                return path
+            }
+        }
+
+        return nil
     }
 }
 

@@ -32,10 +32,10 @@ codex_installed() { command -v codex >/dev/null 2>&1; }
 
 hooks_ready() {
   local config_path="$1"
-  local root_expr="$2"
-  node - "$config_path" "$NOTIFY_SCRIPT" "$root_expr" <<'JS' >/dev/null
+  local agent_id="$2"
+  node - "$config_path" "$NOTIFY_SCRIPT" "$agent_id" <<'JS' >/dev/null
 const fs = require('fs');
-const [,, configPath, notifyScript, rootExpr] = process.argv;
+const [,, configPath, notifyScript, agentId] = process.argv;
 const required = ['SessionStart', 'Stop', 'UserPromptSubmit', 'PermissionRequest'];
 
 let data = {};
@@ -45,11 +45,12 @@ try {
   process.exit(1);
 }
 
-const hooks = rootExpr === 'hooks' ? (data.hooks ?? {}) : {};
-const wanted = notifyScript;
+const hooks = data.hooks ?? {};
+const command = `[ -x "${notifyScript}" ] && SORA_AGENT_ID=${agentId} "${notifyScript}" || true`;
+const wanted = JSON.stringify({ hooks: [{ type: 'command', command }] });
 
 function isSrotaHook(entry) {
-  return JSON.stringify(entry).includes(wanted);
+  return JSON.stringify(entry) === wanted;
 }
 
 const ok = required.every((event) =>
@@ -114,7 +115,7 @@ CODEX_STATUS="not_installed"
 EXIT=0
 
 if claude_installed; then
-  if hooks_ready "$CLAUDE_SETTINGS" hooks; then
+  if hooks_ready "$CLAUDE_SETTINGS" claude; then
     CLAUDE_STATUS="configured"
   elif [[ $CONFIGURE -eq 1 ]] && [[ "$(configure_hooks "$CLAUDE_SETTINGS" claude 2>&1)" == "ok" ]]; then
     CLAUDE_STATUS="configured"
@@ -128,7 +129,7 @@ if claude_installed; then
 fi
 
 if codex_installed; then
-  if hooks_ready "$CODEX_HOOKS" hooks; then
+  if hooks_ready "$CODEX_HOOKS" codex; then
     CODEX_STATUS="configured"
   elif [[ $CONFIGURE -eq 1 ]] && [[ "$(configure_hooks "$CODEX_HOOKS" codex 2>&1)" == "ok" ]]; then
     CODEX_STATUS="configured"
