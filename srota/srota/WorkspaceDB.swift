@@ -92,6 +92,7 @@ final class WorkspaceDB {
     private let handle = DBHandle()
     private var db: OpaquePointer? { handle.ptr }
     private var scanTask: Task<Void, Never>?
+    private var dbWatcher: DispatchSourceFileSystemObject?
 
     var organizations: [Organization] = []
     var projects: [Project] = []
@@ -123,6 +124,18 @@ final class WorkspaceDB {
         guard sqlite3_open(dir + "/srota.db", &handle.ptr) == SQLITE_OK else { return }
         createTables()
         refresh()
+        startDBWatcher(dbPath: dir + "/srota.db")
+    }
+
+    private func startDBWatcher(dbPath: String) {
+        let dir = (dbPath as NSString).deletingLastPathComponent
+        let fd = open(dir, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: .main)
+        src.setEventHandler { [weak self] in self?.refresh() }
+        src.setCancelHandler { close(fd) }
+        src.resume()
+        dbWatcher = src
     }
 
     func scan(baseDir: String) {

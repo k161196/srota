@@ -659,6 +659,7 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(AppSettings.self) private var settings
     @Environment(WorkspaceDB.self) private var db
+    @Environment(FeatureAgentFocus.self) private var agentFocus
     @State private var sidebarVisible = true
     @State private var sidebarWidth: CGFloat = 220
     @State private var showBaseDirectoryPicker = false
@@ -676,7 +677,11 @@ struct ContentView: View {
                 let filtered = preset.commands.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
                 guard !filtered.isEmpty else { return }
                 let cmd = filtered.joined(separator: "\n") + "\n"
-                manager.selectedWorkspace?.selectedTab?.focusedViewState.send(cmd)
+                if let featureState = agentFocus.activeViewState, managementTab == .features {
+                    featureState.send(cmd)
+                } else {
+                    manager.selectedWorkspace?.selectedTab?.focusedViewState.send(cmd)
+                }
             }
         )
         ZStack {
