@@ -468,12 +468,37 @@ private extension Color {
     static let labelMuted   = Color(red: 0.92, green: 0.92, blue: 0.93).opacity(0.40)
 }
 
+// MARK: - Sidebar divider
+
+private struct SidebarDivider: View {
+    let sidebarVisible: Bool
+    @Binding var width: CGFloat
+    @State private var isHovered = false
+
+    var body: some View {
+        Rectangle()
+            .fill(isHovered ? Color.accentOrange.opacity(0.6) : Color.white.opacity(0.06))
+            .frame(width: isHovered ? 3 : 1)
+            .opacity(sidebarVisible ? 1 : 0)
+            .onHover { isHovered = $0 }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { v in
+                        width = max(150, min(500, width + v.translation.width))
+                    }
+            )
+            .animation(.easeOut(duration: 0.12), value: isHovered)
+            .help("Drag to resize sidebar")
+    }
+}
+
 // MARK: - Root
 
 struct ContentView: View {
     @StateObject private var manager = TerminalManager()
     @Environment(\.colorScheme) private var colorScheme
     @State private var sidebarVisible = true
+    @State private var sidebarWidth: CGFloat = 220
 
     var body: some View {
         HStack(spacing: 0) {
@@ -481,14 +506,11 @@ struct ContentView: View {
                 manager: manager,
                 onAdd: { manager.addWorkspace(colorScheme: colorScheme) }
             )
-            .frame(width: sidebarVisible ? 220 : 0)
+            .frame(width: sidebarVisible ? sidebarWidth : 0)
             .clipped()
             .allowsHitTesting(sidebarVisible)
 
-            Rectangle()
-                .fill(Color.white.opacity(0.06))
-                .frame(width: 1)
-                .opacity(sidebarVisible ? 1 : 0)
+            SidebarDivider(sidebarVisible: sidebarVisible, width: $sidebarWidth)
 
             VStack(spacing: 0) {
                 if let ws = manager.selectedWorkspace {
