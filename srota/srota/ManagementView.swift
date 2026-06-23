@@ -43,6 +43,9 @@ private extension Color {
 
 struct TopNavBar: View {
     @Binding var selected: ManagementTab
+    var onSettings: () -> Void = {}
+    var onPresetLaunch: (TerminalPreset) -> Void = { _ in }
+    @Environment(PresetsStore.self) private var presetsStore
 
     var body: some View {
         HStack(spacing: 0) {
@@ -51,7 +54,29 @@ struct TopNavBar: View {
                     selected = tab
                 }
             }
+
+            if !presetsStore.presets.isEmpty {
+                Rectangle()
+                    .fill(Color.white.opacity(0.08))
+                    .frame(width: 1)
+                    .padding(.vertical, 9)
+                ForEach(presetsStore.presets) { preset in
+                    PresetQuickLaunchButton(preset: preset) {
+                        onPresetLaunch(preset)
+                    }
+                }
+            }
+
             Spacer()
+
+            Button(action: onSettings) {
+                Image(systemName: "gear")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.mgMuted)
+                    .frame(width: 32, height: 36)
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 4)
         }
         .frame(height: 36)
         .background(Color(red: 0.05, green: 0.05, blue: 0.06))
@@ -83,6 +108,28 @@ private struct TabButton: View {
                     Rectangle().fill(Color.mgAccent).frame(height: 2)
                 }
             }
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+    }
+}
+
+private struct PresetQuickLaunchButton: View {
+    let preset: TerminalPreset
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: "terminal")
+                    .font(.system(size: 10))
+                Text(preset.name)
+                    .font(.system(size: 12))
+            }
+            .foregroundStyle(hovered ? Color.mgLabel : Color.mgMuted)
+            .padding(.horizontal, 12)
+            .frame(height: 36)
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
