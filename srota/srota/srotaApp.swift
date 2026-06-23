@@ -4,6 +4,7 @@ import SwiftUI
 struct srotaApp: App {
     @State private var settings = AppSettings()
     @State private var db = WorkspaceDB()
+    @State private var presetsStore = PresetsStore()
 
     var body: some Scene {
         WindowGroup("Srota - स्रोत") {
@@ -11,6 +12,7 @@ struct srotaApp: App {
                 .preferredColorScheme(.dark)
                 .environment(settings)
                 .environment(db)
+                .environment(presetsStore)
                 .onAppear {
                     setupShellIntegration()
                     if let dir = settings.baseWorkingDirectory { db.scan(baseDir: dir) }
