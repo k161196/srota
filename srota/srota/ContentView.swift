@@ -368,16 +368,28 @@ final class Workspace: Identifiable, ObservableObject {
 }
 
 @MainActor
-final class TerminalManager: ObservableObject {
+final class WorkspaceFolder: Identifiable, ObservableObject {
+    let id = UUID()
+    @Published var name: String
     @Published var workspaces: [Workspace] = []
+    @Published var isExpanded: Bool = true
+    init(name: String) { self.name = name }
+}
+
+@MainActor
+final class TerminalManager: ObservableObject {
+    @Published var workspaces: [Workspace] = []   // unfiled
+    @Published var folders: [WorkspaceFolder] = []
     @Published var selectedWorkspaceID: UUID?
 
+    var allWorkspaces: [Workspace] { workspaces + folders.flatMap(\.workspaces) }
+
     var selectedWorkspace: Workspace? {
-        workspaces.first { $0.id == selectedWorkspaceID }
+        allWorkspaces.first { $0.id == selectedWorkspaceID }
     }
 
     func addWorkspace(colorScheme: ColorScheme) {
-        let ws = Workspace(name: "Workspace \(workspaces.count + 1)")
+        let ws = Workspace(name: "Workspace \(allWorkspaces.count + 1)")
         ws.addTab(colorScheme: colorScheme)
         workspaces.append(ws)
         selectedWorkspaceID = ws.id
@@ -385,13 +397,46 @@ final class TerminalManager: ObservableObject {
 
     func closeWorkspace(id: UUID) {
         if selectedWorkspaceID == id {
-            if let idx = workspaces.firstIndex(where: { $0.id == id }) {
-                let next = workspaces.indices.contains(idx + 1) ? workspaces[idx + 1].id
-                         : idx > 0 ? workspaces[idx - 1].id : nil
-                selectedWorkspaceID = next
+            let all = allWorkspaces
+            if let idx = all.firstIndex(where: { $0.id == id }) {
+                selectedWorkspaceID = all.indices.contains(idx + 1) ? all[idx + 1].id
+                                    : idx > 0 ? all[idx - 1].id : nil
             }
         }
+        let beforeCount = workspaces.count
         workspaces.removeAll { $0.id == id }
+        if workspaces.count < beforeCount { return }
+        for folder in folders { folder.workspaces.removeAll { $0.id == id } }
+    }
+
+    func addFolder(name: String) -> WorkspaceFolder {
+        let f = WorkspaceFolder(name: name)
+        folders.append(f)
+        return f
+    }
+
+    func deleteFolder(id: UUID) {
+        guard folders.first(where: { $0.id == id })?.workspaces.isEmpty == true else { return }
+        folders.removeAll { $0.id == id }
+    }
+
+    func moveWorkspace(id wsID: UUID, toFolder folderID: UUID?) {
+        var ws: Workspace?
+        if let idx = workspaces.firstIndex(where: { $0.id == wsID }) {
+            ws = workspaces.remove(at: idx)
+        } else {
+            for folder in folders {
+                if let idx = folder.workspaces.firstIndex(where: { $0.id == wsID }) {
+                    ws = folder.workspaces.remove(at: idx); break
+                }
+            }
+        }
+        guard let ws else { return }
+        if let folderID, let folder = folders.first(where: { $0.id == folderID }) {
+            folder.workspaces.append(ws)
+        } else {
+            workspaces.append(ws)
+        }
     }
 }
 
@@ -487,22 +532,37 @@ private extension Color {
 private struct SidebarView: View {
     @ObservedObject var manager: TerminalManager
     let onAdd: () -> Void
+    @State private var newFolderID: UUID? = nil
 
     var body: some View {
         VStack(spacing: 0) {
-            Button(action: onAdd) {
-                HStack(spacing: 7) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 11, weight: .semibold))
-                    Text("New Workspace")
-                        .font(.system(size: 13, weight: .regular))
-                    Spacer()
+            HStack(spacing: 0) {
+                Button(action: onAdd) {
+                    HStack(spacing: 7) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("New Workspace")
+                            .font(.system(size: 13, weight: .regular))
+                    }
+                    .foregroundStyle(Color.labelSecondary)
+                    .padding(.leading, 16)
+                    .padding(.vertical, 12)
                 }
-                .foregroundStyle(Color.labelSecondary)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .buttonStyle(.plain)
+                Spacer()
+                Button {
+                    let f = manager.addFolder(name: "New Folder")
+                    newFolderID = f.id
+                } label: {
+                    Image(systemName: "folder.badge.plus")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.labelSecondary)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.plain)
+                .help("New Folder")
             }
-            .buttonStyle(.plain)
 
             HStack(alignment: .firstTextBaseline, spacing: 0) {
                 Text("WORKSPACES")
@@ -510,7 +570,7 @@ private struct SidebarView: View {
                     .tracking(0.8)
                     .foregroundStyle(Color.sectionHeader)
                 Spacer()
-                Text("\(manager.workspaces.count)")
+                Text("\(manager.allWorkspaces.count)")
                     .font(.system(size: 11, weight: .regular).monospacedDigit())
                     .foregroundStyle(Color.sectionHeader.opacity(0.7))
             }
@@ -522,9 +582,18 @@ private struct SidebarView: View {
                     ForEach(manager.workspaces) { ws in
                         WorkspaceRow(
                             workspace: ws,
+                            manager: manager,
                             isSelected: manager.selectedWorkspaceID == ws.id,
                             onSelect: { manager.selectedWorkspaceID = ws.id },
                             onClose:  { manager.closeWorkspace(id: ws.id) }
+                        )
+                    }
+                    ForEach(manager.folders) { folder in
+                        FolderRow(
+                            folder: folder,
+                            manager: manager,
+                            startRenaming: newFolderID == folder.id,
+                            onRenameHandled: { newFolderID = nil }
                         )
                     }
                 }
@@ -537,11 +606,104 @@ private struct SidebarView: View {
     }
 }
 
+private struct FolderRow: View {
+    @ObservedObject var folder: WorkspaceFolder
+    @ObservedObject var manager: TerminalManager
+    let startRenaming: Bool
+    let onRenameHandled: () -> Void
+
+    @State private var isHovered   = false
+    @State private var isRenaming  = false
+    @State private var editText    = ""
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Folder header row
+            HStack(spacing: 0) {
+                Rectangle().fill(Color.clear).frame(width: 3)
+                HStack(spacing: 8) {
+                    Image(systemName: folder.isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Color.sectionHeader)
+                        .frame(width: 10)
+                    Image(systemName: "folder")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.labelSecondary)
+                    if isRenaming {
+                        TextField("", text: $editText)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.labelPrimary)
+                            .textFieldStyle(.plain)
+                            .focused($fieldFocused)
+                            .onSubmit { commitRename() }
+                            .onExitCommand { isRenaming = false }
+                    } else {
+                        Text(folder.name)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.labelSecondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
+                    Text("\(folder.workspaces.count)")
+                        .font(.system(size: 10).monospacedDigit())
+                        .foregroundStyle(Color.sectionHeader.opacity(0.7))
+                }
+                .padding(.leading, 10)
+                .padding(.trailing, 10)
+                .padding(.vertical, 7)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(isHovered ? Color.rowHover : Color.clear)
+            .contentShape(Rectangle())
+            .onTapGesture { if !isRenaming { folder.isExpanded.toggle() } }
+            .onHover { isHovered = $0 }
+            .contextMenu {
+                Button("Rename") { beginRename() }
+                Divider()
+                if folder.workspaces.isEmpty {
+                    Button("Delete Folder", role: .destructive) { manager.deleteFolder(id: folder.id) }
+                }
+            }
+
+            if folder.isExpanded {
+                ForEach(folder.workspaces) { ws in
+                    WorkspaceRow(
+                        workspace: ws,
+                        manager: manager,
+                        isSelected: manager.selectedWorkspaceID == ws.id,
+                        onSelect: { manager.selectedWorkspaceID = ws.id },
+                        onClose:  { manager.closeWorkspace(id: ws.id) },
+                        indented: true
+                    )
+                }
+            }
+        }
+        .onAppear {
+            if startRenaming { beginRename(); onRenameHandled() }
+        }
+    }
+
+    private func beginRename() {
+        editText = folder.name
+        isRenaming = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { fieldFocused = true }
+    }
+
+    private func commitRename() {
+        let t = editText.trimmingCharacters(in: .whitespaces)
+        if !t.isEmpty { folder.name = t }
+        isRenaming = false
+    }
+}
+
 private struct WorkspaceRow: View {
     @ObservedObject var workspace: Workspace
+    @ObservedObject var manager: TerminalManager
     let isSelected: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
+    var indented: Bool = false
 
     @State private var isHovered = false
     @State private var isRenaming = false
@@ -560,6 +722,10 @@ private struct WorkspaceRow: View {
         isRenaming = false
     }
 
+    private var currentFolderID: UUID? {
+        manager.folders.first { $0.workspaces.contains { $0.id == workspace.id } }?.id
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             Rectangle()
@@ -567,6 +733,7 @@ private struct WorkspaceRow: View {
                 .frame(width: 3)
 
             HStack(spacing: 9) {
+                if indented { Spacer().frame(width: 14) }
                 Image(systemName: "square.stack")
                     .font(.system(size: 10))
                     .foregroundStyle(isSelected ? Color.accentOrange : Color.labelSecondary)
@@ -613,6 +780,21 @@ private struct WorkspaceRow: View {
         .onHover { isHovered = $0 }
         .contextMenu {
             Button("Rename") { startRename() }
+
+            if !manager.folders.isEmpty {
+                Menu("Move to Folder") {
+                    if currentFolderID != nil {
+                        Button("Remove from Folder") { manager.moveWorkspace(id: workspace.id, toFolder: nil) }
+                        Divider()
+                    }
+                    ForEach(manager.folders) { folder in
+                        if folder.id != currentFolderID {
+                            Button(folder.name) { manager.moveWorkspace(id: workspace.id, toFolder: folder.id) }
+                        }
+                    }
+                }
+            }
+
             Divider()
             Button("Close Workspace", role: .destructive) { onClose() }
         }
