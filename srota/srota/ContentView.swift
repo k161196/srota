@@ -380,8 +380,20 @@ final class WorkspaceFolder: Identifiable, ObservableObject {
 @MainActor
 final class TerminalManager: ObservableObject {
     @Published var workspaces: [Workspace] = []   // unfiled
-    @Published var folders: [WorkspaceFolder] = []
+    @Published var folders: [WorkspaceFolder] = [] {
+        didSet { rebindFolderSinks() }
+    }
     @Published var selectedWorkspaceID: UUID?
+
+    private var folderSinks: [AnyCancellable] = []
+
+    private func rebindFolderSinks() {
+        folderSinks = folders.map { folder in
+            folder.objectWillChange.sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+        }
+    }
 
     var allWorkspaces: [Workspace] { workspaces + folders.flatMap(\.workspaces) }
 
@@ -502,12 +514,12 @@ struct ContentView: View {
 
                 ZStack {
                     Color.black.ignoresSafeArea()
-                    if manager.workspaces.isEmpty {
+                    if manager.allWorkspaces.isEmpty {
                         Text("No workspace open")
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                     }
-                    ForEach(manager.workspaces) { ws in
+                    ForEach(manager.allWorkspaces) { ws in
                         WorkspaceContent(workspace: ws,
                                          selectedWorkspaceID: manager.selectedWorkspaceID)
                     }
