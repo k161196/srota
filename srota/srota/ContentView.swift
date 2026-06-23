@@ -568,10 +568,18 @@ struct ContentView: View {
     @State private var showBaseDirectoryPicker = false
     @State private var managementTab: ManagementTab = .workspaces
     @State private var restoredSessions = false
+    @State private var showSettings = false
 
     var body: some View {
         VStack(spacing: 0) {
-        TopNavBar(selected: $managementTab)
+        TopNavBar(
+            selected: $managementTab,
+            onSettings: { showSettings.toggle() },
+            onPresetLaunch: { preset in
+                let cmd = preset.commands.filter { !$0.isEmpty }.joined(separator: "\n") + "\n"
+                manager.selectedWorkspace?.selectedTab?.focusedViewState.send(cmd)
+            }
+        )
         ZStack {
         HStack(spacing: 0) {
             SidebarView(
@@ -704,6 +712,11 @@ struct ContentView: View {
             ManagementPanel(tab: managementTab)
                 .environment(db)
                 .environmentObject(manager)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(red: 0.067, green: 0.067, blue: 0.075))
+        }
+        if showSettings {
+            SettingsPanel(isPresented: $showSettings)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(red: 0.067, green: 0.067, blue: 0.075))
         }
