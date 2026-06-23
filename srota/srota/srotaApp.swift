@@ -13,7 +13,6 @@ struct srotaApp: App {
                 .environment(db)
                 .onAppear {
                     setupShellIntegration()
-                    TmuxManager.shared.writeConfig()
                     if let dir = settings.baseWorkingDirectory { db.scan(baseDir: dir) }
                 }
         }

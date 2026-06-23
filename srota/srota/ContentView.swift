@@ -18,11 +18,6 @@ private func makeLauncherConfig() -> TerminalConfiguration {
     return TerminalConfiguration(configure: { b in b.withCustom("command", launcher) })
 }
 
-private func makeTmuxConfig(sessionID: String, sessionName: String, cwd: String?) -> TerminalConfiguration {
-    let launcher = TmuxManager.shared.launcherScript(sessionID: sessionID, sessionName: sessionName, cwd: cwd)
-    return TerminalConfiguration(configure: { b in b.withCustom("command", launcher) })
-}
-
 /// Smart tab/pane title from CWD:
 ///   - git repo  → "reponame/branch"
 ///   - otherwise → "…/parent/dir"
@@ -102,13 +97,9 @@ struct PaneLayout {
 final class PaneEntry: Identifiable {
     let id = UUID()
     let viewState: TerminalViewState
-    var tmuxID: String?
-    var tmuxName: String?
     var initialCWD: String?
-    init(viewState: TerminalViewState, tmuxID: String? = nil, tmuxName: String? = nil, initialCWD: String? = nil) {
-        self.viewState = viewState
-        self.tmuxID    = tmuxID
-        self.tmuxName  = tmuxName
+    init(viewState: TerminalViewState, initialCWD: String? = nil) {
+        self.viewState  = viewState
         self.initialCWD = initialCWD
     }
 }
@@ -139,22 +130,12 @@ final class TerminalTab: Identifiable, ObservableObject {
     @Published private(set) var titleFromCWD: String = "Terminal"
     private var titleSink: AnyCancellable?
     var closeTabCallback: (() -> Void)?
-    let tmuxID: String?
-    let tmuxName: String?
     let initialWorkingDirectory: String?
-    private var paneCount = 0   // for naming split sessions
+    private var paneCount = 0
 
-    init(colorScheme: ColorScheme, workingDirectory: String? = nil, tmuxID: String? = nil, tmuxName: String? = nil) {
-        self.tmuxID   = tmuxID
-        self.tmuxName = tmuxName
+    init(colorScheme: ColorScheme, workingDirectory: String? = nil) {
         self.initialWorkingDirectory = workingDirectory
-        let config: TerminalConfiguration
-        if let id = tmuxID, let name = tmuxName, TmuxManager.shared.isAvailable {
-            config = makeTmuxConfig(sessionID: id, sessionName: name, cwd: workingDirectory)
-        } else {
-            config = makeLauncherConfig()
-        }
-        let state = TerminalViewState(terminalConfiguration: config)
+        let state = TerminalViewState(terminalConfiguration: makeLauncherConfig())
         state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: workingDirectory)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
         viewState = state
@@ -188,19 +169,8 @@ final class TerminalTab: Identifiable, ObservableObject {
         return viewState
     }
 
-    var focusedTmuxID: String? {
-        if let fid = focusedPaneID {
-            return secondaryPanes.first(where: { $0.id == fid })?.tmuxID
-        }
-        return tmuxID
-    }
-
     private func splitCWD() -> String? {
-        // tmux pane_current_path is authoritative — OSC 7 is intercepted by tmux, never reaches Ghostty
-        if let sid = focusedTmuxID {
-            return TmuxManager.shared.currentPath(sessionID: sid)
-        }
-        return resolveCWD(focusedViewState.workingDirectory) ?? initialWorkingDirectory
+        resolveCWD(focusedViewState.workingDirectory) ?? initialWorkingDirectory
     }
 
     func splitRight(colorScheme: ColorScheme) {
@@ -229,9 +199,6 @@ final class TerminalTab: Identifiable, ObservableObject {
     }
 
     func removePane(id: UUID) {
-        if let pane = secondaryPanes.first(where: { $0.id == id }), let sid = pane.tmuxID {
-            TmuxManager.shared.killSession(id: sid)
-        }
         expandNeighbor(of: .secondary(id))
         secondaryPanes.removeAll { $0.id == id }
         layouts.removeValue(forKey: id)
@@ -315,17 +282,13 @@ final class TerminalTab: Identifiable, ObservableObject {
         else { primaryLayout = l }
     }
 
-    /// Restore a saved secondary pane — reuses existing tmux session, no new session created.
+    /// Restore a saved secondary pane at its last known CWD.
     func restorePane(record: PaneRecord, colorScheme: ColorScheme) {
         let cwd = record.initialCWD.isEmpty ? nil : record.initialCWD
-        let config: TerminalConfiguration
-        if let id = record.tmuxID, let name = record.tmuxName {
-            config = makeTmuxConfig(sessionID: id, sessionName: name, cwd: cwd)
-        } else { config = makeLauncherConfig() }
-        let state = TerminalViewState(terminalConfiguration: config)
+        let state = TerminalViewState(terminalConfiguration: makeLauncherConfig())
         state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: cwd)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
-        let entry = PaneEntry(viewState: state, tmuxID: record.tmuxID, tmuxName: record.tmuxName, initialCWD: cwd)
+        let entry = PaneEntry(viewState: state, initialCWD: cwd)
         state.onClose = { [weak self, weak entry] _ in
             guard let self, let entry else { return }
             self.removePane(id: entry.id)
@@ -338,21 +301,10 @@ final class TerminalTab: Identifiable, ObservableObject {
     }
 
     private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirectory: String? = nil) {
-        paneCount += 1
-        let config: TerminalConfiguration
-        var paneTmuxID: String?
-        var paneTmuxName: String?
-        if let baseName = tmuxName, TmuxManager.shared.isAvailable {
-            paneTmuxName = "\(baseName)__p\(paneCount)"
-            paneTmuxID   = TmuxManager.shared.createSession(name: paneTmuxName!, cwd: workingDirectory)
-            if let id = paneTmuxID {
-                config = makeTmuxConfig(sessionID: id, sessionName: paneTmuxName!, cwd: workingDirectory)
-            } else { config = makeLauncherConfig() }
-        } else { config = makeLauncherConfig() }
-        let state = TerminalViewState(terminalConfiguration: config)
+        let state = TerminalViewState(terminalConfiguration: makeLauncherConfig())
         state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: workingDirectory)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
-        let entry = PaneEntry(viewState: state, tmuxID: paneTmuxID, tmuxName: paneTmuxName, initialCWD: workingDirectory)
+        let entry = PaneEntry(viewState: state, initialCWD: workingDirectory)
         state.onClose = { [weak self, weak entry] _ in
             guard let self, let entry else { return }
             self.removePane(id: entry.id)
@@ -402,15 +354,11 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var name: String
     @Published var tabs: [TerminalTab] = []
     @Published var selectedTabID: UUID?
-    var tmuxID: String?       // tmux session_id e.g. "$3" — stable across renames
-    var tmuxName: String?     // tmux session name — for fallback new-session
     private var lastColorScheme: ColorScheme = .dark
 
-    init(id: UUID = UUID(), name: String, tmuxID: String? = nil, tmuxName: String? = nil) {
-        self.id       = id
-        self.name     = name
-        self.tmuxID   = tmuxID
-        self.tmuxName = tmuxName
+    init(id: UUID = UUID(), name: String) {
+        self.id   = id
+        self.name = name
     }
 
     var selectedTab: TerminalTab? { tabs.first { $0.id == selectedTabID } }
@@ -419,19 +367,9 @@ final class Workspace: Identifiable, ObservableObject {
         resolveCWD(selectedTab?.focusedViewState.workingDirectory)
     }
 
-    var currentTmuxDirectory: String? {
-        selectedTab?.focusedTmuxID.flatMap { TmuxManager.shared.currentPath(sessionID: $0) }
-    }
-
     func addTab(colorScheme: ColorScheme, workingDirectory: String? = nil) {
         lastColorScheme = colorScheme
-        var tID = tmuxID, tName = tmuxName
-        // additional tabs get their own tmux session: {base}__t1, __t2, …
-        if !tabs.isEmpty, let baseName = tmuxName, TmuxManager.shared.isAvailable {
-            tName = "\(baseName)__t\(tabs.count)"
-            tID   = TmuxManager.shared.createSession(name: tName!, cwd: workingDirectory)
-        }
-        let tab = TerminalTab(colorScheme: colorScheme, workingDirectory: workingDirectory, tmuxID: tID, tmuxName: tName)
+        let tab = TerminalTab(colorScheme: colorScheme, workingDirectory: workingDirectory)
         tab.closeTabCallback = { [weak self, weak tab] in
             guard let self, let tab else { return }
             self.closeTab(id: tab.id)
@@ -448,12 +386,10 @@ final class Workspace: Identifiable, ObservableObject {
         selectedTabID = tab.id
     }
 
-    /// Restore a saved tab — reuses existing tmux session, no new session created.
     func addRestoredTab(record: TabRecord, colorScheme: ColorScheme) {
         lastColorScheme = colorScheme
         let cwd = record.initialCWD.isEmpty ? nil : record.initialCWD
-        let tab = TerminalTab(colorScheme: colorScheme, workingDirectory: cwd,
-                              tmuxID: record.tmuxID, tmuxName: record.tmuxName)
+        let tab = TerminalTab(colorScheme: colorScheme, workingDirectory: cwd)
         tab.closeTabCallback = { [weak self, weak tab] in
             guard let self, let tab else { return }
             self.closeTab(id: tab.id)
@@ -467,14 +403,7 @@ final class Workspace: Identifiable, ObservableObject {
         if record.isSelected { selectedTabID = tab.id }
     }
 
-    // Removes one tab. Workspace itself is never closed here —
-    // only closeWorkspace() on TerminalManager does that.
     func closeTab(id: UUID) {
-        if let tab = tabs.first(where: { $0.id == id }) {
-            let tmux = TmuxManager.shared
-            for pane in tab.secondaryPanes { if let sid = pane.tmuxID { tmux.killSession(id: sid) } }
-            if let sid = tab.tmuxID { tmux.killSession(id: sid) }
-        }
         if selectedTabID == id {
             if let idx = tabs.firstIndex(where: { $0.id == id }) {
                 let next = tabs.indices.contains(idx + 1) ? tabs[idx + 1].id
@@ -524,16 +453,9 @@ final class TerminalManager: ObservableObject {
         folders.first { $0.workspaces.contains { $0.id == wsID } }?.id
     }
 
-    func addWorkspace(colorScheme: ColorScheme, inFolder folderID: UUID? = nil, workingDirectory: String? = nil, name: String? = nil, tmuxName: String? = nil, tmuxID: String? = nil) {
+    func addWorkspace(colorScheme: ColorScheme, inFolder folderID: UUID? = nil, workingDirectory: String? = nil, name: String? = nil) {
         let wsName = name ?? "Workspace \(allWorkspaces.count + 1)"
-        let tmux = TmuxManager.shared
-        var resolvedTmuxName = tmuxName
-        var resolvedTmuxID   = tmuxID
-        if tmux.isAvailable && resolvedTmuxName == nil {
-            resolvedTmuxName = tmux.sessionName(folder: "", workspace: wsName)
-            resolvedTmuxID   = tmux.createSession(name: resolvedTmuxName!, cwd: workingDirectory)
-        }
-        let ws = Workspace(name: wsName, tmuxID: resolvedTmuxID, tmuxName: resolvedTmuxName)
+        let ws = Workspace(name: wsName)
         ws.addTab(colorScheme: colorScheme, workingDirectory: workingDirectory)
         if let folderID, let folder = folders.first(where: { $0.id == folderID }) {
             folder.workspaces.append(ws)
@@ -555,14 +477,6 @@ final class TerminalManager: ObservableObject {
     }
 
     func closeWorkspace(id: UUID) {
-        if let ws = allWorkspaces.first(where: { $0.id == id }) {
-            let tmux = TmuxManager.shared
-            for tab in ws.tabs {
-                for pane in tab.secondaryPanes { if let sid = pane.tmuxID { tmux.killSession(id: sid) } }
-                if let sid = tab.tmuxID { tmux.killSession(id: sid) }
-            }
-            if let sid = ws.tmuxID { tmux.killSession(id: sid) }
-        }
         if selectedWorkspaceID == id {
             let all = allWorkspaces
             if let idx = all.firstIndex(where: { $0.id == id }) {
@@ -738,29 +652,21 @@ struct ContentView: View {
                 return
             }
 
-            let tmux = TmuxManager.shared
-            let tName = tmux.isAvailable
-                ? tmux.sessionName(folder: folderName ?? "", workspace: wsName ?? "")
-                : nil
-
             if needsWorktree {
                 Task.detached {
-                    // git worktree first, then tmux session
                     let p = Process()
                     p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
                     p.arguments = ["-C", projectPath, "worktree", "add", path, branchRef]
                     p.standardError = Pipe()
                     try? p.run(); p.waitUntilExit()
-                    let tID = tName.flatMap { tmux.createSession(name: $0, cwd: path) }
                     await MainActor.run { [folderID] in
                         manager.addWorkspace(colorScheme: colorScheme, inFolder: folderID,
-                                             workingDirectory: path, name: wsName,
-                                             tmuxName: tName, tmuxID: tID)
+                                             workingDirectory: path, name: wsName)
                         db.saveWorkspaceSession(WorkspaceSession(
                             id: manager.allWorkspaces.last?.id.uuidString ?? UUID().uuidString,
                             name: wsName ?? "", folderName: folderName ?? "",
                             folderTag: folderTag, position: 0,
-                            tmuxID: tID, tmuxName: tName, lastCWD: path,
+                            lastCWD: path,
                             lastAccessed: Int(Date().timeIntervalSince1970)))
                         managementTab = .workspaces
                         saveLayout()
@@ -768,15 +674,13 @@ struct ContentView: View {
                     }
                 }
             } else {
-                let tID = tName.flatMap { tmux.createSession(name: $0, cwd: path) }
                 manager.addWorkspace(colorScheme: colorScheme, inFolder: folderID,
-                                     workingDirectory: path, name: wsName,
-                                     tmuxName: tName, tmuxID: tID)
+                                     workingDirectory: path, name: wsName)
                 if let ws = manager.allWorkspaces.last {
                     db.saveWorkspaceSession(WorkspaceSession(
                         id: ws.id.uuidString, name: ws.name,
                         folderName: folderName ?? "", folderTag: folderTag,
-                        position: candidatePool.count, tmuxID: tID, tmuxName: tName,
+                        position: candidatePool.count,
                         lastCWD: path, lastAccessed: Int(Date().timeIntervalSince1970)))
                 }
                 managementTab = .workspaces
@@ -809,31 +713,26 @@ struct ContentView: View {
             db.saveWorkspaceSession(WorkspaceSession(
                 id: ws.id.uuidString, name: ws.name,
                 folderName: folderName, folderTag: folderTag, position: position,
-                tmuxID: ws.tmuxID, tmuxName: ws.tmuxName,
                 lastCWD: ws.currentWorkingDirectory ?? "",
                 lastAccessed: Int(Date().timeIntervalSince1970)))
             db.deleteTabs(workspaceID: ws.id.uuidString)
             for (ti, tab) in ws.tabs.enumerated() {
                 db.saveTab(TabRecord(
                     id: tab.id.uuidString, workspaceID: ws.id.uuidString,
-                    position: ti, tmuxID: tab.tmuxID, tmuxName: tab.tmuxName,
+                    position: ti,
                     initialCWD: tab.initialWorkingDirectory ?? "",
                     isSelected: tab.id == ws.selectedTabID))
-                // primary pane
                 db.savePane(PaneRecord(
                     id: "\(tab.id)_primary", tabID: tab.id.uuidString, isPrimary: true,
                     lx: Double(tab.primaryLayout.x), ly: Double(tab.primaryLayout.y),
                     lw: Double(tab.primaryLayout.w), lh: Double(tab.primaryLayout.h),
-                    tmuxID: tab.tmuxID, tmuxName: tab.tmuxName,
                     initialCWD: tab.initialWorkingDirectory ?? ""))
-                // secondary panes
                 for pane in tab.secondaryPanes {
                     if let layout = tab.layouts[pane.id] {
                         db.savePane(PaneRecord(
                             id: pane.id.uuidString, tabID: tab.id.uuidString, isPrimary: false,
                             lx: Double(layout.x), ly: Double(layout.y),
                             lw: Double(layout.w), lh: Double(layout.h),
-                            tmuxID: pane.tmuxID, tmuxName: pane.tmuxName,
                             initialCWD: pane.initialCWD ?? ""))
                     }
                 }
@@ -853,71 +752,41 @@ struct ContentView: View {
             manager.addWorkspace(colorScheme: colorScheme)
             return
         }
-        let tmux = TmuxManager.shared
-        Task.detached {
-            let liveIDs = tmux.liveSessionIDs()
-            await MainActor.run {
-                for session in saved {
-                    let folder = session.folderName.isEmpty
-                        ? nil
-                        : manager.folder(named: session.folderName, tag: session.folderTag)
-
-                    // ensure launcher script exists (idempotent write)
-                    var tmuxID = session.tmuxID
-                    var tmuxName = session.tmuxName
-                    if let id = tmuxID, !liveIDs.contains(id), let name = tmuxName {
-                        // session was killed — create fresh one at last known CWD
-                        let cwd = session.lastCWD.isEmpty ? nil : session.lastCWD
-                        tmuxID = tmux.createSession(name: name, cwd: cwd)
-                    }
-                    if let id = tmuxID, let name = tmuxName {
-                        _ = tmux.launcherScript(sessionID: id, sessionName: name,
-                                                cwd: session.lastCWD.isEmpty ? nil : session.lastCWD)
-                    }
-
-                    let wsID = UUID(uuidString: session.id) ?? UUID()
-                    let ws = Workspace(id: wsID, name: session.name, tmuxID: tmuxID, tmuxName: tmuxName)
-                    let cwd = session.lastCWD.isEmpty ? nil : session.lastCWD
-                    let tabs = db.loadTabs(workspaceID: session.id)
-                    if tabs.isEmpty {
-                        ws.addTab(colorScheme: colorScheme, workingDirectory: cwd)
-                    } else {
-                        for tabRecord in tabs.sorted(by: { $0.position < $1.position }) {
-                            // primary tab (pos 0) IS the workspace session — sync its ID
-                            var rec = tabRecord
-                            if tabRecord.position == 0 {
-                                rec = TabRecord(id: tabRecord.id, workspaceID: tabRecord.workspaceID,
-                                                position: 0, tmuxID: tmuxID, tmuxName: tmuxName,
-                                                initialCWD: tabRecord.initialCWD,
-                                                isSelected: tabRecord.isSelected)
-                            }
-                            ws.addRestoredTab(record: rec, colorScheme: colorScheme)
-                            if let tab = ws.tabs.last {
-                                let panes = db.loadPanes(tabID: tabRecord.id)
-                                for pane in panes where !pane.isPrimary {
-                                    tab.restorePane(record: pane, colorScheme: colorScheme)
-                                }
-                                // restore primary layout if saved
-                                if let primary = panes.first(where: { $0.isPrimary }) {
-                                    tab.primaryLayout = PaneLayout(
-                                        x: CGFloat(primary.lx), y: CGFloat(primary.ly),
-                                        w: CGFloat(primary.lw), h: CGFloat(primary.lh))
-                                }
-                            }
+        for session in saved {
+            let folder = session.folderName.isEmpty
+                ? nil
+                : manager.folder(named: session.folderName, tag: session.folderTag)
+            let wsID = UUID(uuidString: session.id) ?? UUID()
+            let ws = Workspace(id: wsID, name: session.name)
+            let cwd = session.lastCWD.isEmpty ? nil : session.lastCWD
+            let tabs = db.loadTabs(workspaceID: session.id)
+            if tabs.isEmpty {
+                ws.addTab(colorScheme: colorScheme, workingDirectory: cwd)
+            } else {
+                for tabRecord in tabs.sorted(by: { $0.position < $1.position }) {
+                    ws.addRestoredTab(record: tabRecord, colorScheme: colorScheme)
+                    if let tab = ws.tabs.last {
+                        let panes = db.loadPanes(tabID: tabRecord.id)
+                        for pane in panes where !pane.isPrimary {
+                            tab.restorePane(record: pane, colorScheme: colorScheme)
                         }
-                        if ws.selectedTabID == nil { ws.selectedTabID = ws.tabs.first?.id }
-                    }
-                    if let folder {
-                        folder.workspaces.append(ws)
-                    } else {
-                        manager.workspaces.append(ws)
+                        if let primary = panes.first(where: { $0.isPrimary }) {
+                            tab.primaryLayout = PaneLayout(
+                                x: CGFloat(primary.lx), y: CGFloat(primary.ly),
+                                w: CGFloat(primary.lw), h: CGFloat(primary.lh))
+                        }
                     }
                 }
-                if manager.selectedWorkspaceID == nil {
-                    manager.selectedWorkspaceID = manager.allWorkspaces.first?.id
-                }
-                TmuxManager.shared.applyGlobalOptions()
+                if ws.selectedTabID == nil { ws.selectedTabID = ws.tabs.first?.id }
             }
+            if let folder {
+                folder.workspaces.append(ws)
+            } else {
+                manager.workspaces.append(ws)
+            }
+        }
+        if manager.selectedWorkspaceID == nil {
+            manager.selectedWorkspaceID = manager.allWorkspaces.first?.id
         }
     }
 }
@@ -1285,7 +1154,7 @@ private struct TabBarView: View {
                         )
                     }
 
-                    Button(action: { workspace.addTab(colorScheme: colorScheme, workingDirectory: workspace.currentTmuxDirectory ?? workspace.currentWorkingDirectory); onMutation() }) {
+                    Button(action: { workspace.addTab(colorScheme: colorScheme, workingDirectory: workspace.currentWorkingDirectory); onMutation() }) {
                         Image(systemName: "plus")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(Color.labelMuted)

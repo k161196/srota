@@ -19,8 +19,6 @@ struct WorkspaceSession: Identifiable {
     var folderName: String
     var folderTag: String
     var position: Int
-    var tmuxID: String?
-    var tmuxName: String?
     var lastCWD: String
     var lastAccessed: Int
 }
@@ -29,8 +27,6 @@ struct TabRecord: Identifiable {
     var id: String
     var workspaceID: String
     var position: Int
-    var tmuxID: String?
-    var tmuxName: String?
     var initialCWD: String
     var isSelected: Bool
 }
@@ -40,8 +36,6 @@ struct PaneRecord: Identifiable {
     var tabID: String
     var isPrimary: Bool
     var lx, ly, lw, lh: Double   // fractional layout (0–1)
-    var tmuxID: String?
-    var tmuxName: String?
     var initialCWD: String
 }
 
@@ -285,7 +279,6 @@ final class WorkspaceDB {
             "id": s.id, "name": s.name,
             "folder_name": s.folderName, "folder_tag": s.folderTag,
             "position": String(s.position),
-            "tmux_id": s.tmuxID ?? "", "tmux_name": s.tmuxName ?? "",
             "last_cwd": s.lastCWD,
             "last_accessed": String(s.lastAccessed)
         ])
@@ -304,7 +297,6 @@ final class WorkspaceDB {
         upsert("ws_tabs", [
             "id": t.id, "workspace_id": t.workspaceID,
             "position": String(t.position),
-            "tmux_id": t.tmuxID ?? "", "tmux_name": t.tmuxName ?? "",
             "initial_cwd": t.initialCWD,
             "is_selected": t.isSelected ? "1" : "0"
         ])
@@ -320,14 +312,12 @@ final class WorkspaceDB {
     }
 
     func loadTabs(workspaceID: String) -> [TabRecord] {
-        rows("SELECT id,workspace_id,position,tmux_id,tmux_name,initial_cwd,is_selected FROM ws_tabs WHERE workspace_id=? ORDER BY position",
+        rows("SELECT id,workspace_id,position,initial_cwd,is_selected FROM ws_tabs WHERE workspace_id=? ORDER BY position",
              bind: [workspaceID]) { stmt in
             TabRecord(id: col(stmt,0), workspaceID: col(stmt,1),
                       position: Int(sqlite3_column_int(stmt,2)),
-                      tmuxID:   col(stmt,3).isEmpty ? nil : col(stmt,3),
-                      tmuxName: col(stmt,4).isEmpty ? nil : col(stmt,4),
-                      initialCWD: col(stmt,5),
-                      isSelected: sqlite3_column_int(stmt,6) != 0)
+                      initialCWD: col(stmt,3),
+                      isSelected: sqlite3_column_int(stmt,4) != 0)
         }
     }
 
@@ -336,7 +326,6 @@ final class WorkspaceDB {
             "id": p.id, "tab_id": p.tabID,
             "is_primary": p.isPrimary ? "1" : "0",
             "lx": String(p.lx), "ly": String(p.ly), "lw": String(p.lw), "lh": String(p.lh),
-            "tmux_id": p.tmuxID ?? "", "tmux_name": p.tmuxName ?? "",
             "initial_cwd": p.initialCWD
         ])
     }
@@ -344,22 +333,20 @@ final class WorkspaceDB {
     func deletePanes(tabID: String) { exec("DELETE FROM ws_panes WHERE tab_id = ?", [tabID]) }
 
     func loadPanes(tabID: String) -> [PaneRecord] {
-        rows("SELECT id,tab_id,is_primary,lx,ly,lw,lh,tmux_id,tmux_name,initial_cwd FROM ws_panes WHERE tab_id=?",
+        rows("SELECT id,tab_id,is_primary,lx,ly,lw,lh,initial_cwd FROM ws_panes WHERE tab_id=?",
              bind: [tabID]) { stmt in
             PaneRecord(id: col(stmt,0), tabID: col(stmt,1),
                        isPrimary: sqlite3_column_int(stmt,2) != 0,
                        lx: sqlite3_column_double(stmt,3), ly: sqlite3_column_double(stmt,4),
                        lw: sqlite3_column_double(stmt,5), lh: sqlite3_column_double(stmt,6),
-                       tmuxID:   col(stmt,7).isEmpty ? nil : col(stmt,7),
-                       tmuxName: col(stmt,8).isEmpty ? nil : col(stmt,8),
-                       initialCWD: col(stmt,9))
+                       initialCWD: col(stmt,7))
         }
     }
 
     func loadWorkspaceSessions() -> [WorkspaceSession] {
         let all = rows("""
             SELECT id, name, folder_name, folder_tag, position,
-                   tmux_id, tmux_name, last_cwd, last_accessed
+                   last_cwd, last_accessed
             FROM ws_workspaces ORDER BY folder_name, position
         """) { stmt in
             WorkspaceSession(
@@ -368,10 +355,8 @@ final class WorkspaceDB {
                 folderName:   col(stmt, 2),
                 folderTag:    col(stmt, 3),
                 position:     Int(sqlite3_column_int(stmt, 4)),
-                tmuxID:       col(stmt, 5).isEmpty ? nil : col(stmt, 5),
-                tmuxName:     col(stmt, 6).isEmpty ? nil : col(stmt, 6),
-                lastCWD:      col(stmt, 7),
-                lastAccessed: Int(sqlite3_column_int(stmt, 8))
+                lastCWD:      col(stmt, 5),
+                lastAccessed: Int(sqlite3_column_int(stmt, 6))
             )
         }
         // dedup: keep newest per (folder, name); delete orphans
