@@ -3,8 +3,9 @@ import SwiftUI
 @main
 struct srotaApp: App {
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("Srota - स्रोत") {
             ContentView()
+                .preferredColorScheme(.dark)
                 .onAppear { setupShellIntegration() }
         }
     }
