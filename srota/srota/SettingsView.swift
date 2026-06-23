@@ -16,8 +16,18 @@ private extension Color {
 struct SettingsPanel: View {
     @Binding var isPresented: Bool
     @Environment(PresetsStore.self) private var store
-    @State private var editingPreset: TerminalPreset? = nil
-    @State private var showAdd = false
+    @State private var activeSheet: SettingsSheet? = nil
+
+    enum SettingsSheet: Identifiable {
+        case add
+        case edit(TerminalPreset)
+        var id: String {
+            switch self {
+            case .add: return "add"
+            case .edit(let p): return p.id.uuidString
+            }
+        }
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -25,28 +35,30 @@ struct SettingsPanel: View {
                 .frame(width: 200)
             Rectangle().fill(Color.stBorder).frame(width: 1)
             TerminalSettingsView(
-                onEdit: { editingPreset = $0 },
-                onAdd:  { showAdd = true }
+                onEdit: { activeSheet = .edit($0) },
+                onAdd:  { activeSheet = .add }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.stBg)
-        .sheet(item: $editingPreset) { preset in
-            PresetEditSheet(
-                preset: preset,
-                isNew: false,
-                onSave:   { store.update($0) },
-                onDelete: { store.delete(id: preset.id) }
-            )
-        }
-        .sheet(isPresented: $showAdd) {
-            PresetEditSheet(
-                preset: TerminalPreset(name: "", commands: [""]),
-                isNew: true,
-                onSave:   { if !$0.name.isEmpty { store.add($0) } },
-                onDelete: nil
-            )
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .add:
+                PresetEditSheet(
+                    preset: TerminalPreset(name: "", commands: [""]),
+                    isNew: true,
+                    onSave:   { if !$0.name.isEmpty { store.add($0) } },
+                    onDelete: nil
+                )
+            case .edit(let preset):
+                PresetEditSheet(
+                    preset: preset,
+                    isNew: false,
+                    onSave:   { store.update($0) },
+                    onDelete: { store.delete(id: preset.id) }
+                )
+            }
         }
     }
 }
@@ -315,14 +327,26 @@ struct PresetEditSheet: View {
                             .font(.system(size: 11))
                             .foregroundStyle(Color.stMuted.opacity(0.7))
                         ForEach(draft.commands.indices, id: \.self) { i in
-                            TextField("", text: $draft.commands[i])
-                                .textFieldStyle(.plain)
-                                .font(.system(size: 13, design: .monospaced))
-                                .foregroundStyle(Color.stLabel)
-                                .padding(10)
-                                .background(Color.stSurface)
-                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.stBorder))
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                            HStack(spacing: 8) {
+                                TextField("", text: $draft.commands[i])
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundStyle(Color.stLabel)
+                                    .padding(10)
+                                    .background(Color.stSurface)
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.stBorder))
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                if draft.commands.count > 1 {
+                                    Button {
+                                        draft.commands.remove(at: i)
+                                    } label: {
+                                        Image(systemName: "minus.circle")
+                                            .font(.system(size: 14))
+                                            .foregroundStyle(Color.stMuted)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
                         }
                         Button {
                             draft.commands.append("")
@@ -361,16 +385,18 @@ struct PresetEditSheet: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
+                let nameIsEmpty = draft.name.trimmingCharacters(in: .whitespaces).isEmpty
                 Button("Done") {
                     onSave(draft)
                     dismiss()
                 }
+                .disabled(nameIsEmpty)
                 .buttonStyle(.plain)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(Color.black)
+                .foregroundStyle(nameIsEmpty ? Color.black.opacity(0.4) : Color.black)
                 .padding(.horizontal, 18)
                 .padding(.vertical, 8)
-                .background(Color.stAccent)
+                .background(nameIsEmpty ? Color.stAccent.opacity(0.4) : Color.stAccent)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
             .padding(.horizontal, 24)

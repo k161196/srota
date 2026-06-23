@@ -576,7 +576,9 @@ struct ContentView: View {
             selected: $managementTab,
             onSettings: { showSettings.toggle() },
             onPresetLaunch: { preset in
-                let cmd = preset.commands.filter { !$0.isEmpty }.joined(separator: "\n") + "\n"
+                let filtered = preset.commands.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                guard !filtered.isEmpty else { return }
+                let cmd = filtered.joined(separator: "\n") + "\n"
                 manager.selectedWorkspace?.selectedTab?.focusedViewState.send(cmd)
             }
         )
