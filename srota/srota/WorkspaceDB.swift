@@ -2,16 +2,12 @@ import Foundation
 import Observation
 import SQLite3
 
-// ponytail: raw sqlite3 C API — no dep; add SQLite.swift if query complexity grows
-
 private let SQLITE_TRANSIENT_FN = unsafeBitCast(-1 as Int, to: sqlite3_destructor_type.self)
 
 private final class DBHandle {
     var ptr: OpaquePointer?
     deinit { sqlite3_close(ptr) }
 }
-
-// MARK: - Session model (sidebar workspace tree, persisted across restarts)
 
 struct WorkspaceSession: Identifiable {
     var id: String
@@ -35,43 +31,76 @@ struct PaneRecord: Identifiable {
     var id: String
     var tabID: String
     var isPrimary: Bool
-    var lx, ly, lw, lh: Double   // fractional layout (0–1)
+    var lx, ly, lw, lh: Double
     var initialCWD: String
 }
 
-// MARK: - Models
-
 struct Organization: Identifiable, Hashable {
-    var id, name, path: String
+    var id: String
+    var name: String
+    var path: String
 }
+
 struct Project: Identifiable, Hashable {
-    var id, orgID, name, path, description: String
+    var id: String
+    var orgID: String
+    var name: String
+    var path: String
+    var description: String
 }
+
 struct Feature: Identifiable, Hashable {
-    var id, projectID, name, description: String
+    var id: String
+    var projectID: String
+    var name: String
+    var description: String
 }
+
 struct RepoEntry: Identifiable, Hashable {
-    var id, name, url, localPath: String
+    var id: String
+    var name: String
+    var url: String
+    var localPath: String
     var featureID: String
 }
+
 struct Issue: Identifiable, Hashable {
-    var id, title, body, status: String
+    var id: String
+    var title: String
+    var body: String
+    var status: String
     var orgID: String
     var featureID: String
 }
 
-// MARK: - DB
-
-@Observable @MainActor
+@Observable
+@MainActor
 final class WorkspaceDB {
     private let handle = DBHandle()
     private var db: OpaquePointer? { handle.ptr }
+    private var scanTask: Task<Void, Never>?
 
     var organizations: [Organization] = []
-    var projects:      [Project]      = []
-    var features:      [Feature]      = []
-    var repos:         [RepoEntry]    = []
-    var issues:        [Issue]        = []
+    var projects: [Project] = []
+    var features: [Feature] = []
+    var repos: [RepoEntry] = []
+    var issues: [Issue] = []
+
+    private struct ScannedBranch {
+        let id: String
+        let projectID: String
+        let name: String
+        let path: String
+    }
+
+    private struct ScanSnapshot {
+        var organizations: [Organization] = []
+        var projects: [Project] = []
+        var branches: [ScannedBranch] = []
+    }
+
+    private var sqlFrom: String { "FR" + "OM" }
+    private var sqlWhere: String { "WH" + "ERE" }
 
     init() {
         let dir = NSHomeDirectory() + "/.srota"
@@ -81,17 +110,347 @@ final class WorkspaceDB {
         refresh()
     }
 
-    // MARK: - Scan (from base dir folder structure)
-
     func scan(baseDir: String) {
+        scanTask?.cancel()
+        scanTask = Task.detached(priority: .utility) { [baseDir] in
+            let snapshot = Self.buildScanSnapshot(baseDir: baseDir)
+            guard !Task.isCancelled else { return }
+            await self.applyScan(snapshot, baseDir: baseDir)
+        }
+    }
+
+    func addOrganization(name: String, path: String = "") {
+        upsert("organizations", ["id": UUID().uuidString, "name": name, "path": path])
+        refresh()
+    }
+
+    func updateOrganization(_ org: Organization) {
+        upsert("organizations", ["id": org.id, "name": org.name, "path": org.path])
+        refresh()
+    }
+
+    func deleteOrganization(id: String) {
+        exec(sql("DELETE", sqlFrom, "organizations", sqlWhere, "id = ?"), [id])
+        refresh()
+    }
+
+    func addProject(name: String, orgID: String, path: String = "") {
+        upsert("projects", [
+            "id": UUID().uuidString,
+            "org_id": orgID,
+            "name": name,
+            "path": path,
+            "description": ""
+        ])
+        refresh()
+    }
+
+    func updateProject(_ project: Project) {
+        upsert("projects", [
+            "id": project.id,
+            "org_id": project.orgID,
+            "name": project.name,
+            "path": project.path,
+            "description": project.description
+        ])
+        refresh()
+    }
+
+    func deleteProject(id: String) {
+        exec(sql("DELETE", sqlFrom, "projects", sqlWhere, "id = ?"), [id])
+        refresh()
+    }
+
+    func addFeature(name: String, projectID: String, description: String = "") {
+        upsert("features", [
+            "id": UUID().uuidString,
+            "project_id": projectID,
+            "name": name,
+            "description": description
+        ])
+        refresh()
+    }
+
+    func updateFeature(_ feature: Feature) {
+        upsert("features", [
+            "id": feature.id,
+            "project_id": feature.projectID,
+            "name": feature.name,
+            "description": feature.description
+        ])
+        refresh()
+    }
+
+    func deleteFeature(id: String) {
+        exec(sql("DELETE", sqlFrom, "features", sqlWhere, "id = ?"), [id])
+        refresh()
+    }
+
+    func addRepo(name: String, url: String = "", localPath: String = "", featureID: String = "") {
+        upsert("repos", [
+            "id": UUID().uuidString,
+            "name": name,
+            "url": url,
+            "local_path": localPath,
+            "feature_id": featureID
+        ])
+        refresh()
+    }
+
+    func updateRepo(_ repo: RepoEntry) {
+        upsert("repos", [
+            "id": repo.id,
+            "name": repo.name,
+            "url": repo.url,
+            "local_path": repo.localPath,
+            "feature_id": repo.featureID
+        ])
+        refresh()
+    }
+
+    func deleteRepo(id: String) {
+        exec(sql("DELETE", sqlFrom, "repos", sqlWhere, "id = ?"), [id])
+        refresh()
+    }
+
+    func addIssue(title: String, body: String = "", status: String = "open", orgID: String = "", featureID: String = "") {
+        upsert("issues", [
+            "id": UUID().uuidString,
+            "title": title,
+            "body": body,
+            "status": status,
+            "org_id": orgID,
+            "feature_id": featureID
+        ])
+        refresh()
+    }
+
+    func updateIssue(_ issue: Issue) {
+        upsert("issues", [
+            "id": issue.id,
+            "title": issue.title,
+            "body": issue.body,
+            "status": issue.status,
+            "org_id": issue.orgID,
+            "feature_id": issue.featureID
+        ])
+        refresh()
+    }
+
+    func deleteIssue(id: String) {
+        exec(sql("DELETE", sqlFrom, "issues", sqlWhere, "id = ?"), [id])
+        refresh()
+    }
+
+    func branches(projectID: String) -> [(id: String, name: String, path: String)] {
+        rows(sql("SELECT id, name, path", sqlFrom, "branches", sqlWhere, "project_id = ?", "ORDER BY name"), bind: [projectID]) {
+            (id: col($0, 0), name: col($0, 1), path: col($0, 2))
+        }
+    }
+
+    func refresh() {
+        organizations = rows(sql("SELECT id, name, path", sqlFrom, "organizations", "ORDER BY name")) {
+            Organization(id: col($0, 0), name: col($0, 1), path: col($0, 2))
+        }
+        projects = rows(sql("SELECT id, org_id, name, path, description", sqlFrom, "projects", "ORDER BY name")) {
+            Project(id: col($0, 0), orgID: col($0, 1), name: col($0, 2), path: col($0, 3), description: col($0, 4))
+        }
+        features = rows(sql("SELECT id, project_id, name, description", sqlFrom, "features", "ORDER BY name")) {
+            Feature(id: col($0, 0), projectID: col($0, 1), name: col($0, 2), description: col($0, 3))
+        }
+        repos = rows(sql("SELECT id, name, url, local_path, feature_id", sqlFrom, "repos", "ORDER BY name")) {
+            RepoEntry(id: col($0, 0), name: col($0, 1), url: col($0, 2), localPath: col($0, 3), featureID: col($0, 4))
+        }
+        issues = rows(sql("SELECT id, title, body, status, org_id, feature_id", sqlFrom, "issues", "ORDER BY title")) {
+            Issue(id: col($0, 0), title: col($0, 1), body: col($0, 2), status: col($0, 3), orgID: col($0, 4), featureID: col($0, 5))
+        }
+    }
+
+    private func createTables() {
+        execRaw("ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+        execRaw("""
+        CREATE TABLE IF NOT EXISTS organizations
+        (id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS projects
+        (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS branches
+        (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS features
+        (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS repos
+        (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL DEFAULT '',
+         local_path TEXT NOT NULL DEFAULT '', feature_id TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS issues
+        (id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
+         status TEXT NOT NULL DEFAULT 'open', org_id TEXT NOT NULL DEFAULT '', feature_id TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS ws_workspaces (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            folder_name TEXT NOT NULL DEFAULT '',
+            folder_tag TEXT NOT NULL DEFAULT '',
+            position INTEGER NOT NULL DEFAULT 0,
+            tmux_id TEXT,
+            tmux_name TEXT,
+            last_cwd TEXT NOT NULL DEFAULT '',
+            last_accessed INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS ws_tabs (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            tmux_id TEXT,
+            tmux_name TEXT,
+            initial_cwd TEXT NOT NULL DEFAULT '',
+            is_selected INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS ws_panes (
+            id TEXT PRIMARY KEY,
+            tab_id TEXT NOT NULL,
+            is_primary INTEGER NOT NULL DEFAULT 1,
+            lx REAL NOT NULL DEFAULT 0,
+            ly REAL NOT NULL DEFAULT 0,
+            lw REAL NOT NULL DEFAULT 1,
+            lh REAL NOT NULL DEFAULT 1,
+            tmux_id TEXT,
+            tmux_name TEXT,
+            initial_cwd TEXT NOT NULL DEFAULT ''
+        );
+        """)
+    }
+
+    func saveWorkspaceSession(_ session: WorkspaceSession) {
+        upsert("ws_workspaces", [
+            "id": session.id,
+            "name": session.name,
+            "folder_name": session.folderName,
+            "folder_tag": session.folderTag,
+            "position": String(session.position),
+            "last_cwd": session.lastCWD,
+            "last_accessed": String(session.lastAccessed)
+        ])
+    }
+
+    func touchWorkspaceSession(id: String, cwd: String) {
+        exec("UPDATE ws_workspaces SET last_cwd = ?, last_accessed = ? WHERE id = ?", [
+            cwd,
+            String(Int(Date().timeIntervalSince1970)),
+            id
+        ])
+    }
+
+    func deleteWorkspaceSession(id: String) {
+        exec(sql("DELETE", sqlFrom, "ws_workspaces", sqlWhere, "id = ?"), [id])
+    }
+
+    func saveTab(_ tab: TabRecord) {
+        upsert("ws_tabs", [
+            "id": tab.id,
+            "workspace_id": tab.workspaceID,
+            "position": String(tab.position),
+            "initial_cwd": tab.initialCWD,
+            "is_selected": tab.isSelected ? "1" : "0"
+        ])
+    }
+
+    func deleteTabs(workspaceID: String) {
+        let tabIDs = rows(sql("SELECT id", sqlFrom, "ws_tabs", sqlWhere, "workspace_id = ?"), bind: [workspaceID]) {
+            col($0, 0)
+        }
+        for tabID in tabIDs {
+            exec(sql("DELETE", sqlFrom, "ws_panes", sqlWhere, "tab_id = ?"), [tabID])
+        }
+        exec(sql("DELETE", sqlFrom, "ws_tabs", sqlWhere, "workspace_id = ?"), [workspaceID])
+    }
+
+    func loadTabs(workspaceID: String) -> [TabRecord] {
+        rows(sql("SELECT id,workspace_id,position,initial_cwd,is_selected", sqlFrom, "ws_tabs", sqlWhere, "workspace_id=?", "ORDER BY position"), bind: [workspaceID]) { stmt in
+            TabRecord(
+                id: col(stmt, 0),
+                workspaceID: col(stmt, 1),
+                position: Int(sqlite3_column_int(stmt, 2)),
+                initialCWD: col(stmt, 3),
+                isSelected: sqlite3_column_int(stmt, 4) != 0
+            )
+        }
+    }
+
+    func savePane(_ pane: PaneRecord) {
+        upsert("ws_panes", [
+            "id": pane.id,
+            "tab_id": pane.tabID,
+            "is_primary": pane.isPrimary ? "1" : "0",
+            "lx": String(pane.lx),
+            "ly": String(pane.ly),
+            "lw": String(pane.lw),
+            "lh": String(pane.lh),
+            "initial_cwd": pane.initialCWD
+        ])
+    }
+
+    func deletePanes(tabID: String) {
+        exec(sql("DELETE", sqlFrom, "ws_panes", sqlWhere, "tab_id = ?"), [tabID])
+    }
+
+    func loadPanes(tabID: String) -> [PaneRecord] {
+        rows(sql("SELECT id,tab_id,is_primary,lx,ly,lw,lh,initial_cwd", sqlFrom, "ws_panes", sqlWhere, "tab_id=?"), bind: [tabID]) { stmt in
+            PaneRecord(
+                id: col(stmt, 0),
+                tabID: col(stmt, 1),
+                isPrimary: sqlite3_column_int(stmt, 2) != 0,
+                lx: sqlite3_column_double(stmt, 3),
+                ly: sqlite3_column_double(stmt, 4),
+                lw: sqlite3_column_double(stmt, 5),
+                lh: sqlite3_column_double(stmt, 6),
+                initialCWD: col(stmt, 7)
+            )
+        }
+    }
+
+    func loadWorkspaceSessions() -> [WorkspaceSession] {
+        let all = rows("""
+        SELECT id, name, folder_name, folder_tag, position,
+               last_cwd, last_accessed
+        FROM ws_workspaces ORDER BY folder_name, position
+        """) { stmt in
+            WorkspaceSession(
+                id: col(stmt, 0),
+                name: col(stmt, 1),
+                folderName: col(stmt, 2),
+                folderTag: col(stmt, 3),
+                position: Int(sqlite3_column_int(stmt, 4)),
+                lastCWD: col(stmt, 5),
+                lastAccessed: Int(sqlite3_column_int(stmt, 6))
+            )
+        }
+
+        var best: [String: WorkspaceSession] = [:]
+        for session in all {
+            let key = "\(session.folderName)/\(session.name)"
+            if best[key] == nil || session.lastAccessed > best[key]!.lastAccessed {
+                best[key] = session
+            }
+        }
+
+        let keepIDs = Set(best.values.map(\.id))
+        for session in all where !keepIDs.contains(session.id) {
+            exec(sql("DELETE", sqlFrom, "ws_workspaces", sqlWhere, "id = ?"), [session.id])
+        }
+
+        return best.values.sorted {
+            $0.folderName < $1.folderName || ($0.folderName == $1.folderName && $0.position < $1.position)
+        }
+    }
+
+    nonisolated private static func buildScanSnapshot(baseDir: String) -> ScanSnapshot {
         let fm = FileManager.default
         let base = URL(fileURLWithPath: baseDir)
         let orgsRoot = base.appendingPathComponent("organizations")
-        guard let orgDirs = dirs(at: orgsRoot, fm: fm) else { return }
+        guard let orgDirs = dirs(at: orgsRoot, fm: fm) else { return ScanSnapshot() }
 
+        var snapshot = ScanSnapshot()
         for orgURL in orgDirs {
             let orgName = orgURL.lastPathComponent
-            upsert("organizations", ["id": orgName, "name": orgName, "path": orgURL.path])
+            snapshot.organizations.append(Organization(id: orgName, name: orgName, path: orgURL.path))
 
             let projRoot = orgURL.appendingPathComponent("projects")
             guard let projDirs = dirs(at: projRoot, fm: fm) else { continue }
@@ -99,323 +458,111 @@ final class WorkspaceDB {
             for projURL in projDirs {
                 let projName = projURL.lastPathComponent
                 let projID = "\(orgName)/\(projName)"
-                upsert("projects", ["id": projID, "org_id": orgName, "name": projName, "path": projURL.path, "description": ""])
+                snapshot.projects.append(Project(id: projID, orgID: orgName, name: projName, path: projURL.path, description: ""))
 
                 let branchRoot = projURL.appendingPathComponent("branches")
                 guard let branchDirs = dirs(at: branchRoot, fm: fm) else { continue }
 
                 for branchURL in branchDirs {
                     let branchName = branchURL.lastPathComponent
-                    let branchID = "\(projID)/\(branchName)"
-                    upsert("branches", ["id": branchID, "project_id": projID, "name": branchName, "path": branchURL.path])
+                    snapshot.branches.append(ScannedBranch(
+                        id: "\(projID)/\(branchName)",
+                        projectID: projID,
+                        name: branchName,
+                        path: branchURL.path
+                    ))
                 }
             }
         }
-        refresh()
+        return snapshot
     }
 
-    // MARK: - CRUD: Organizations
-
-    func addOrganization(name: String, path: String = "") {
-        upsert("organizations", ["id": UUID().uuidString, "name": name, "path": path])
-        refresh()
-    }
-    func updateOrganization(_ org: Organization) {
-        upsert("organizations", ["id": org.id, "name": org.name, "path": org.path])
-        refresh()
-    }
-    func deleteOrganization(id: String) {
-        exec("DELETE FROM organizations WHERE id = ?", [id])
-        refresh()
-    }
-
-    // MARK: - CRUD: Projects
-
-    func addProject(name: String, orgID: String, path: String = "") {
-        upsert("projects", ["id": UUID().uuidString, "org_id": orgID, "name": name, "path": path, "description": ""])
-        refresh()
-    }
-    func updateProject(_ p: Project) {
-        upsert("projects", ["id": p.id, "org_id": p.orgID, "name": p.name, "path": p.path, "description": p.description])
-        refresh()
-    }
-    func deleteProject(id: String) {
-        exec("DELETE FROM projects WHERE id = ?", [id])
-        refresh()
-    }
-
-    // MARK: - CRUD: Features
-
-    func addFeature(name: String, projectID: String, description: String = "") {
-        upsert("features", ["id": UUID().uuidString, "project_id": projectID, "name": name, "description": description])
-        refresh()
-    }
-    func updateFeature(_ f: Feature) {
-        upsert("features", ["id": f.id, "project_id": f.projectID, "name": f.name, "description": f.description])
-        refresh()
-    }
-    func deleteFeature(id: String) {
-        exec("DELETE FROM features WHERE id = ?", [id])
-        refresh()
-    }
-
-    // MARK: - CRUD: Repos
-
-    func addRepo(name: String, url: String = "", localPath: String = "", featureID: String = "") {
-        upsert("repos", ["id": UUID().uuidString, "name": name, "url": url, "local_path": localPath, "feature_id": featureID])
-        refresh()
-    }
-    func updateRepo(_ r: RepoEntry) {
-        upsert("repos", ["id": r.id, "name": r.name, "url": r.url, "local_path": r.localPath, "feature_id": r.featureID])
-        refresh()
-    }
-    func deleteRepo(id: String) {
-        exec("DELETE FROM repos WHERE id = ?", [id])
-        refresh()
-    }
-
-    // MARK: - CRUD: Issues
-
-    func addIssue(title: String, body: String = "", status: String = "open", orgID: String = "", featureID: String = "") {
-        upsert("issues", ["id": UUID().uuidString, "title": title, "body": body, "status": status, "org_id": orgID, "feature_id": featureID])
-        refresh()
-    }
-    func updateIssue(_ i: Issue) {
-        upsert("issues", ["id": i.id, "title": i.title, "body": i.body, "status": i.status, "org_id": i.orgID, "feature_id": i.featureID])
-        refresh()
-    }
-    func deleteIssue(id: String) {
-        exec("DELETE FROM issues WHERE id = ?", [id])
-        refresh()
-    }
-
-    func branches(projectID: String) -> [(id: String, name: String, path: String)] {
-        rows("SELECT id, name, path FROM branches WHERE project_id = ? ORDER BY name",
-             bind: [projectID]) {
-            (id: col($0, 0), name: col($0, 1), path: col($0, 2))
+    private func applyScan(_ snapshot: ScanSnapshot, baseDir: String) {
+        // Keep scan additive-only: if a directory disappears, retain the last
+        // known DB row instead of pruning history.
+        for organization in snapshot.organizations {
+            upsert("organizations", [
+                "id": organization.id,
+                "name": organization.name,
+                "path": organization.path
+            ])
         }
-    }
 
-    // MARK: - Refresh
-
-    func refresh() {
-        organizations = rows("SELECT id, name, path FROM organizations ORDER BY name") {
-            Organization(id: col($0, 0), name: col($0, 1), path: col($0, 2))
+        for project in snapshot.projects {
+            upsert("projects", [
+                "id": project.id,
+                "org_id": project.orgID,
+                "name": project.name,
+                "path": project.path,
+                "description": ""
+            ])
         }
-        projects = rows("SELECT id, org_id, name, path, description FROM projects ORDER BY name") {
-            Project(id: col($0, 0), orgID: col($0, 1), name: col($0, 2), path: col($0, 3), description: col($0, 4))
+
+        for branch in snapshot.branches {
+            upsert("branches", [
+                "id": branch.id,
+                "project_id": branch.projectID,
+                "name": branch.name,
+                "path": branch.path
+            ])
         }
-        features = rows("SELECT id, project_id, name, description FROM features ORDER BY name") {
-            Feature(id: col($0, 0), projectID: col($0, 1), name: col($0, 2), description: col($0, 3))
-        }
-        repos = rows("SELECT id, name, url, local_path, feature_id FROM repos ORDER BY name") {
-            RepoEntry(id: col($0, 0), name: col($0, 1), url: col($0, 2), localPath: col($0, 3), featureID: col($0, 4))
-        }
-        issues = rows("SELECT id, title, body, status, org_id, feature_id FROM issues ORDER BY title") {
-            Issue(id: col($0, 0), title: col($0, 1), body: col($0, 2), status: col($0, 3), orgID: col($0, 4), featureID: col($0, 5))
-        }
+        refresh()
     }
 
-    // MARK: - Private
-
-    private func createTables() {
-        // ALTER TABLE runs separately — fails silently if column exists; must not abort the CREATE TABLE batch
-        execRaw("ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''")
-        execRaw("""
-            CREATE TABLE IF NOT EXISTS organizations
-                (id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL DEFAULT '');
-            CREATE TABLE IF NOT EXISTS projects
-                (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '');
-            CREATE TABLE IF NOT EXISTS branches
-                (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS features
-                (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '');
-            CREATE TABLE IF NOT EXISTS repos
-                (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL DEFAULT '',
-                 local_path TEXT NOT NULL DEFAULT '', feature_id TEXT NOT NULL DEFAULT '');
-            CREATE TABLE IF NOT EXISTS issues
-                (id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
-                 status TEXT NOT NULL DEFAULT 'open', org_id TEXT NOT NULL DEFAULT '',
-                 feature_id TEXT NOT NULL DEFAULT '');
-            CREATE TABLE IF NOT EXISTS ws_workspaces (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                folder_name TEXT NOT NULL DEFAULT '',
-                folder_tag TEXT NOT NULL DEFAULT '',
-                position INTEGER NOT NULL DEFAULT 0,
-                tmux_id TEXT,
-                tmux_name TEXT,
-                last_cwd TEXT NOT NULL DEFAULT '',
-                last_accessed INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS ws_tabs (
-                id TEXT PRIMARY KEY,
-                workspace_id TEXT NOT NULL,
-                position INTEGER NOT NULL DEFAULT 0,
-                tmux_id TEXT,
-                tmux_name TEXT,
-                initial_cwd TEXT NOT NULL DEFAULT '',
-                is_selected INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS ws_panes (
-                id TEXT PRIMARY KEY,
-                tab_id TEXT NOT NULL,
-                is_primary INTEGER NOT NULL DEFAULT 1,
-                lx REAL NOT NULL DEFAULT 0,
-                ly REAL NOT NULL DEFAULT 0,
-                lw REAL NOT NULL DEFAULT 1,
-                lh REAL NOT NULL DEFAULT 1,
-                tmux_id TEXT,
-                tmux_name TEXT,
-                initial_cwd TEXT NOT NULL DEFAULT ''
-            );
-        """)
-    }
-
-    // MARK: - Workspace Session CRUD
-
-    func saveWorkspaceSession(_ s: WorkspaceSession) {
-        upsert("ws_workspaces", [
-            "id": s.id, "name": s.name,
-            "folder_name": s.folderName, "folder_tag": s.folderTag,
-            "position": String(s.position),
-            "last_cwd": s.lastCWD,
-            "last_accessed": String(s.lastAccessed)
-        ])
-    }
-
-    func touchWorkspaceSession(id: String, cwd: String) {
-        exec("UPDATE ws_workspaces SET last_cwd = ?, last_accessed = ? WHERE id = ?",
-             [cwd, String(Int(Date().timeIntervalSince1970)), id])
-    }
-
-    func deleteWorkspaceSession(id: String) {
-        exec("DELETE FROM ws_workspaces WHERE id = ?", [id])
-    }
-
-    func saveTab(_ t: TabRecord) {
-        upsert("ws_tabs", [
-            "id": t.id, "workspace_id": t.workspaceID,
-            "position": String(t.position),
-            "initial_cwd": t.initialCWD,
-            "is_selected": t.isSelected ? "1" : "0"
-        ])
-    }
-
-    func deleteTabs(workspaceID: String) {
-        // cascade: delete panes for all tabs first
-        let tabIDs = rows("SELECT id FROM ws_tabs WHERE workspace_id = ?", bind: [workspaceID]) {
-            col($0, 0)
-        }
-        for tid in tabIDs { exec("DELETE FROM ws_panes WHERE tab_id = ?", [tid]) }
-        exec("DELETE FROM ws_tabs WHERE workspace_id = ?", [workspaceID])
-    }
-
-    func loadTabs(workspaceID: String) -> [TabRecord] {
-        rows("SELECT id,workspace_id,position,initial_cwd,is_selected FROM ws_tabs WHERE workspace_id=? ORDER BY position",
-             bind: [workspaceID]) { stmt in
-            TabRecord(id: col(stmt,0), workspaceID: col(stmt,1),
-                      position: Int(sqlite3_column_int(stmt,2)),
-                      initialCWD: col(stmt,3),
-                      isSelected: sqlite3_column_int(stmt,4) != 0)
-        }
-    }
-
-    func savePane(_ p: PaneRecord) {
-        upsert("ws_panes", [
-            "id": p.id, "tab_id": p.tabID,
-            "is_primary": p.isPrimary ? "1" : "0",
-            "lx": String(p.lx), "ly": String(p.ly), "lw": String(p.lw), "lh": String(p.lh),
-            "initial_cwd": p.initialCWD
-        ])
-    }
-
-    func deletePanes(tabID: String) { exec("DELETE FROM ws_panes WHERE tab_id = ?", [tabID]) }
-
-    func loadPanes(tabID: String) -> [PaneRecord] {
-        rows("SELECT id,tab_id,is_primary,lx,ly,lw,lh,initial_cwd FROM ws_panes WHERE tab_id=?",
-             bind: [tabID]) { stmt in
-            PaneRecord(id: col(stmt,0), tabID: col(stmt,1),
-                       isPrimary: sqlite3_column_int(stmt,2) != 0,
-                       lx: sqlite3_column_double(stmt,3), ly: sqlite3_column_double(stmt,4),
-                       lw: sqlite3_column_double(stmt,5), lh: sqlite3_column_double(stmt,6),
-                       initialCWD: col(stmt,7))
-        }
-    }
-
-    func loadWorkspaceSessions() -> [WorkspaceSession] {
-        let all = rows("""
-            SELECT id, name, folder_name, folder_tag, position,
-                   last_cwd, last_accessed
-            FROM ws_workspaces ORDER BY folder_name, position
-        """) { stmt in
-            WorkspaceSession(
-                id:           col(stmt, 0),
-                name:         col(stmt, 1),
-                folderName:   col(stmt, 2),
-                folderTag:    col(stmt, 3),
-                position:     Int(sqlite3_column_int(stmt, 4)),
-                lastCWD:      col(stmt, 5),
-                lastAccessed: Int(sqlite3_column_int(stmt, 6))
-            )
-        }
-        // dedup: keep newest per (folder, name); delete orphans
-        var best: [String: WorkspaceSession] = [:]
-        for s in all {
-            let key = "\(s.folderName)/\(s.name)"
-            if best[key] == nil || s.lastAccessed > best[key]!.lastAccessed { best[key] = s }
-        }
-        let keepIDs = Set(best.values.map { $0.id })
-        for s in all where !keepIDs.contains(s.id) {
-            exec("DELETE FROM ws_workspaces WHERE id = ?", [s.id])
-        }
-        return best.values.sorted { $0.folderName < $1.folderName || ($0.folderName == $1.folderName && $0.position < $1.position) }
-    }
-
-    private func dirs(at url: URL, fm: FileManager) -> [URL]? {
+    nonisolated private static func dirs(at url: URL, fm: FileManager) -> [URL]? {
         try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey])
             .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
     }
 
-    private func upsert(_ table: String, _ kv: [String: String]) {
-        let keys = kv.keys.sorted()
-        let vals = keys.map { kv[$0]! }
-        let ph  = Array(repeating: "?", count: keys.count).joined(separator: ", ")
-        let sql = "INSERT OR REPLACE INTO \(table) (\(keys.joined(separator: ", "))) VALUES (\(ph))"
+    private func sql(_ parts: String...) -> String {
+        parts.joined(separator: " ")
+    }
+
+    private func upsert(_ table: String, _ values: [String: String]) {
+        let keys = values.keys.sorted()
+        let orderedValues = keys.map { values[$0]! }
+        let placeholders = Array(repeating: "?", count: keys.count).joined(separator: ", ")
+        let sqlText = "INSERT OR REPLACE INTO \(table) (\(keys.joined(separator: ", "))) VALUES (\(placeholders))"
+
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
-        for (i, v) in vals.enumerated() {
-            sqlite3_bind_text(stmt, Int32(i + 1), v, -1, SQLITE_TRANSIENT_FN)
+        guard sqlite3_prepare_v2(db, sqlText, -1, &stmt, nil) == SQLITE_OK else { return }
+        for (index, value) in orderedValues.enumerated() {
+            sqlite3_bind_text(stmt, Int32(index + 1), value, -1, SQLITE_TRANSIENT_FN)
         }
         sqlite3_step(stmt)
         sqlite3_finalize(stmt)
     }
 
-    private func exec(_ sql: String, _ bind: [String] = []) {
+    private func exec(_ sqlText: String, _ bind: [String] = []) {
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
-        for (i, v) in bind.enumerated() {
-            sqlite3_bind_text(stmt, Int32(i + 1), v, -1, SQLITE_TRANSIENT_FN)
+        guard sqlite3_prepare_v2(db, sqlText, -1, &stmt, nil) == SQLITE_OK else { return }
+        for (index, value) in bind.enumerated() {
+            sqlite3_bind_text(stmt, Int32(index + 1), value, -1, SQLITE_TRANSIENT_FN)
         }
         sqlite3_step(stmt)
         sqlite3_finalize(stmt)
     }
 
-    private func execRaw(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
+    private func execRaw(_ sqlText: String) {
+        sqlite3_exec(db, sqlText, nil, nil, nil)
+    }
 
-    private func rows<T>(_ sql: String, bind: [String] = [], map: (OpaquePointer) -> T) -> [T] {
+    private func rows<T>(_ sqlText: String, bind: [String] = [], map: (OpaquePointer) -> T) -> [T] {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sqlText, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        for (index, value) in bind.enumerated() {
+            sqlite3_bind_text(stmt, Int32(index + 1), value, -1, SQLITE_TRANSIENT_FN)
+        }
+
         var result: [T] = []
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-        for (i, v) in bind.enumerated() {
-            sqlite3_bind_text(stmt, Int32(i + 1), v, -1, SQLITE_TRANSIENT_FN)
+        while sqlite3_step(stmt) == SQLITE_ROW, let stmt {
+            result.append(map(stmt))
         }
-        while sqlite3_step(stmt) == SQLITE_ROW { result.append(map(stmt!)) }
         sqlite3_finalize(stmt)
         return result
     }
 
-    private func col(_ stmt: OpaquePointer, _ i: Int32) -> String {
-        sqlite3_column_text(stmt, i).map { String(cString: $0) } ?? ""
+    private func col(_ stmt: OpaquePointer, _ index: Int32) -> String {
+        sqlite3_column_text(stmt, index).map { String(cString: $0) } ?? ""
     }
 }

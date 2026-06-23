@@ -444,14 +444,14 @@ private struct ProjectListRow: View {
     }
 }
 
-private struct BranchRow: Identifiable {
+private struct BranchRow: Identifiable, Sendable {
     let id = UUID()
     let gitName: String          // from git branch -a
     let isCurrent: Bool
     let localPath: String?       // from DB checkout if matched
     let gitIsWorktree: Bool      // git "+" prefix = checked out in another worktree
 
-    init(gitName: String, isCurrent: Bool, localPath: String?, gitIsWorktree: Bool = false) {
+    nonisolated init(gitName: String, isCurrent: Bool, localPath: String?, gitIsWorktree: Bool = false) {
         self.gitName = gitName
         self.isCurrent = isCurrent
         self.localPath = localPath
@@ -713,7 +713,7 @@ private struct ProjectDetailView: View {
         }
     }
 
-    private static func runGit(_ args: [String], in path: String) -> String {
+    nonisolated private static func runGit(_ args: [String], in path: String) -> String {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         p.arguments = args

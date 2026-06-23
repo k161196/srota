@@ -567,6 +567,7 @@ struct ContentView: View {
     @State private var sidebarWidth: CGFloat = 220
     @State private var showBaseDirectoryPicker = false
     @State private var managementTab: ManagementTab = .workspaces
+    @State private var restoredSessions = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -627,10 +628,11 @@ struct ContentView: View {
         }
         .animation(.spring(duration: 0.22, bounce: 0.0), value: sidebarVisible)
         .onAppear {
-            restoreSessionsFromDB(colorScheme: colorScheme)
+            if !restoredSessions {
+                restoredSessions = true
+                restoreSessionsFromDB(colorScheme: colorScheme)
+            }
             if settings.baseWorkingDirectory == nil { showBaseDirectoryPicker = true }
-            NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
-                                                   object: nil, queue: .main) { _ in saveLayout() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .srotaOpenWorkspace)) { note in
             guard let path     = note.userInfo?["path"]       as? String else { return }
@@ -686,6 +688,9 @@ struct ContentView: View {
                 managementTab = .workspaces
                 saveLayout()
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            saveLayout()
         }
         .sheet(isPresented: $showBaseDirectoryPicker) {
             BaseDirectorySheet { url in
@@ -1634,4 +1639,3 @@ private struct BaseDirectorySheet: View {
         .background(Color.sidebarBg)
     }
 }
-
