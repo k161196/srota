@@ -175,15 +175,18 @@ struct ManagementPanel: View {
             FeaturesPanel()
                 .opacity(tab == .features ? 1 : 0)
                 .allowsHitTesting(tab == .features)
+            IssuesPanel()
+                .opacity(tab == .issues ? 1 : 0)
+                .allowsHitTesting(tab == .issues)
 
-            if tab != .features {
+            if tab != .features && tab != .issues {
                 switch tab {
                 case .workspaces:    EmptyView()  // handled by ContentView
                 case .organizations: OrganizationsPanel()
                 case .projects:      ProjectsPanel()
                 case .features:      EmptyView()
                 case .repos:         ReposPanel()
-                case .issues:        IssuesPanel()
+                case .issues:        EmptyView()
                 }
             }
         }
