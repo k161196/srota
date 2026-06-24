@@ -110,33 +110,6 @@ struct PaneLayout {
     var h: CGFloat = 1
 }
 
-enum AgentRunStatus: String, Codable {
-    case working
-    case waitingForResponse
-    case completed
-
-    init?(event: String) {
-        switch event {
-        case "Start", "SessionStart", "Attached", "PreToolUse", "PostToolUse":
-            self = .working
-        case "PermissionRequest":
-            self = .waitingForResponse
-        case "Stop", "SessionEnd", "Detached":
-            self = .completed
-        default:
-            return nil
-        }
-    }
-
-    var label: String {
-        switch self {
-        case .working: return "Working"
-        case .waitingForResponse: return "Waiting for response"
-        case .completed: return "Completed"
-        }
-    }
-}
-
 struct AgentHookEvent: Codable {
     var event: String
     var cwd: String
@@ -173,9 +146,10 @@ final class TerminalTab: Identifiable, ObservableObject {
     @Published var primaryPaneName: String = ""
     @Published var paneNames:    [UUID: String]     = [:]
     @Published var primaryLayout = PaneLayout()
-    @Published var agentStatus: AgentRunStatus? = nil
-    @Published var agentStatusUpdatedAt: Double = 0
-    @Published var agentSummary: String = ""
+    @Published private var agentNotification = AgentNotificationState()
+    var agentStatus: AgentRunStatus? { agentNotification.status }
+    var agentStatusUpdatedAt: Double { agentNotification.updatedAt }
+    var agentSummary: String { agentNotification.summary }
     let hookTabID = UUID().uuidString
     let primaryPaneHookID = UUID().uuidString
     @Published var focusedPaneID: UUID? = nil {
@@ -228,9 +202,7 @@ final class TerminalTab: Identifiable, ObservableObject {
            !secondaryPanes.contains(where: { $0.hookPaneID == paneHookID }) {
             return false
         }
-        agentStatus = status
-        if let summary, !summary.isEmpty, !summary.contains("<") { agentSummary = summary }
-        agentStatusUpdatedAt = timestamp
+        agentNotification.apply(status: status, summary: summary, timestamp: timestamp, ownerPaneID: paneHookID ?? primaryPaneHookID)
         return true
     }
 
@@ -276,9 +248,13 @@ final class TerminalTab: Identifiable, ObservableObject {
     }
 
     func removePane(id: UUID) {
+        let removedPaneHookID = secondaryPanes.first(where: { $0.id == id })?.hookPaneID
         expandNeighbor(of: .secondary(id))
         secondaryPanes.removeAll { $0.id == id }
         layouts.removeValue(forKey: id)
+        if let removedPaneHookID {
+            agentNotification.clearIfOwned(byPaneID: removedPaneHookID)
+        }
         if focusedPaneID == id { focusedPaneID = nil }
         if secondaryPanes.isEmpty {
             if primaryExited { closeTabCallback?() }
@@ -290,6 +266,7 @@ final class TerminalTab: Identifiable, ObservableObject {
         expandNeighbor(of: .primary)
         primaryLayout = PaneLayout(x: 0, y: 0, w: 0, h: 0)
         primaryExited = true
+        agentNotification.clearIfOwned(byPaneID: primaryPaneHookID)
     }
 
     func closePrimaryPane() {
@@ -804,9 +781,15 @@ struct ContentView: View {
                     let p = Process()
                     p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
                     p.arguments = ["-C", projectPath, "worktree", "add", path, branchRef]
-                    p.standardError = Pipe()
-                    try? p.run(); p.waitUntilExit()
-                    await MainActor.run { [folderID] in
+                p.standardError = Pipe()
+                do {
+                    try p.run()
+                    p.waitUntilExit()
+                } catch {
+                    return
+                }
+                guard p.terminationStatus == 0 else { return }
+                await MainActor.run { [folderID] in
                         manager.addWorkspace(colorScheme: colorScheme, inFolder: folderID,
                                              workingDirectory: path, name: wsName)
                         db.saveWorkspaceSession(WorkspaceSession(
@@ -986,30 +969,19 @@ private func applyAgentHookEvent(_ event: AgentHookEvent) {
 }
 
 private func bestMatchingTab(for event: AgentHookEvent) -> TerminalTab? {
- if let tabID = event.tabID,
-    let matched = manager.allWorkspaces.flatMap(\.tabs).first(where: { $0.hookTabID == tabID }) {
- return matched
+ let tabs = manager.allWorkspaces.flatMap(\.tabs)
+ let snapshots = tabs.map { tab in
+     AgentNotificationTabSnapshot(
+         tabID: tab.hookTabID,
+         cwd: tab.statusPath,
+         paneIDs: Set([tab.primaryPaneHookID] + tab.secondaryPanes.map(\.hookPaneID))
+     )
  }
- let target = URL(fileURLWithPath: event.cwd).standardizedFileURL.path
- return manager.allWorkspaces
- .flatMap(\.tabs)
-            .compactMap { tab -> (TerminalTab, Int)? in
-                guard let path = tab.statusPath else { return nil }
-                let base = URL(fileURLWithPath: path).standardizedFileURL.path
-                let score: Int
-                if target == base {
-                    score = Int.max
-                } else if target.hasPrefix(base + "/") {
-                    score = base.count
-                } else if base.hasPrefix(target + "/") {
-                    score = target.count
-                } else {
-                    return nil
-                }
-                return (tab, score)
-            }
-            .max(by: { $0.1 < $1.1 })?
-            .0
+ guard let index = AgentNotificationRouter.bestMatchingTabIndex(
+     for: AgentNotificationEvent(tabID: event.tabID, paneID: event.paneID, cwd: event.cwd),
+     in: snapshots
+ ) else { return nil }
+ return tabs[index]
     }
 }
 

@@ -160,6 +160,7 @@ final class WorkspaceDB {
     }
 
     func deleteOrganization(id: String) {
+        projects.filter { $0.orgID == id }.forEach { deleteProject(id: $0.id) }
         exec(sql("DELETE", sqlFrom, "organizations", sqlWhere, "id = ?"), [id])
         refresh()
     }
@@ -187,6 +188,7 @@ final class WorkspaceDB {
     }
 
     func deleteProject(id: String) {
+        features.filter { $0.projectID == id }.forEach { deleteFeature(id: $0.id) }
         exec(sql("DELETE", sqlFrom, "projects", sqlWhere, "id = ?"), [id])
         refresh()
     }
@@ -214,6 +216,8 @@ final class WorkspaceDB {
     }
 
     func deleteFeature(id: String) {
+        exec(sql("DELETE", sqlFrom, "feature_repos", sqlWhere, "feature_id = ?"), [id])
+        exec(sql("UPDATE issues SET feature_id = ''", sqlWhere, "feature_id = ?"), [id])
         exec(sql("DELETE", sqlFrom, "features", sqlWhere, "id = ?"), [id])
         refresh()
     }

@@ -1,9 +1,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Database } from "bun:sqlite";
 import { homedir } from "os";
 import { join } from "path";
@@ -21,7 +18,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: "list_features",
-      description: "List all features with their IDs, names, and descriptions",
+      description: "List all features with IDs, names, descriptions",
       inputSchema: { type: "object", properties: {} },
     },
     {
@@ -35,7 +32,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "update_feature_description",
-      description: "Update a feature's description. Markdown is rendered in the UI.",
+      description: "Update feature's description. Markdown is rendered in UI.",
       inputSchema: {
         type: "object",
         properties: {
@@ -109,23 +106,24 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
 
       case "get_feature": {
-        const row = db.query("SELECT * FROM features WHERE id = ?").get(args.id as string);
+        const row = db.query("SELECT * FROM features WHERE id = ?").get((args as any).id);
         if (!row) return { content: [{ type: "text", text: "Feature not found" }], isError: true };
         return { content: [{ type: "text", text: JSON.stringify(row, null, 2) }] };
       }
 
       case "update_feature_description": {
+        const a = args as any;
         const changes = db
           .query("UPDATE features SET description = ? WHERE id = ? RETURNING id")
-          .all(args.description as string, args.id as string);
-        if (!changes.length)
-          return { content: [{ type: "text", text: "Feature not found" }], isError: true };
+          .all(a.description, a.id);
+        if (!changes.length) return { content: [{ type: "text", text: "Feature not found" }], isError: true };
         return { content: [{ type: "text", text: "Description updated" }] };
       }
 
       case "list_issues": {
-        const rows = (args as any).feature_id
-          ? db.query("SELECT * FROM issues WHERE feature_id = ? ORDER BY title").all((args as any).feature_id)
+        const a = args as any;
+        const rows = a.feature_id
+          ? db.query("SELECT * FROM issues WHERE feature_id = ? ORDER BY title").all(a.feature_id)
           : db.query("SELECT * FROM issues ORDER BY title").all();
         return { content: [{ type: "text", text: JSON.stringify(rows, null, 2) }] };
       }
@@ -144,9 +142,18 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         const a = args as any;
         const fields: string[] = [];
         const vals: unknown[] = [];
-        if (a.title !== undefined) { fields.push("title = ?"); vals.push(a.title); }
-        if (a.body !== undefined) { fields.push("body = ?"); vals.push(a.body); }
-        if (a.status !== undefined) { fields.push("status = ?"); vals.push(a.status); }
+        if (a.title !== undefined) {
+          fields.push("title = ?");
+          vals.push(a.title);
+        }
+        if (a.body !== undefined) {
+          fields.push("body = ?");
+          vals.push(a.body);
+        }
+        if (a.status !== undefined) {
+          fields.push("status = ?");
+          vals.push(a.status);
+        }
         if (!fields.length) return { content: [{ type: "text", text: "Nothing to update" }] };
         vals.push(a.id);
         db.run(`UPDATE issues SET ${fields.join(", ")} WHERE id = ?`, vals);

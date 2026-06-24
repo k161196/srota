@@ -1152,7 +1152,6 @@ private struct FeaturesPanel: View {
         let proj = db.projects.first { $0.id == feature.projectID }?.name ?? feature.projectID
         let issues = db.issues.filter { $0.featureID == feature.id }
         let issueList = issues.isEmpty ? "None" : issues.map { "- [\($0.status)] \($0.title)" }.joined(separator: "\n")
-        let mcpPath = Bundle.main.bundlePath + "/../../../scripts/srota-mcp/index.ts"
         let block = """
             <!-- srota:start -->
             ## Feature Context (srota)
@@ -1165,7 +1164,7 @@ private struct FeaturesPanel: View {
             \(issueList)
 
             ## srota MCP Tools
-            MCP server `srota` is available. Use it to update this feature:
+            If Srota MCP is configured, use these tools to update this feature:
             - `srota:update_feature_description(id, description)` — write markdown description, visible in the UI
             - `srota:add_issue(title, body?, status?, feature_id?)` — create issue linked to this feature
             - `srota:update_issue(id, title?, body?, status?)` — update an issue
@@ -1851,7 +1850,7 @@ private struct IssuesPanel: View {
             \(issue.body.isEmpty ? "_(none yet)_" : issue.body)
 
             ## srota MCP Tools
-            MCP server `srota` is available:
+            If Srota MCP is configured:
             - `srota:update_issue(id, title?, body?, status?)` — update this issue
             - `srota:list_issues(feature_id?)` — list issues
             - `srota:list_features()` — list features

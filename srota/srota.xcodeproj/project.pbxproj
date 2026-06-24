@@ -62,6 +62,7 @@
 				9F4EF2F82FE98A7E00023A48 /* Sources */,
 				9F4EF2F92FE98A7E00023A48 /* Frameworks */,
 				9F4EF2FA2FE98A7E00023A48 /* Resources */,
+				9F4EF3112FE98A7E00023A48 /* Copy Scripts */,
 			);
 			buildRules = (
 			);
@@ -125,6 +126,32 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		9F4EF3112FE98A7E00023A48 /* Copy Scripts */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/../scripts/check-agent-hooks.sh",
+				"$(SRCROOT)/../scripts/notify.sh",
+			);
+			name = "Copy Scripts";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/check-agent-hooks.sh",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/notify.sh",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\nmkdir -p \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\"\ncp \"$SRCROOT/../scripts/check-agent-hooks.sh\" \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/check-agent-hooks.sh\"\ncp \"$SRCROOT/../scripts/notify.sh\" \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/notify.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		9F4EF2F82FE98A7E00023A48 /* Sources */ = {
