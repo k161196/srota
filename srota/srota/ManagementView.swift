@@ -1720,101 +1720,332 @@ private let issueStatuses = ["open", "in_progress", "closed"]
 
 private struct IssuesPanel: View {
     @Environment(WorkspaceDB.self) var db
+    @Environment(\.colorScheme) var colorScheme
+    @Environment(AppSettings.self) var settings
+    @Environment(IssueAgentFocus.self) var agentFocus
+
+    @State private var showAdd = false
     @State private var newTitle = ""
     @State private var newBody  = ""
     @State private var selectedOrg:     Organization?
     @State private var selectedFeature: Feature?
 
+    var activeIssue: Issue? {
+        guard agentFocus.activeTabID != "global" else { return nil }
+        return db.issues.first { $0.id == agentFocus.activeTabID }
+    }
+
     var body: some View {
-        SplitPanel(
-            title: "Issues",
-            items: db.issues,
-            emptyHint: "No issues — press +",
-            onDelete: { db.deleteIssue(id: $0.id) }
-        ) { issue in
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    RowPrimary(text: issue.title)
-                    let ctx = contextLabel(issue)
-                    if !ctx.isEmpty { RowSecondary(text: ctx) }
-                }
-                Spacer()
-                StatusBadge(status: issue.status)
+        HSplitView {
+            issueListPanel
+                .frame(minWidth: 200, maxWidth: 260)
+            issueAgentCenter
+            if let issue = activeIssue {
+                IssueInfoSidebar(issue: issue, db: db)
+                    .frame(minWidth: 300, maxWidth: 480)
             }
-        } detail: { issue in
-            IssueDetailView(issue: issue, db: db)
-        } addForm: { isPresented in
-            AddSheet(title: "New Issue", isPresented: isPresented) {
-                db.addIssue(title: newTitle, body: newBody, orgID: selectedOrg?.id ?? "", featureID: selectedFeature?.id ?? "")
+        }
+        .onAppear { ensureGlobalTab() }
+        .onChange(of: db.issues) { reinjectOpenTabs() }
+        .sheet(isPresented: $showAdd) {
+            AddSheet(title: "New Issue", isPresented: $showAdd) {
+                db.addIssue(title: newTitle, body: newBody,
+                            orgID: selectedOrg?.id ?? "", featureID: selectedFeature?.id ?? "")
                 newTitle = ""; newBody = ""; selectedOrg = nil; selectedFeature = nil
             } content: {
                 MGField(label: "Title", text: $newTitle)
                 MGField(label: "Body (optional)", text: $newBody)
-                MGPicker(label: "Organization (optional)", items: db.organizations, displayName: \.name, selected: $selectedOrg)
-                MGPicker(label: "Feature (optional)", items: db.features, displayName: \.name, selected: $selectedFeature)
+                MGPicker(label: "Organization (optional)", items: db.organizations,
+                         displayName: \.name, selected: $selectedOrg)
+                MGPicker(label: "Feature (optional)", items: db.features,
+                         displayName: \.name, selected: $selectedFeature)
             }
+        }
+    }
+
+    // MARK: - Tab management
+
+    private func ensureGlobalTab() {
+        guard !agentFocus.agentTabs.contains(where: { $0.id == "global" }) else { return }
+        agentFocus.agentTabs.insert(
+            IssueAgentTab(id: "global", issueID: nil, tab: TerminalTab(colorScheme: colorScheme)),
+            at: 0
+        )
+    }
+
+    private func openTab(for issue: Issue) {
+        if agentFocus.agentTabs.contains(where: { $0.id == issue.id }) {
+            agentFocus.activeTabID = issue.id
+        } else {
+            let cwds = repoPaths(for: issue)
+            agentFocus.agentTabs.append(IssueAgentTab(
+                id: issue.id, issueID: issue.id,
+                tab: TerminalTab(colorScheme: colorScheme, workingDirectory: cwds.first)
+            ))
+            agentFocus.activeTabID = issue.id
+            cwds.forEach { injectContext(issue: issue, into: $0) }
+        }
+    }
+
+    private func closeTab(_ id: String) {
+        if let agentTab = agentFocus.agentTabs.first(where: { $0.id == id }),
+           let iid = agentTab.issueID {
+            repoPaths(forID: iid).forEach { removeContext(from: $0) }
+        }
+        agentFocus.agentTabs.removeAll { $0.id == id }
+        if agentFocus.activeTabID == id { agentFocus.activeTabID = "global" }
+    }
+
+    private func repoPaths(for issue: Issue) -> [String] {
+        guard !issue.featureID.isEmpty else { return [] }
+        return db.featureRepos
+            .filter { $0.featureID == issue.featureID }
+            .compactMap { fr in db.repos.first { $0.id == fr.repoID }?.localPath }
+    }
+
+    private func repoPaths(forID issueID: String) -> [String] {
+        guard let issue = db.issues.first(where: { $0.id == issueID }) else { return [] }
+        return repoPaths(for: issue)
+    }
+
+    private func reinjectOpenTabs() {
+        for agentTab in agentFocus.agentTabs where agentTab.issueID != nil {
+            guard let issue = db.issues.first(where: { $0.id == agentTab.issueID }) else { continue }
+            repoPaths(for: issue).forEach { injectContext(issue: issue, into: $0) }
+        }
+    }
+
+    // MARK: - Context injection
+
+    private func injectContext(issue: Issue, into dir: String) {
+        let featureName = db.features.first { $0.id == issue.featureID }?.name ?? "none"
+        let orgName = db.organizations.first { $0.id == issue.orgID }?.name ?? "none"
+        let block = """
+            <!-- srota:start -->
+            ## Issue Context (srota)
+            **Issue:** \(issue.title)
+            **ID:** `\(issue.id)`
+            **Status:** \(issue.status)
+            **Feature:** \(featureName)
+            **Org:** \(orgName)
+
+            **Body:**
+            \(issue.body.isEmpty ? "_(none yet)_" : issue.body)
+
+            ## srota MCP Tools
+            MCP server `srota` is available:
+            - `srota:update_issue(id, title?, body?, status?)` — update this issue
+            - `srota:list_issues(feature_id?)` — list issues
+            - `srota:list_features()` — list features
+            - `srota:link_issue_to_feature(issue_id, feature_id)` — link to feature
+
+            Current issue ID for MCP calls: `\(issue.id)`
+            <!-- srota:end -->
+            """
+        for filename in ["CLAUDE.md", "AGENTS.md"] {
+            let path = dir + "/" + filename
+            var content = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+            content = content.contains("<!-- srota:start -->")
+                ? replaceBlock(in: content, with: block)
+                : (content.isEmpty ? block : content + "\n\n" + block)
+            try? content.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+        if let mcpPath = settings.mcpServerPath, !mcpPath.isEmpty {
+            injectMCPConfig(into: dir, mcpPath: mcpPath)
+        }
+    }
+
+    private func removeContext(from dir: String) {
+        for filename in ["CLAUDE.md", "AGENTS.md"] {
+            let path = dir + "/" + filename
+            guard var content = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+            content = replaceBlock(in: content, with: nil)
+            if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try? FileManager.default.removeItem(atPath: path)
+            } else {
+                try? content.write(toFile: path, atomically: true, encoding: .utf8)
+            }
+        }
+        removeMCPConfig(from: dir)
+    }
+
+    private func replaceBlock(in content: String, with replacement: String?) -> String {
+        let start = "<!-- srota:start -->"; let end = "<!-- srota:end -->"
+        guard let s = content.range(of: start), let e = content.range(of: end) else {
+            return replacement.map { content + "\n\n" + $0 } ?? content
+        }
+        let before = String(content[content.startIndex..<s.lowerBound]).trimmingCharacters(in: .newlines)
+        let after  = String(content[e.upperBound...]).trimmingCharacters(in: .newlines)
+        guard let block = replacement else {
+            return [before, after].filter { !$0.isEmpty }.joined(separator: "\n\n")
+        }
+        return [before, block, after].filter { !$0.isEmpty }.joined(separator: "\n\n")
+    }
+
+    private func injectMCPConfig(into dir: String, mcpPath: String) {
+        // Claude
+        let settingsDir = dir + "/.claude"
+        try? FileManager.default.createDirectory(atPath: settingsDir, withIntermediateDirectories: true)
+        let settingsPath = settingsDir + "/settings.json"
+        var s = (try? JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: settingsPath))) as? [String: Any]) ?? [:]
+        var mcpServers = s["mcpServers"] as? [String: Any] ?? [:]
+        mcpServers["srota"] = ["command": "bun", "args": [mcpPath]]
+        s["mcpServers"] = mcpServers
+        if let data = try? JSONSerialization.data(withJSONObject: s, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: URL(fileURLWithPath: settingsPath))
+        }
+        // Codex
+        let configDir = dir + "/.codex"
+        try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
+        let configPath = configDir + "/config.toml"
+        var toml = (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? ""
+        let block = """
+            # srota:start
+            [[mcp_servers]]
+            name = "srota"
+            command = "bun"
+            args = ["\(mcpPath)"]
+            # srota:end
+            """
+        toml = toml.contains("# srota:start")
+            ? replaceTomlBlock(in: toml, with: block)
+            : (toml.isEmpty ? block : toml + "\n\n" + block)
+        try? toml.write(toFile: configPath, atomically: true, encoding: .utf8)
+    }
+
+    private func removeMCPConfig(from dir: String) {
+        let settingsPath = dir + "/.claude/settings.json"
+        if var s = (try? JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: settingsPath))) as? [String: Any]) {
+            var mcpServers = s["mcpServers"] as? [String: Any] ?? [:]
+            mcpServers.removeValue(forKey: "srota")
+            s["mcpServers"] = mcpServers.isEmpty ? nil : mcpServers
+            if let data = try? JSONSerialization.data(withJSONObject: s, options: [.prettyPrinted, .sortedKeys]) {
+                try? data.write(to: URL(fileURLWithPath: settingsPath))
+            }
+        }
+        let codexPath = dir + "/.codex/config.toml"
+        if var toml = try? String(contentsOfFile: codexPath, encoding: .utf8) {
+            toml = replaceTomlBlock(in: toml, with: nil)
+            try? toml.write(toFile: codexPath, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private func replaceTomlBlock(in content: String, with replacement: String?) -> String {
+        let start = "# srota:start"; let end = "# srota:end"
+        guard let s = content.range(of: start), let e = content.range(of: end) else {
+            return replacement.map { content + "\n\n" + $0 } ?? content
+        }
+        let before = String(content[content.startIndex..<s.lowerBound]).trimmingCharacters(in: .newlines)
+        let after  = String(content[e.upperBound...]).trimmingCharacters(in: .newlines)
+        guard let block = replacement else {
+            return [before, after].filter { !$0.isEmpty }.joined(separator: "\n\n")
+        }
+        return [before, block, after].filter { !$0.isEmpty }.joined(separator: "\n\n")
+    }
+
+    // MARK: - Sub-views
+
+    @ViewBuilder
+    var issueListPanel: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Issues")
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.mgLabel)
+                Text("\(db.issues.count)")
+                    .font(.system(size: 11).monospacedDigit()).foregroundStyle(Color.mgMuted)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color.mgSurface).clipShape(Capsule())
+                Spacer()
+                Button { showAdd = true } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.mgAccent)
+                        .frame(width: 28, height: 28)
+                        .background(Color.mgAccent.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(Color.mgBg)
+            .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
+
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(db.issues) { issue in
+                        SelectableRow(
+                            item: issue,
+                            isSelected: agentFocus.activeTabID == issue.id,
+                            onSelect: { openTab(for: issue) },
+                            onDelete: { db.deleteIssue(id: issue.id) }
+                        ) {
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    RowPrimary(text: issue.title)
+                                    let ctx = contextLabel(issue)
+                                    if !ctx.isEmpty { RowSecondary(text: ctx) }
+                                }
+                                Spacer()
+                                StatusBadge(status: issue.status)
+                            }
+                        }
+                    }
+                    if db.issues.isEmpty {
+                        Text("No issues — press +")
+                            .font(.system(size: 13)).foregroundStyle(Color.mgMuted)
+                            .frame(maxWidth: .infinity).padding(.vertical, 40)
+                    }
+                }
+            }
+            .background(Color.mgBg)
+        }
+    }
+
+    @ViewBuilder
+    var issueAgentCenter: some View {
+        VStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(agentFocus.agentTabs) { agentTab in
+                        let label = agentTab.id == "global"
+                            ? "Issues"
+                            : (db.issues.first { $0.id == agentTab.issueID }?.title ?? "Issue")
+                        FeatureTabChip(
+                            label: label,
+                            isActive: agentFocus.activeTabID == agentTab.id,
+                            isCloseable: agentTab.id != "global",
+                            onSelect: { agentFocus.activeTabID = agentTab.id },
+                            onClose: { closeTab(agentTab.id) }
+                        )
+                    }
+                }
+                .padding(.horizontal, 10).padding(.vertical, 6)
+            }
+            .background(Color.mgBg)
+            .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
+
+            ZStack {
+                Color.black
+                ForEach(agentFocus.agentTabs) { agentTab in
+                    TerminalSurfaceView(context: agentTab.tab.viewState)
+                        .opacity(agentFocus.activeTabID == agentTab.id ? 1 : 0)
+                }
+            }
+        }
+        .onChange(of: agentFocus.activeTabID) {
+            agentFocus.activeViewState = agentFocus.agentTabs
+                .first { $0.id == agentFocus.activeTabID }?.tab.viewState
         }
     }
 
     private func contextLabel(_ issue: Issue) -> String {
         var parts: [String] = []
-        if !issue.orgID.isEmpty, let org = db.organizations.first(where: { $0.id == issue.orgID }) { parts.append(org.name) }
-        if !issue.featureID.isEmpty, let f = db.features.first(where: { $0.id == issue.featureID }) { parts.append(f.name) }
+        if !issue.orgID.isEmpty,
+           let org = db.organizations.first(where: { $0.id == issue.orgID }) { parts.append(org.name) }
+        if !issue.featureID.isEmpty,
+           let f = db.features.first(where: { $0.id == issue.featureID }) { parts.append(f.name) }
         return parts.joined(separator: " · ")
-    }
-}
-
-private struct IssueDetailView: View {
-    let issue: Issue
-    let db: WorkspaceDB
-    @State private var title = ""
-    @State private var issueBody = ""
-    @State private var status = "open"
-    @State private var selectedOrg: Organization?
-    @State private var selectedFeature: Feature?
-
-    var body: some View {
-        EditDetailScaffold(heading: issue.title) {
-            var updated = issue
-            updated.title = title; updated.body = issueBody; updated.status = status
-            updated.orgID = selectedOrg?.id ?? ""; updated.featureID = selectedFeature?.id ?? ""
-            db.updateIssue(updated)
-        } content: {
-            MGField(label: "Title", text: $title)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("STATUS")
-                    .font(.system(size: 11, weight: .medium)).tracking(0.8)
-                    .foregroundStyle(Color.mgMuted)
-                Picker("", selection: $status) {
-                    ForEach(issueStatuses, id: \.self) { Text($0).tag($0) }
-                }
-                .pickerStyle(.segmented)
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                Text("BODY")
-                    .font(.system(size: 11, weight: .medium)).tracking(0.8)
-                    .foregroundStyle(Color.mgMuted)
-                TextEditor(text: $issueBody)
-                    .font(.system(size: 13, design: .monospaced))
-                    .foregroundStyle(Color.mgLabel)
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
-                    .frame(minHeight: 100)
-                    .background(Color.mgSurface)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
-            MGPicker(label: "Organization (optional)", items: db.organizations, displayName: \.name, selected: $selectedOrg)
-            MGPicker(label: "Feature (optional)", items: db.features, displayName: \.name, selected: $selectedFeature)
-        }
-        .onAppear { load() }
-        .onChange(of: issue.id) { load() }
-    }
-
-    private func load() {
-        title = issue.title; issueBody = issue.body; status = issue.status
-        selectedOrg = db.organizations.first { $0.id == issue.orgID }
-        selectedFeature = db.features.first { $0.id == issue.featureID }
     }
 }
 
