@@ -1043,7 +1043,7 @@ private struct FeaturesPanel: View {
             let cwds = db.featureRepos
                 .filter { $0.featureID == feature.id }
                 .compactMap { fr in db.repos.first { $0.id == fr.repoID }?.localPath }
-            let cwd = agentSessionDir(type: "features", id: feature.id)
+            let cwd = agentSessionDir(type: "features", id: String(feature.number))
             agentFocus.agentTabs.append(FeatureAgentTab(id: feature.id, featureID: feature.id, tab: TerminalTab(colorScheme: colorScheme, workingDirectory: cwd)))
             agentFocus.activeTabID = feature.id
             cwds.forEach { injectContext(feature: feature, into: $0) }
@@ -1793,7 +1793,7 @@ private struct IssuesPanel: View {
             agentFocus.activeTabID = issue.id
         } else {
             let cwds = repoPaths(for: issue)
-            let cwd = agentSessionDir(type: "issues", id: issue.id)
+            let cwd = agentSessionDir(type: "issues", id: String(issue.number))
             agentFocus.agentTabs.append(IssueAgentTab(
                 id: issue.id, issueID: issue.id,
                 tab: TerminalTab(colorScheme: colorScheme, workingDirectory: cwd)
