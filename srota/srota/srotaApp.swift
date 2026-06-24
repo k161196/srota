@@ -6,6 +6,7 @@ struct srotaApp: App {
     @State private var db = WorkspaceDB()
     @State private var presetsStore = PresetsStore()
     @State private var agentFocus = FeatureAgentFocus()
+    @State private var issueAgentFocus = IssueAgentFocus()
     @State private var hookSetupResult: HookSetupResult? = nil
 
     var body: some Scene {
@@ -16,6 +17,7 @@ struct srotaApp: App {
                 .environment(db)
                 .environment(presetsStore)
                 .environment(agentFocus)
+                .environment(issueAgentFocus)
                 .onAppear {
                     setupShellIntegration()
                     if let dir = settings.baseWorkingDirectory { db.scan(baseDir: dir) }

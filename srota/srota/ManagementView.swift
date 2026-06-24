@@ -14,10 +14,17 @@ final class FeatureAgentFocus {
     var activeTabID: String = "global"
 }
 
-enum AgentType { case claude, codex
-    var command: String { self == .claude ? "claude" : "codex" }
-    var label: String { self == .claude ? "Claude" : "Codex" }
-    var icon: String { self == .claude ? "sparkles" : "terminal.fill" }
+struct IssueAgentTab: Identifiable {
+    let id: String        // "global" or issue.id
+    let issueID: String?  // nil = global tab
+    let tab: TerminalTab
+}
+
+@Observable @MainActor
+final class IssueAgentFocus {
+    var activeViewState: TerminalViewState?
+    var agentTabs: [IssueAgentTab] = []
+    var activeTabID: String = "global"
 }
 
 extension Notification.Name {
@@ -990,14 +997,6 @@ private struct FeaturesPanel: View {
     @State private var newName = ""
     @State private var newDesc = ""
     @State private var selectedProject: Project?
-    @State private var agentPickerFor: AgentPickerTarget? = nil
-
-    private enum AgentPickerTarget: Identifiable {
-        case global
-        case feature(Feature)
-        var id: String { switch self { case .global: "global"; case .feature(let f): f.id } }
-        var title: String { switch self { case .global: "All Features"; case .feature(let f): f.name } }
-    }
 
     var activeFeature: Feature? {
         guard agentFocus.activeTabID != "global" else { return nil }
@@ -1017,14 +1016,6 @@ private struct FeaturesPanel: View {
         .onAppear { ensureGlobalTab() }
         .onChange(of: db.features) { reinjectOpenTabs() }
         .onChange(of: db.issues) { reinjectOpenTabs() }
-        .sheet(item: $agentPickerFor) { target in
-            AgentPickerView(title: target.title) { agentType in
-                launchAgent(agentType, for: target)
-                agentPickerFor = nil
-            }
-            .presentationDetents([.height(200)])
-            .presentationBackground(Color.mgBg)
-        }
         .sheet(isPresented: $showAdd) {
             AddSheet(title: "New Feature", isPresented: $showAdd) {
                 db.addFeature(name: newName, projectID: selectedProject?.id ?? "", description: newDesc)
@@ -1078,22 +1069,6 @@ private struct FeaturesPanel: View {
         }
     }
 
-    private func launchAgent(_ agentType: AgentType, for target: AgentPickerTarget) {
-        switch target {
-        case .global:
-            ensureGlobalTab()
-            agentFocus.activeTabID = "global"
-            guard let viewState = agentFocus.agentTabs.first(where: { $0.id == "global" })?.tab.viewState else { return }
-            let names = db.features.prefix(20).map { "- \($0.name) (id: \($0.id))" }.joined(separator: "\n")
-            let msg = "All features:\n\(names)\n\nUse srota MCP tools: list_features, get_feature, update_feature_description, add_issue, link_issue_to_feature"
-            let escaped = msg.replacingOccurrences(of: "\"", with: "\\\"").replacingOccurrences(of: "\n", with: "\\n")
-            viewState.send("\(agentType.command) \"\(escaped)\"\n")
-        case .feature(let feature):
-            openTab(for: feature)
-            guard let viewState = agentFocus.agentTabs.first(where: { $0.id == feature.id })?.tab.viewState else { return }
-            viewState.send("\(agentType.command)\n")
-        }
-    }
 
     private func injectMCPConfig(into dir: String, mcpPath: String) {
         injectClaudeMCPConfig(into: dir, mcpPath: mcpPath)
@@ -1249,15 +1224,6 @@ private struct FeaturesPanel: View {
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(Color.mgSurface).clipShape(Capsule())
                 Spacer()
-                Button { agentPickerFor = .global } label: {
-                    Image(systemName: "terminal")
-                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.mgAccent)
-                        .frame(width: 28, height: 28)
-                        .background(Color.mgAccent.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-                .buttonStyle(.plain)
-                .help("Open global features agent")
                 Button { showAdd = true } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.mgAccent)
@@ -1277,13 +1243,7 @@ private struct FeaturesPanel: View {
                         SelectableRow(
                             item: feature,
                             isSelected: agentFocus.activeTabID == feature.id,
-                            onSelect: {
-                                if agentFocus.agentTabs.contains(where: { $0.id == feature.id }) {
-                                    agentFocus.activeTabID = feature.id
-                                } else {
-                                    agentPickerFor = .feature(feature)
-                                }
-                            },
+                            onSelect: { openTab(for: feature) },
                             onDelete: { db.deleteFeature(id: feature.id) }
                         ) {
                             VStack(alignment: .leading, spacing: 2) {
@@ -1332,41 +1292,6 @@ private struct FeaturesPanel: View {
         .onChange(of: agentFocus.activeTabID) {
             agentFocus.activeViewState = agentFocus.agentTabs.first { $0.id == agentFocus.activeTabID }?.tab.viewState
         }
-    }
-}
-
-private struct AgentPickerView: View {
-    let title: String
-    let onPick: (AgentType) -> Void
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Text(title)
-                .font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.mgLabel)
-                .lineLimit(1).truncationMode(.middle)
-            Text("Choose agent")
-                .font(.system(size: 11)).foregroundStyle(Color.mgMuted)
-            HStack(spacing: 20) {
-                ForEach([AgentType.claude, .codex], id: \.label) { agentType in
-                    Button { onPick(agentType) } label: {
-                        VStack(spacing: 8) {
-                            Image(systemName: agentType.icon)
-                                .font(.system(size: 20))
-                            Text(agentType.label)
-                                .font(.system(size: 13, weight: .medium))
-                        }
-                        .frame(width: 100, height: 72)
-                        .background(Color.mgSurface)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Color.mgLabel)
-                }
-            }
-        }
-        .padding(28)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.mgBg)
     }
 }
 
