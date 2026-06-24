@@ -410,23 +410,42 @@ private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirect
             others.append((.secondary(e.id), l))
         }
 
+        // Exact single-neighbor match (original behavior)
         for (otherRef, var nl) in others {
-            // left neighbor
             if abs(nl.x + nl.w - rl.x) < eps && abs(nl.y - rl.y) < eps && abs(nl.h - rl.h) < eps {
                 nl.w += rl.w; setLayout(nl, for: otherRef); return
             }
-            // top neighbor
             if abs(nl.y + nl.h - rl.y) < eps && abs(nl.x - rl.x) < eps && abs(nl.w - rl.w) < eps {
                 nl.h += rl.h; setLayout(nl, for: otherRef); return
             }
-            // right neighbor
             if abs(nl.x - (rl.x + rl.w)) < eps && abs(nl.y - rl.y) < eps && abs(nl.h - rl.h) < eps {
                 nl.x = rl.x; nl.w += rl.w; setLayout(nl, for: otherRef); return
             }
-            // bottom neighbor
             if abs(nl.y - (rl.y + rl.h)) < eps && abs(nl.x - rl.x) < eps && abs(nl.w - rl.w) < eps {
                 nl.y = rl.y; nl.h += rl.h; setLayout(nl, for: otherRef); return
             }
+        }
+
+        // Fallback: expand all panes whose edge overlaps the removed pane's edge.
+        // Handles multi-pane cases where no single neighbor spans the full edge.
+        func overlapsY(_ nl: PaneLayout) -> Bool { nl.y + nl.h > rl.y + eps && nl.y < rl.y + rl.h - eps }
+        func overlapsX(_ nl: PaneLayout) -> Bool { nl.x + nl.w > rl.x + eps && nl.x < rl.x + rl.w - eps }
+
+        let rightNeighbors = others.filter { abs($0.1.x - (rl.x + rl.w)) < eps && overlapsY($0.1) }
+        if !rightNeighbors.isEmpty {
+            for (r, var nl) in rightNeighbors { nl.x = rl.x; nl.w += rl.w; setLayout(nl, for: r) }; return
+        }
+        let leftNeighbors = others.filter { abs($0.1.x + $0.1.w - rl.x) < eps && overlapsY($0.1) }
+        if !leftNeighbors.isEmpty {
+            for (r, var nl) in leftNeighbors { nl.w += rl.w; setLayout(nl, for: r) }; return
+        }
+        let bottomNeighbors = others.filter { abs($0.1.y - (rl.y + rl.h)) < eps && overlapsX($0.1) }
+        if !bottomNeighbors.isEmpty {
+            for (r, var nl) in bottomNeighbors { nl.y = rl.y; nl.h += rl.h; setLayout(nl, for: r) }; return
+        }
+        let topNeighbors = others.filter { abs($0.1.y + $0.1.h - rl.y) < eps && overlapsX($0.1) }
+        if !topNeighbors.isEmpty {
+            for (r, var nl) in topNeighbors { nl.h += rl.h; setLayout(nl, for: r) }; return
         }
     }
 }
@@ -634,18 +653,23 @@ private struct SidebarDivider: View {
     let sidebarVisible: Bool
     @Binding var width: CGFloat
     @State private var isHovered = false
+    @State private var dragStartWidth: CGFloat? = nil
 
     var body: some View {
         Rectangle()
             .fill(isHovered ? Color.accentOrange.opacity(0.6) : Color.white.opacity(0.06))
-            .frame(width: isHovered ? 3 : 1)
+            .frame(width: SidebarResizeLogic.dividerThickness(sidebarVisible: sidebarVisible, isHovered: isHovered))
             .opacity(sidebarVisible ? 1 : 0)
             .onHover { isHovered = $0 }
+            .allowsHitTesting(sidebarVisible)
             .gesture(
                 DragGesture(minimumDistance: 1)
-                    .onChanged { v in
-                        width = max(150, min(500, width + v.translation.width))
-                    }
+                .onChanged { v in
+                    let startWidth = dragStartWidth ?? width
+                    dragStartWidth = startWidth
+                    width = SidebarResizeLogic.updatedWidth(startWidth: startWidth, translationWidth: v.translation.width)
+                }
+                .onEnded { _ in dragStartWidth = nil }
             )
             .animation(.easeOut(duration: 0.12), value: isHovered)
             .help("Drag to resize sidebar")
@@ -732,7 +756,8 @@ struct ContentView: View {
                     }
                     ForEach(manager.allWorkspaces) { ws in
                         WorkspaceContent(workspace: ws,
-                                         selectedWorkspaceID: manager.selectedWorkspaceID)
+                                         selectedWorkspaceID: manager.selectedWorkspaceID,
+                                         onPaneResizeFinished: saveLayout)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1490,10 +1515,11 @@ private struct TabBarView: View {
 private struct WorkspaceContent: View {
     @ObservedObject var workspace: Workspace
     let selectedWorkspaceID: UUID?
+    let onPaneResizeFinished: () -> Void
 
     var body: some View {
         ForEach(workspace.tabs) { tab in
-            TerminalContentView(tab: tab)
+            TerminalContentView(tab: tab, onPaneResizeFinished: onPaneResizeFinished)
                 .opacity(workspace.id == selectedWorkspaceID && tab.id == workspace.selectedTabID ? 1 : 0)
         }
     }
@@ -1609,12 +1635,173 @@ private struct SplitButton: View {
     }
 }
 
+// MARK: - Pane resize overlay
+
+private final class PaneResizingView: NSView {
+    var tab: TerminalTab
+    var onResizeFinished: () -> Void
+
+    private let hitZone: CGFloat = 5
+    private var dragIsVertical: Bool? = nil
+    private var dragStartPos: CGPoint = .zero
+    private var dragNegRefs: [PaneRef] = []
+    private var dragPosRefs: [PaneRef] = []
+    private var dragStartLayouts: [(PaneRef, PaneLayout)] = []
+    private var showingResizeCursor = false
+
+    init(tab: TerminalTab, onResizeFinished: @escaping () -> Void) {
+        self.tab = tab
+        self.onResizeFinished = onResizeFinished
+        super.init(frame: .zero)
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.activeInActiveApp, .mouseMoved, .mouseEnteredAndExited, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isFlipped: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        edgeNear(point) != nil ? self : nil
+    }
+
+    private func edgeNear(_ p: CGPoint) -> (Bool, [PaneRef], [PaneRef])? {
+        let sz = bounds.size
+        guard sz.width > 0, sz.height > 0 else { return nil }
+        let eps: CGFloat = 0.005
+        let all = allPanes()
+        for (_, l) in all {
+            let ex = l.x + l.w
+            if ex > eps && ex < 1 - eps, abs(p.x - sz.width * ex) < hitZone {
+                let py = p.y / sz.height
+                // Validate cursor is inside an actual shared-edge segment at this y
+                let negAtY = all.filter { abs($0.1.x + $0.1.w - ex) < eps && py >= $0.1.y && py <= $0.1.y + $0.1.h }
+                let posAtY = all.filter { abs($0.1.x - ex) < eps         && py >= $0.1.y && py <= $0.1.y + $0.1.h }
+                if !negAtY.isEmpty && !posAtY.isEmpty {
+                    // Move ALL panes sharing this edge so the full divider stays straight
+                    let neg = all.filter { abs($0.1.x + $0.1.w - ex) < eps }.map(\.0)
+                    let pos = all.filter { abs($0.1.x - ex) < eps }.map(\.0)
+                    return (true, neg, pos)
+                }
+            }
+            let ey = l.y + l.h
+            if ey > eps && ey < 1 - eps, abs(p.y - sz.height * ey) < hitZone {
+                let px = p.x / sz.width
+                let negAtX = all.filter { abs($0.1.y + $0.1.h - ey) < eps && px >= $0.1.x && px <= $0.1.x + $0.1.w }
+                let posAtX = all.filter { abs($0.1.y - ey) < eps          && px >= $0.1.x && px <= $0.1.x + $0.1.w }
+                if !negAtX.isEmpty && !posAtX.isEmpty {
+                    let neg = all.filter { abs($0.1.y + $0.1.h - ey) < eps }.map(\.0)
+                    let pos = all.filter { abs($0.1.y - ey) < eps }.map(\.0)
+                    return (false, neg, pos)
+                }
+            }
+        }
+        return nil
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if let (isV, _, _) = edgeNear(p) {
+            if !showingResizeCursor {
+                (isV ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).push()
+                showingResizeCursor = true
+            }
+        } else if showingResizeCursor {
+            NSCursor.pop()
+            showingResizeCursor = false
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if showingResizeCursor {
+            NSCursor.pop()
+            showingResizeCursor = false
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        guard let (isV, neg, pos) = edgeNear(p) else { return }
+        if showingResizeCursor {
+            NSCursor.pop()
+            showingResizeCursor = false
+        }
+        dragIsVertical   = isV
+        dragStartPos     = p
+        dragNegRefs      = neg
+        dragPosRefs      = pos
+        dragStartLayouts = (neg + pos).map { ($0, currentLayout($0)) }
+        (isV ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).push()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let isV = dragIsVertical else { return }
+        let p  = convert(event.locationInWindow, from: nil)
+        let sz = bounds.size
+        let translation = isV ? (p.x - dragStartPos.x) / sz.width
+                              : (p.y - dragStartPos.y) / sz.height
+        let startSizes = dragStartLayouts.map { isV ? $0.1.w : $0.1.h }
+        let negIndices = Set(dragStartLayouts.enumerated().compactMap { dragNegRefs.contains($0.element.0) ? $0.offset : nil })
+        guard let delta = PaneResizeLogic.clampedDelta(startSizes: startSizes, negativeIndices: negIndices, translation: translation) else { return }
+        for (ref, sl) in dragStartLayouts {
+            var l = sl
+            if dragNegRefs.contains(ref) {
+                if isV { l.w = sl.w + delta } else { l.h = sl.h + delta }
+            } else {
+                if isV { l.x = sl.x + delta; l.w = sl.w - delta }
+                else   { l.y = sl.y + delta; l.h = sl.h - delta }
+            }
+            setLayout(l, for: ref)
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard dragIsVertical != nil else { return }
+        NSCursor.pop()
+        dragIsVertical   = nil
+        dragStartLayouts = []
+        dragNegRefs      = []
+        dragPosRefs      = []
+        onResizeFinished()
+    }
+
+    private func allPanes() -> [(PaneRef, PaneLayout)] {
+        [(PaneRef.primary, tab.primaryLayout)] +
+        tab.secondaryPanes.compactMap { e in tab.layouts[e.id].map { (.secondary(e.id), $0) } }
+    }
+
+    private func currentLayout(_ ref: PaneRef) -> PaneLayout {
+        switch ref {
+        case .primary:           return tab.primaryLayout
+        case .secondary(let id): return tab.layouts[id] ?? PaneLayout()
+        }
+    }
+
+    private func setLayout(_ l: PaneLayout, for ref: PaneRef) {
+        switch ref {
+        case .primary:           tab.primaryLayout = l
+        case .secondary(let id): tab.layouts[id]   = l
+        }
+    }
+}
+
+private struct PaneResizeOverlay: NSViewRepresentable {
+    @ObservedObject var tab: TerminalTab
+    let onResizeFinished: () -> Void
+    func makeNSView(context: Context) -> PaneResizingView { PaneResizingView(tab: tab, onResizeFinished: onResizeFinished) }
+    func updateNSView(_ v: PaneResizingView, context: Context) { v.tab = tab; v.onResizeFinished = onResizeFinished }
+}
+
 // MARK: - Terminal content (split-aware)
 // Primary is always ZStack child 0. Named coordinate space "panes" lets drag gestures
 // report absolute positions — no manual offset math needed.
 
 private struct TerminalContentView: View {
     @ObservedObject var tab: TerminalTab
+    let onPaneResizeFinished: () -> Void
     @State private var isDragging  = false
     @State private var dragSource: PaneRef? = nil
     @State private var dragHover:  PaneRef? = nil
@@ -1646,6 +1833,23 @@ private struct TerminalContentView: View {
                         })
                     }
                 }
+
+                ForEach(Array(dividerSegments().enumerated()), id: \.offset) { _, seg in
+                    if seg.isVertical {
+                        Rectangle().fill(Color.white.opacity(0.1))
+                            .frame(width: 1, height: sz.height * (seg.to - seg.from))
+                            .offset(x: sz.width * seg.at - 0.5, y: sz.height * seg.from)
+                            .allowsHitTesting(false)
+                    } else {
+                        Rectangle().fill(Color.white.opacity(0.1))
+                            .frame(width: sz.width * (seg.to - seg.from), height: 1)
+                            .offset(x: sz.width * seg.from, y: sz.height * seg.at - 0.5)
+                            .allowsHitTesting(false)
+                    }
+                }
+
+                PaneResizeOverlay(tab: tab, onResizeFinished: onPaneResizeFinished)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .coordinateSpace(name: "panes")
         }
@@ -1758,6 +1962,37 @@ private struct TerminalContentView: View {
         let dy = abs(p.y - cy) / (sz.height * l.h)
         if dx > dy { return p.x < cx ? .left : .right }
         return p.y < cy ? .top : .bottom
+    }
+
+    private struct DividerSegment { let isVertical: Bool; let at: CGFloat; let from: CGFloat; let to: CGFloat }
+
+    private func dividerSegments() -> [DividerSegment] {
+        let all: [(PaneRef, PaneLayout)] = [(.primary, tab.primaryLayout)] +
+            tab.secondaryPanes.compactMap { e in tab.layouts[e.id].map { (.secondary(e.id), $0) } }
+        let eps: CGFloat = 0.005
+        var vSeen = Set<String>(), hSeen = Set<String>()
+        var result: [DividerSegment] = []
+        for (_, l) in all {
+            let ex = l.x + l.w
+            if ex > eps && ex < 1 - eps, vSeen.insert(String(format: "%.4f", ex)).inserted {
+                let neg = all.filter { abs($0.1.x + $0.1.w - ex) < eps }.map(\.1)
+                let pos = all.filter { abs($0.1.x - ex) < eps }.map(\.1)
+                for nl in neg { for pl in pos {
+                    let f = Swift.max(nl.y, pl.y), t = Swift.min(nl.y + nl.h, pl.y + pl.h)
+                    if t > f + eps { result.append(.init(isVertical: true,  at: ex, from: f, to: t)) }
+                }}
+            }
+            let ey = l.y + l.h
+            if ey > eps && ey < 1 - eps, hSeen.insert(String(format: "%.4f", ey)).inserted {
+                let neg = all.filter { abs($0.1.y + $0.1.h - ey) < eps }.map(\.1)
+                let pos = all.filter { abs($0.1.y - ey) < eps }.map(\.1)
+                for nl in neg { for pl in pos {
+                    let f = Swift.max(nl.x, pl.x), t = Swift.min(nl.x + nl.w, pl.x + pl.w)
+                    if t > f + eps { result.append(.init(isVertical: false, at: ey, from: f, to: t)) }
+                }}
+            }
+        }
+        return result
     }
 }
 
