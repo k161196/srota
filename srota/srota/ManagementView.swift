@@ -1978,7 +1978,7 @@ private struct IssuesPanel: View {
                             item: issue,
                             isSelected: agentFocus.activeTabID == issue.id,
                             onSelect: { openTab(for: issue) },
-                            onDelete: { db.deleteIssue(id: issue.id) }
+                            onDelete: { closeTab(issue.id); db.deleteIssue(id: issue.id) }
                         ) {
                             HStack(spacing: 8) {
                                 VStack(alignment: .leading, spacing: 2) {
