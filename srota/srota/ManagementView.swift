@@ -1033,7 +1033,7 @@ private struct FeaturesPanel: View {
 
     private func ensureGlobalTab() {
         guard !agentFocus.agentTabs.contains(where: { $0.id == "global" }) else { return }
-        agentFocus.agentTabs.insert(FeatureAgentTab(id: "global", featureID: nil, tab: TerminalTab(colorScheme: colorScheme)), at: 0)
+        agentFocus.agentTabs.insert(FeatureAgentTab(id: "global", featureID: nil, tab: TerminalTab(colorScheme: colorScheme, workingDirectory: agentSessionDir(type: "features", id: "global"))), at: 0)
     }
 
     private func openTab(for feature: Feature) {
@@ -1783,7 +1783,7 @@ private struct IssuesPanel: View {
     private func ensureGlobalTab() {
         guard !agentFocus.agentTabs.contains(where: { $0.id == "global" }) else { return }
         agentFocus.agentTabs.insert(
-            IssueAgentTab(id: "global", issueID: nil, tab: TerminalTab(colorScheme: colorScheme)),
+            IssueAgentTab(id: "global", issueID: nil, tab: TerminalTab(colorScheme: colorScheme, workingDirectory: agentSessionDir(type: "issues", id: "global"))),
             at: 0
         )
     }
