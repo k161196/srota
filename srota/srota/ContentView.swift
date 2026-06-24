@@ -527,6 +527,8 @@ final class Workspace: Identifiable, ObservableObject {
             }
         }
         tabs.removeAll { $0.id == id }
+        NotificationCenter.default.post(name: .srotaTabClosed, object: nil,
+                                        userInfo: ["workspaceID": self.id.uuidString])
     }
 }
 
@@ -601,8 +603,14 @@ final class TerminalManager: ObservableObject {
         }
         let beforeCount = workspaces.count
         workspaces.removeAll { $0.id == id }
-        if workspaces.count < beforeCount { return }
+        if workspaces.count < beforeCount {
+            NotificationCenter.default.post(name: .srotaWorkspaceClosed, object: nil,
+                                            userInfo: ["id": id.uuidString])
+            return
+        }
         for folder in folders { folder.workspaces.removeAll { $0.id == id } }
+        NotificationCenter.default.post(name: .srotaWorkspaceClosed, object: nil,
+                                        userInfo: ["id": id.uuidString])
     }
 
     func addFolder(name: String) -> WorkspaceFolder {
@@ -836,6 +844,14 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             saveLayout()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .srotaWorkspaceClosed)) { note in
+            guard let wsID = note.userInfo?["id"] as? String else { return }
+            db.deleteWorkspaceSession(id: wsID)
+            db.deleteTabs(workspaceID: wsID)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .srotaTabClosed)) { _ in
+            saveLayout()
+        }
         .sheet(isPresented: $showBaseDirectoryPicker) {
             BaseDirectorySheet { url in
                 settings.baseWorkingDirectory = url.path
@@ -902,10 +918,7 @@ struct ContentView: View {
 
     private func restoreSessionsFromDB(colorScheme: ColorScheme) {
         let saved = db.loadWorkspaceSessions()
-        guard !saved.isEmpty else {
-            manager.addWorkspace(colorScheme: colorScheme)
-            return
-        }
+        guard !saved.isEmpty else { return }
         for session in saved {
             let folder = session.folderName.isEmpty
                 ? nil

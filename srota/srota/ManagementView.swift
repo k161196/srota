@@ -28,7 +28,9 @@ final class IssueAgentFocus {
 }
 
 extension Notification.Name {
-    static let srotaOpenWorkspace = Notification.Name("srota.openWorkspace")
+    static let srotaOpenWorkspace    = Notification.Name("srota.openWorkspace")
+    static let srotaWorkspaceClosed  = Notification.Name("srota.workspaceClosed")
+    static let srotaTabClosed        = Notification.Name("srota.tabClosed")
 }
 
 // MARK: - Top-level tab enum
