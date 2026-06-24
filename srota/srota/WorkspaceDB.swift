@@ -329,7 +329,7 @@ final class WorkspaceDB {
         projects = rows(sql("SELECT id, org_id, name, path, description", sqlFrom, "projects", "ORDER BY name")) {
             Project(id: col($0, 0), orgID: col($0, 1), name: col($0, 2), path: col($0, 3), description: col($0, 4))
         }
-        features = rows(sql("SELECT id, project_id, name, description, number", sqlFrom, "features", "ORDER BY name")) {
+        features = rows(sql("SELECT id, project_id, name, description, number", sqlFrom, "features", "ORDER BY number")) {
             Feature(id: col($0, 0), projectID: col($0, 1), name: col($0, 2), description: col($0, 3), number: Int(sqlite3_column_int($0, 4)))
         }
         repos = rows(sql("SELECT id, name, url, local_path", sqlFrom, "repos", "ORDER BY name")) {
@@ -341,7 +341,7 @@ final class WorkspaceDB {
         repoBranches = rows(sql("SELECT id, repo_id, name, description", sqlFrom, "repo_branches", "ORDER BY name")) {
             RepoBranch(id: col($0, 0), repoID: col($0, 1), name: col($0, 2), description: col($0, 3))
         }
-        issues = rows(sql("SELECT id, title, body, status, org_id, feature_id, number", sqlFrom, "issues", "ORDER BY title")) {
+        issues = rows(sql("SELECT id, title, body, status, org_id, feature_id, number", sqlFrom, "issues", "ORDER BY number")) {
             Issue(id: col($0, 0), title: col($0, 1), body: col($0, 2), status: col($0, 3), orgID: col($0, 4), featureID: col($0, 5), number: Int(sqlite3_column_int($0, 6)))
         }
     }
@@ -360,7 +360,7 @@ final class WorkspaceDB {
         CREATE TABLE IF NOT EXISTS branches
         (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS features
-        (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '');
+        (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', number INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS repos
         (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL DEFAULT '',
          local_path TEXT NOT NULL DEFAULT '');
@@ -370,7 +370,7 @@ final class WorkspaceDB {
         (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS issues
         (id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
-         status TEXT NOT NULL DEFAULT 'open', org_id TEXT NOT NULL DEFAULT '', feature_id TEXT NOT NULL DEFAULT '');
+         status TEXT NOT NULL DEFAULT 'open', org_id TEXT NOT NULL DEFAULT '', feature_id TEXT NOT NULL DEFAULT '', number INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS ws_workspaces (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
