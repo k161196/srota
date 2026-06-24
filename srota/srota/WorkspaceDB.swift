@@ -54,6 +54,7 @@ struct Feature: Identifiable, Hashable {
     var projectID: String
     var name: String
     var description: String
+    var number: Int
 }
 
 struct RepoEntry: Identifiable, Hashable {
@@ -84,6 +85,7 @@ struct Issue: Identifiable, Hashable {
     var status: String
     var orgID: String
     var featureID: String
+    var number: Int
 }
 
 @Observable
@@ -194,7 +196,8 @@ final class WorkspaceDB {
             "id": UUID().uuidString,
             "project_id": projectID,
             "name": name,
-            "description": description
+            "description": description,
+            "number": String(nextNumber(in: "features"))
         ])
         refresh()
     }
@@ -204,7 +207,8 @@ final class WorkspaceDB {
             "id": feature.id,
             "project_id": feature.projectID,
             "name": feature.name,
-            "description": feature.description
+            "description": feature.description,
+            "number": String(feature.number)
         ])
         refresh()
     }
@@ -288,7 +292,8 @@ final class WorkspaceDB {
             "body": body,
             "status": status,
             "org_id": orgID,
-            "feature_id": featureID
+            "feature_id": featureID,
+            "number": String(nextNumber(in: "issues"))
         ])
         refresh()
     }
@@ -300,7 +305,8 @@ final class WorkspaceDB {
             "body": issue.body,
             "status": issue.status,
             "org_id": issue.orgID,
-            "feature_id": issue.featureID
+            "feature_id": issue.featureID,
+            "number": String(issue.number)
         ])
         refresh()
     }
@@ -323,8 +329,8 @@ final class WorkspaceDB {
         projects = rows(sql("SELECT id, org_id, name, path, description", sqlFrom, "projects", "ORDER BY name")) {
             Project(id: col($0, 0), orgID: col($0, 1), name: col($0, 2), path: col($0, 3), description: col($0, 4))
         }
-        features = rows(sql("SELECT id, project_id, name, description", sqlFrom, "features", "ORDER BY name")) {
-            Feature(id: col($0, 0), projectID: col($0, 1), name: col($0, 2), description: col($0, 3))
+        features = rows(sql("SELECT id, project_id, name, description, number", sqlFrom, "features", "ORDER BY name")) {
+            Feature(id: col($0, 0), projectID: col($0, 1), name: col($0, 2), description: col($0, 3), number: Int(sqlite3_column_int($0, 4)))
         }
         repos = rows(sql("SELECT id, name, url, local_path", sqlFrom, "repos", "ORDER BY name")) {
             RepoEntry(id: col($0, 0), name: col($0, 1), url: col($0, 2), localPath: col($0, 3))
@@ -335,13 +341,17 @@ final class WorkspaceDB {
         repoBranches = rows(sql("SELECT id, repo_id, name, description", sqlFrom, "repo_branches", "ORDER BY name")) {
             RepoBranch(id: col($0, 0), repoID: col($0, 1), name: col($0, 2), description: col($0, 3))
         }
-        issues = rows(sql("SELECT id, title, body, status, org_id, feature_id", sqlFrom, "issues", "ORDER BY title")) {
-            Issue(id: col($0, 0), title: col($0, 1), body: col($0, 2), status: col($0, 3), orgID: col($0, 4), featureID: col($0, 5))
+        issues = rows(sql("SELECT id, title, body, status, org_id, feature_id, number", sqlFrom, "issues", "ORDER BY title")) {
+            Issue(id: col($0, 0), title: col($0, 1), body: col($0, 2), status: col($0, 3), orgID: col($0, 4), featureID: col($0, 5), number: Int(sqlite3_column_int($0, 6)))
         }
     }
 
     private func createTables() {
         execRaw("ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+        execRaw("ALTER TABLE features ADD COLUMN number INTEGER NOT NULL DEFAULT 0")
+        execRaw("ALTER TABLE issues ADD COLUMN number INTEGER NOT NULL DEFAULT 0")
+        execRaw("UPDATE features SET number = rowid WHERE number = 0")
+        execRaw("UPDATE issues SET number = rowid WHERE number = 0")
         execRaw("""
         CREATE TABLE IF NOT EXISTS organizations
         (id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL DEFAULT '');
@@ -594,6 +604,11 @@ final class WorkspaceDB {
 
     private func sql(_ parts: String...) -> String {
         parts.joined(separator: " ")
+    }
+
+    private func nextNumber(in table: String) -> Int {
+        let r = rows("SELECT COALESCE(MAX(number), 0) + 1 FROM \(table)") { Int(sqlite3_column_int($0, 0)) }
+        return r.first ?? 1
     }
 
     private func upsert(_ table: String, _ values: [String: String]) {

@@ -1250,7 +1250,12 @@ private struct FeaturesPanel: View {
                             onDelete: { db.deleteFeature(id: feature.id) }
                         ) {
                             VStack(alignment: .leading, spacing: 2) {
-                                RowPrimary(text: feature.name)
+                                HStack(spacing: 4) {
+                                    Text("#\(feature.number)")
+                                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(Color.mgAccent)
+                                    RowPrimary(text: feature.name)
+                                }
                                 let proj = db.projects.first { $0.id == feature.projectID }?.name ?? feature.projectID
                                 RowSecondary(text: proj)
                             }
@@ -1357,6 +1362,10 @@ private struct FeatureInfoSidebar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 0) {
+                Text("#\(feature.number)")
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color.mgAccent)
+                    .padding(.trailing, 6)
                 TextField("Feature name", text: $name)
                     .font(.system(size: 14, weight: .semibold))
                     .textFieldStyle(.plain)
@@ -1982,7 +1991,12 @@ private struct IssuesPanel: View {
                         ) {
                             HStack(spacing: 8) {
                                 VStack(alignment: .leading, spacing: 2) {
-                                    RowPrimary(text: issue.title)
+                                    HStack(spacing: 4) {
+                                        Text("#\(issue.number)")
+                                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                            .foregroundStyle(Color.mgAccent)
+                                        RowPrimary(text: issue.title)
+                                    }
                                     let ctx = contextLabel(issue)
                                     if !ctx.isEmpty { RowSecondary(text: ctx) }
                                 }
@@ -2062,6 +2076,10 @@ private struct IssueInfoSidebar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 0) {
+                Text("#\(issue.number)")
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color.mgAccent)
+                    .padding(.trailing, 6)
                 TextField("Issue title", text: $title)
                     .font(.system(size: 14, weight: .semibold))
                     .textFieldStyle(.plain)
