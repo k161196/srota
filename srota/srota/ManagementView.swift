@@ -1818,6 +1818,115 @@ private struct IssueDetailView: View {
     }
 }
 
+private struct IssueInfoSidebar: View {
+    let issue: Issue
+    let db: WorkspaceDB
+    @State private var title = ""
+    @State private var issueBody = ""
+    @State private var status = "open"
+
+    var linkedFeature: Feature? { db.features.first { $0.id == issue.featureID } }
+    var linkedOrg: Organization? { db.organizations.first { $0.id == issue.orgID } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 0) {
+                TextField("Issue title", text: $title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .textFieldStyle(.plain)
+                    .foregroundStyle(Color.mgLabel)
+                    .onSubmit { save() }
+                Button { db.refresh(); load() } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.mgMuted)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .help("Refresh")
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(Color.mgBg)
+            .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("STATUS")
+                            .font(.system(size: 10, weight: .medium)).tracking(0.8)
+                            .foregroundStyle(Color.mgMuted)
+                        Picker("", selection: $status) {
+                            ForEach(issueStatuses, id: \.self) { Text($0).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("BODY")
+                            .font(.system(size: 10, weight: .medium)).tracking(0.8)
+                            .foregroundStyle(Color.mgMuted)
+                        TextEditor(text: $issueBody)
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundStyle(Color.mgLabel)
+                            .scrollContentBackground(.hidden)
+                            .padding(10)
+                            .frame(minHeight: 120)
+                            .background(Color.mgSurface)
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+
+                    if let feature = linkedFeature {
+                        DetailRow(label: "Feature") {
+                            Text(feature.name)
+                                .font(.system(size: 13)).foregroundStyle(Color.mgLabel)
+                        }
+                    }
+
+                    if let org = linkedOrg {
+                        DetailRow(label: "Org") {
+                            Text(org.name)
+                                .font(.system(size: 13)).foregroundStyle(Color.mgLabel)
+                        }
+                    }
+                }
+                .padding(14)
+            }
+
+            HStack {
+                Spacer()
+                Button("Save") { save() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .medium)).foregroundStyle(.black)
+                    .padding(.horizontal, 14).padding(.vertical, 7)
+                    .background(Color.mgAccent)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(Color.mgBg)
+            .overlay(alignment: .top) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
+        }
+        .background(Color.mgBg)
+        .onAppear { load() }
+        .onChange(of: issue.id) { load() }
+        .onChange(of: issue.title) { load() }
+        .onChange(of: issue.status) { load() }
+        .onChange(of: issue.body) { load() }
+    }
+
+    private func load() {
+        let fresh = db.issues.first { $0.id == issue.id } ?? issue
+        title = fresh.title
+        issueBody = fresh.body
+        status = fresh.status
+    }
+
+    private func save() {
+        var i = issue; i.title = title; i.body = issueBody; i.status = status
+        db.updateIssue(i)
+    }
+}
+
 private struct StatusBadge: View {
     let status: String
     var body: some View {
