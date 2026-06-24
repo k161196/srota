@@ -427,6 +427,7 @@ final class WorkspaceDB {
     }
 
     func deleteWorkspaceSession(id: String) {
+        deleteTabs(workspaceID: id)
         exec(sql("DELETE", sqlFrom, "ws_workspaces", sqlWhere, "id = ?"), [id])
     }
 

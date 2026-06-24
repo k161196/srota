@@ -847,7 +847,6 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .srotaWorkspaceClosed)) { note in
             guard let wsID = note.userInfo?["id"] as? String else { return }
             db.deleteWorkspaceSession(id: wsID)
-            db.deleteTabs(workspaceID: wsID)
         }
         .onReceive(NotificationCenter.default.publisher(for: .srotaTabClosed)) { _ in
             saveLayout()
@@ -941,6 +940,7 @@ struct ContentView: View {
                             tab.primaryLayout = PaneLayout(
                                 x: CGFloat(primary.lx), y: CGFloat(primary.ly),
                                 w: CGFloat(primary.lw), h: CGFloat(primary.lh))
+                            tab.primaryExited = primary.lw == 0 || primary.lh == 0
                         }
                     }
                 }
@@ -1829,7 +1829,7 @@ private struct TerminalContentView: View {
                 // Primary — always child 0
                 paneView(
                     ref: .primary, state: tab.viewState, layout: pl,
-                    onClose: { tab.closePrimaryPane() }, sz: sz,
+                    onClose: { tab.closePrimaryPane(); onPaneResizeFinished() }, sz: sz,
                     focused: tab.focusedPaneID == nil
                 )
                 .simultaneousGesture(TapGesture().onEnded { tab.focusedPaneID = nil })
@@ -1838,7 +1838,7 @@ private struct TerminalContentView: View {
                     if let l = tab.layouts[entry.id] {
                         paneView(
                             ref: .secondary(entry.id), state: entry.viewState, layout: l,
-                            onClose: { tab.removePane(id: entry.id) }, sz: sz,
+                            onClose: { tab.removePane(id: entry.id); onPaneResizeFinished() }, sz: sz,
                             focused: tab.focusedPaneID == entry.id
                         )
                         .simultaneousGesture(TapGesture().onEnded {
