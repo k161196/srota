@@ -1043,7 +1043,7 @@ private struct FeaturesPanel: View {
             let cwds = db.featureRepos
                 .filter { $0.featureID == feature.id }
                 .compactMap { fr in db.repos.first { $0.id == fr.repoID }?.localPath }
-            let cwd = cwds.first
+            let cwd = agentSessionDir(type: "features", id: feature.id)
             agentFocus.agentTabs.append(FeatureAgentTab(id: feature.id, featureID: feature.id, tab: TerminalTab(colorScheme: colorScheme, workingDirectory: cwd)))
             agentFocus.activeTabID = feature.id
             cwds.forEach { injectContext(feature: feature, into: $0) }
@@ -1725,6 +1725,12 @@ private struct RepoBranchSheet: View {
 
 // MARK: - Issues panel
 
+private func agentSessionDir(type: String, id: String) -> String {
+    let dir = NSHomeDirectory() + "/.srota/sessions/\(type)/\(id)"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    return dir
+}
+
 private let issueStatuses = ["open", "in_progress", "closed"]
 
 private struct IssuesPanel: View {
@@ -1787,9 +1793,10 @@ private struct IssuesPanel: View {
             agentFocus.activeTabID = issue.id
         } else {
             let cwds = repoPaths(for: issue)
+            let cwd = agentSessionDir(type: "issues", id: issue.id)
             agentFocus.agentTabs.append(IssueAgentTab(
                 id: issue.id, issueID: issue.id,
-                tab: TerminalTab(colorScheme: colorScheme, workingDirectory: cwds.first)
+                tab: TerminalTab(colorScheme: colorScheme, workingDirectory: cwd)
             ))
             agentFocus.activeTabID = issue.id
             cwds.forEach { injectContext(issue: issue, into: $0) }
