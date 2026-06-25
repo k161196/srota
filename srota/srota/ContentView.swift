@@ -96,7 +96,7 @@ private struct DoubleClickOverlay: NSViewRepresentable {
 
 // MARK: - Model
 
-enum PaneRef: Equatable {
+enum PaneRef: Equatable, Hashable {
     case primary
     case secondary(UUID)
 }
@@ -138,21 +138,21 @@ final class PaneEntry: Identifiable {
 final class TerminalTab: Identifiable, ObservableObject {
     let id = UUID()
     @Published var customName: String = "" {
-        didSet { if customName.isEmpty { titleFromCWD = smartTitle(for: resolveCWD(focusedViewState.workingDirectory)) } }
+        didSet {
+            if customName.isEmpty {
+                titleFromCWD = smartTitle(for: resolveCWD(focusedViewState.workingDirectory))
+            }
+        }
     }
-    let viewState: TerminalViewState
-    @Published var secondaryPanes: [PaneEntry] = []
-    @Published var layouts:      [UUID: PaneLayout] = [:]
-    @Published var primaryPaneName: String = ""
-    @Published var paneNames:    [UUID: String]     = [:]
-    @Published var primaryLayout = PaneLayout()
+    @Published var panes: [PaneEntry] = []
+    @Published var paneLayouts: [UUID: PaneLayout] = [:]
+    @Published var paneNames:   [UUID: String]     = [:]
     @Published private var agentNotification = AgentNotificationState()
-    var agentStatus: AgentRunStatus? { agentNotification.status }
-    var agentStatusUpdatedAt: Double { agentNotification.updatedAt }
-    var agentSummary: String { agentNotification.summary }
+    var agentStatus: AgentRunStatus?  { agentNotification.status }
+    var agentStatusUpdatedAt: Double  { agentNotification.updatedAt }
+    var agentSummary: String          { agentNotification.summary }
     let hookTabID = UUID().uuidString
-    let primaryPaneHookID = UUID().uuidString
-    @Published var focusedPaneID: UUID? = nil {
+    @Published var focusedPaneID: UUID {
         didSet {
             if customName.isEmpty {
                 titleFromCWD = smartTitle(for: resolveCWD(focusedViewState.workingDirectory))
@@ -160,50 +160,48 @@ final class TerminalTab: Identifiable, ObservableObject {
             bindTitleSink()
         }
     }
-    @Published var primaryExited = false
     @Published private(set) var titleFromCWD: String = "Terminal"
     private var titleSink: AnyCancellable?
     var closeTabCallback: (() -> Void)?
     let initialWorkingDirectory: String?
-    private var paneCount = 0
 
     init(colorScheme: ColorScheme, workingDirectory: String? = nil) {
         self.initialWorkingDirectory = workingDirectory
+        // Create first pane
+        let paneHookID = UUID().uuidString
         let state = TerminalViewState(
-            terminalConfiguration: makeLauncherConfig(tabID: hookTabID, paneID: primaryPaneHookID)
+            terminalConfiguration: makeLauncherConfig(tabID: hookTabID, paneID: paneHookID)
         )
         state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: workingDirectory)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
-        viewState = state
+        let first = PaneEntry(hookPaneID: paneHookID, viewState: state, initialCWD: workingDirectory)
+        self.panes = [first]
+        self.paneLayouts = [first.id: PaneLayout()]
+        self.focusedPaneID = first.id
         bindTitleSink()
-    }
-
-    private func bindTitleSink() {
-        titleSink = focusedViewState.$workingDirectory
-            .receive(on: RunLoop.main)
-            .sink { [weak self] cwd in
-                guard let self, self.customName.isEmpty else { return }
-                self.titleFromCWD = smartTitle(for: resolveCWD(cwd))
-            }
+        state.onClose = { [weak self, weak first] _ in
+            guard let self, let first else { return }
+            self.removePane(id: first.id)
+        }
     }
 
     var displayName: String {
         if !customName.isEmpty { return customName }
-        if let fid = focusedPaneID {
-            if let name = paneNames[fid], !name.isEmpty { return name }
-        } else if !primaryPaneName.isEmpty {
-            return primaryPaneName
-        }
+        if let name = paneNames[focusedPaneID], !name.isEmpty { return name }
         return titleFromCWD
     }
 
     func applyAgentStatus(_ status: AgentRunStatus, summary: String?, at timestamp: Double, paneHookID: String?) -> Bool {
-        if let paneHookID, paneHookID != primaryPaneHookID,
-           !secondaryPanes.contains(where: { $0.hookPaneID == paneHookID }) {
+        if let paneHookID, !panes.contains(where: { $0.hookPaneID == paneHookID }) {
             return false
         }
-        agentNotification.apply(status: status, summary: summary, timestamp: timestamp, ownerPaneID: paneHookID ?? primaryPaneHookID)
+        agentNotification.apply(status: status, summary: summary, timestamp: timestamp,
+                                ownerPaneID: paneHookID ?? panes[0].hookPaneID)
         return true
+    }
+
+    func clearWorkingIfStale(before timestamp: Double) {
+        agentNotification.clearWorkingIfStale(before: timestamp)
     }
 
     var statusPath: String? {
@@ -211,11 +209,7 @@ final class TerminalTab: Identifiable, ObservableObject {
     }
 
     var focusedViewState: TerminalViewState {
-        if let fid = focusedPaneID,
-           let entry = secondaryPanes.first(where: { $0.id == fid }) {
-            return entry.viewState
-        }
-        return viewState
+        panes.first(where: { $0.id == focusedPaneID })?.viewState ?? panes[0].viewState
     }
 
     private func splitCWD() -> String? {
@@ -240,52 +234,74 @@ final class TerminalTab: Identifiable, ObservableObject {
                 workingDirectory: splitCWD())
     }
 
-    func rename(ref: PaneRef, to name: String) {
-        switch ref {
-        case .primary:           primaryPaneName = name
-        case .secondary(let id): paneNames[id] = name
-        }
+    func rename(id: UUID, to name: String) {
+        paneNames[id] = name
     }
 
     func removePane(id: UUID) {
-        let removedPaneHookID = secondaryPanes.first(where: { $0.id == id })?.hookPaneID
-        expandNeighbor(of: .secondary(id))
-        secondaryPanes.removeAll { $0.id == id }
-        layouts.removeValue(forKey: id)
-        if let removedPaneHookID {
-            agentNotification.clearIfOwned(byPaneID: removedPaneHookID)
+        let wasFocused  = focusedPaneID == id
+        let hookID      = panes.first(where: { $0.id == id })?.hookPaneID
+        expandNeighbor(of: id)
+        panes.removeAll { $0.id == id }
+        paneLayouts.removeValue(forKey: id)
+        paneNames.removeValue(forKey: id)
+        if let hookID { agentNotification.clearIfOwned(byPaneID: hookID) }
+        if panes.isEmpty {
+            closeTabCallback?()
+        } else if wasFocused {
+            focusedPaneID = panes[0].id
         }
-        if focusedPaneID == id { focusedPaneID = nil }
-        if secondaryPanes.isEmpty {
-            if primaryExited { closeTabCallback?() }
-            else { primaryLayout = PaneLayout() }
+    }
+
+    private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirectory: String? = nil) {
+        let paneHookID = UUID().uuidString
+        let state = TerminalViewState(
+            terminalConfiguration: makeLauncherConfig(tabID: hookTabID, paneID: paneHookID)
+        )
+        state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: workingDirectory)
+        state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
+        let entry = PaneEntry(hookPaneID: paneHookID, viewState: state, initialCWD: workingDirectory)
+        state.onClose = { [weak self, weak entry] _ in
+            guard let self, let entry else { return }
+            self.removePane(id: entry.id)
         }
+        paneLayouts[entry.id] = layout
+        panes.append(entry)
+        focusedPaneID = entry.id
     }
 
-    func collapsePrimary() {
-        expandNeighbor(of: .primary)
-        primaryLayout = PaneLayout(x: 0, y: 0, w: 0, h: 0)
-        primaryExited = true
-        agentNotification.clearIfOwned(byPaneID: primaryPaneHookID)
+    func restorePane(record: PaneRecord, colorScheme: ColorScheme) {
+        let cwd = record.initialCWD.isEmpty ? nil : record.initialCWD
+        let paneHookID = UUID().uuidString
+        let state = TerminalViewState(
+            terminalConfiguration: makeLauncherConfig(tabID: hookTabID, paneID: paneHookID)
+        )
+        state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: cwd)
+        state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
+        let entry = PaneEntry(hookPaneID: paneHookID, viewState: state, initialCWD: cwd)
+        state.onClose = { [weak self, weak entry] _ in
+            guard let self, let entry else { return }
+            self.removePane(id: entry.id)
+        }
+        paneLayouts[entry.id] = PaneLayout(
+            x: CGFloat(record.lx), y: CGFloat(record.ly),
+            w: CGFloat(record.lw), h: CGFloat(record.lh))
+        panes.append(entry)
+        focusedPaneID = entry.id
     }
 
-    func closePrimaryPane() {
-        if secondaryPanes.isEmpty { closeTabCallback?() }
-        else { collapsePrimary() }
-    }
-
-    func swapLayouts(_ a: PaneRef, _ b: PaneRef) {
+    func swapLayouts(_ a: UUID, _ b: UUID) {
         guard a != b else { return }
-        let la = layout(for: a), lb = layout(for: b)
-        setLayout(lb, for: a)
-        setLayout(la, for: b)
+        let la = paneLayouts[a] ?? PaneLayout()
+        let lb = paneLayouts[b] ?? PaneLayout()
+        paneLayouts[a] = lb
+        paneLayouts[b] = la
     }
 
-    func performDrop(source: PaneRef, target: PaneRef, side: DropSide) {
+    func performDrop(source: UUID, target: UUID, side: DropSide) {
         guard source != target else { return }
-        // Expand first — target may absorb source's old space, giving a larger split area
         expandNeighbor(of: source)
-        let tl = layout(for: target)   // re-read AFTER expansion
+        let tl = paneLayouts[target] ?? PaneLayout()
         var newTarget: PaneLayout
         var newSource: PaneLayout
         switch side {
@@ -306,123 +322,66 @@ final class TerminalTab: Identifiable, ObservableObject {
             newTarget = PaneLayout(x: tl.x, y: tl.y, w: tl.w, h: half)
             newSource = PaneLayout(x: tl.x, y: tl.y + half, w: tl.w, h: half)
         }
-        setLayout(newTarget, for: target)
-        setLayout(newSource, for: source)
+        paneLayouts[target] = newTarget
+        paneLayouts[source] = newSource
     }
 
     // MARK: - Private
 
-    private func layout(for ref: PaneRef) -> PaneLayout {
-        switch ref {
-        case .primary:           return primaryLayout
-        case .secondary(let id): return layouts[id] ?? PaneLayout()
-        }
+    private var focusedLayout: PaneLayout? { paneLayouts[focusedPaneID] }
+
+    private func setFocusedLayout(_ l: PaneLayout) { paneLayouts[focusedPaneID] = l }
+
+    private func bindTitleSink() {
+        titleSink = focusedViewState.$workingDirectory
+            .receive(on: RunLoop.main)
+            .sink { [weak self] cwd in
+                guard let self, self.customName.isEmpty else { return }
+                self.titleFromCWD = smartTitle(for: resolveCWD(cwd))
+            }
     }
 
-    private func setLayout(_ l: PaneLayout, for ref: PaneRef) {
-        switch ref {
-        case .primary:           primaryLayout = l
-        case .secondary(let id): layouts[id]   = l
-        }
-    }
-
-    private var focusedLayout: PaneLayout? {
-        if let fid = focusedPaneID { return layouts[fid] }
-        return primaryLayout
-    }
-
-    private func setFocusedLayout(_ l: PaneLayout) {
-        if let fid = focusedPaneID { layouts[fid] = l }
-        else { primaryLayout = l }
-    }
-
-    /// Restore a saved secondary pane at its last known CWD.
-func restorePane(record: PaneRecord, colorScheme: ColorScheme) {
- let cwd = record.initialCWD.isEmpty ? nil : record.initialCWD
- let paneHookID = UUID().uuidString
- let state = TerminalViewState(
- terminalConfiguration: makeLauncherConfig(tabID: hookTabID, paneID: paneHookID)
- )
- state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: cwd)
- state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
- let entry = PaneEntry(hookPaneID: paneHookID, viewState: state, initialCWD: cwd)
-        state.onClose = { [weak self, weak entry] _ in
-            guard let self, let entry else { return }
-            self.removePane(id: entry.id)
-        }
-        let layout = PaneLayout(x: CGFloat(record.lx), y: CGFloat(record.ly),
-                                w: CGFloat(record.lw), h: CGFloat(record.lh))
-        layouts[entry.id] = layout
-        secondaryPanes.append(entry)
-        focusedPaneID = entry.id
-    }
-
-private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirectory: String? = nil) {
- let paneHookID = UUID().uuidString
- let state = TerminalViewState(
- terminalConfiguration: makeLauncherConfig(tabID: hookTabID, paneID: paneHookID)
- )
- state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: workingDirectory)
- state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
- let entry = PaneEntry(hookPaneID: paneHookID, viewState: state, initialCWD: workingDirectory)
-        state.onClose = { [weak self, weak entry] _ in
-            guard let self, let entry else { return }
-            self.removePane(id: entry.id)
-        }
-        layouts[entry.id] = layout
-        secondaryPanes.append(entry)
-        focusedPaneID = entry.id
-    }
-
-    // Expand a neighbor into ref's vacated space. Checks all 4 directions.
-    private func expandNeighbor(of ref: PaneRef) {
-        let rl = layout(for: ref)
+    private func expandNeighbor(of id: UUID) {
+        guard let rl = paneLayouts[id] else { return }
         let eps: CGFloat = 0.001
-
-        var others: [(PaneRef, PaneLayout)] = []
-        if ref != .primary { others.append((.primary, primaryLayout)) }
-        for e in secondaryPanes {
-            if case .secondary(let eid) = ref, eid == e.id { continue }
-            guard let l = layouts[e.id] else { continue }
-            others.append((.secondary(e.id), l))
+        let others: [(UUID, PaneLayout)] = panes.compactMap { e in
+            guard e.id != id, let l = paneLayouts[e.id] else { return nil }
+            return (e.id, l)
         }
 
-        // Exact single-neighbor match (original behavior)
-        for (otherRef, var nl) in others {
+        for (otherID, var nl) in others {
             if abs(nl.x + nl.w - rl.x) < eps && abs(nl.y - rl.y) < eps && abs(nl.h - rl.h) < eps {
-                nl.w += rl.w; setLayout(nl, for: otherRef); return
+                nl.w += rl.w; paneLayouts[otherID] = nl; return
             }
             if abs(nl.y + nl.h - rl.y) < eps && abs(nl.x - rl.x) < eps && abs(nl.w - rl.w) < eps {
-                nl.h += rl.h; setLayout(nl, for: otherRef); return
+                nl.h += rl.h; paneLayouts[otherID] = nl; return
             }
             if abs(nl.x - (rl.x + rl.w)) < eps && abs(nl.y - rl.y) < eps && abs(nl.h - rl.h) < eps {
-                nl.x = rl.x; nl.w += rl.w; setLayout(nl, for: otherRef); return
+                nl.x = rl.x; nl.w += rl.w; paneLayouts[otherID] = nl; return
             }
             if abs(nl.y - (rl.y + rl.h)) < eps && abs(nl.x - rl.x) < eps && abs(nl.w - rl.w) < eps {
-                nl.y = rl.y; nl.h += rl.h; setLayout(nl, for: otherRef); return
+                nl.y = rl.y; nl.h += rl.h; paneLayouts[otherID] = nl; return
             }
         }
 
-        // Fallback: expand all panes whose edge overlaps the removed pane's edge.
-        // Handles multi-pane cases where no single neighbor spans the full edge.
         func overlapsY(_ nl: PaneLayout) -> Bool { nl.y + nl.h > rl.y + eps && nl.y < rl.y + rl.h - eps }
         func overlapsX(_ nl: PaneLayout) -> Bool { nl.x + nl.w > rl.x + eps && nl.x < rl.x + rl.w - eps }
 
         let rightNeighbors = others.filter { abs($0.1.x - (rl.x + rl.w)) < eps && overlapsY($0.1) }
         if !rightNeighbors.isEmpty {
-            for (r, var nl) in rightNeighbors { nl.x = rl.x; nl.w += rl.w; setLayout(nl, for: r) }; return
+            for (r, var nl) in rightNeighbors { nl.x = rl.x; nl.w += rl.w; paneLayouts[r] = nl }; return
         }
         let leftNeighbors = others.filter { abs($0.1.x + $0.1.w - rl.x) < eps && overlapsY($0.1) }
         if !leftNeighbors.isEmpty {
-            for (r, var nl) in leftNeighbors { nl.w += rl.w; setLayout(nl, for: r) }; return
+            for (r, var nl) in leftNeighbors { nl.w += rl.w; paneLayouts[r] = nl }; return
         }
         let bottomNeighbors = others.filter { abs($0.1.y - (rl.y + rl.h)) < eps && overlapsX($0.1) }
         if !bottomNeighbors.isEmpty {
-            for (r, var nl) in bottomNeighbors { nl.y = rl.y; nl.h += rl.h; setLayout(nl, for: r) }; return
+            for (r, var nl) in bottomNeighbors { nl.y = rl.y; nl.h += rl.h; paneLayouts[r] = nl }; return
         }
         let topNeighbors = others.filter { abs($0.1.y + $0.1.h - rl.y) < eps && overlapsX($0.1) }
         if !topNeighbors.isEmpty {
-            for (r, var nl) in topNeighbors { nl.h += rl.h; setLayout(nl, for: r) }; return
+            for (r, var nl) in topNeighbors { nl.h += rl.h; paneLayouts[r] = nl }
         }
     }
 }
@@ -669,6 +628,7 @@ struct ContentView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(WorkspaceDB.self) private var db
     @Environment(FeatureAgentFocus.self) private var agentFocus
+    @Environment(KeyboardShortcutManager.self) private var shortcuts
     @State private var sidebarVisible = true
     @State private var sidebarWidth: CGFloat = 220
     @State private var showBaseDirectoryPicker = false
@@ -819,10 +779,13 @@ struct ContentView: View {
         }
         .onAppear {
             startAgentEventMonitor()
+            registerShortcutActions()
+            shortcuts.start()
         }
         .onDisappear {
             agentEventTask?.cancel()
             agentEventTask = nil
+            shortcuts.stop()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             saveLayout()
@@ -854,8 +817,38 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(red: 0.067, green: 0.067, blue: 0.075))
         }
+        VStack {
+            Spacer()
+            if shortcuts.awaitingChord {
+                ChordIndicator(display: KeyCombo(shortcuts.prefixKey)?.display ?? shortcuts.prefixKey)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    .padding(.bottom, 20)
+            }
+        }
+        .animation(.easeInOut(duration: 0.15), value: shortcuts.awaitingChord)
+        .allowsHitTesting(false)
         } // end ZStack
         } // end VStack
+    }
+
+    private func registerShortcutActions() {
+        shortcuts.actions["c"] = { manager.selectedWorkspace?.addTab(colorScheme: .dark) }
+        shortcuts.actions["x"] = {
+            guard let ws = manager.selectedWorkspace, let tab = ws.selectedTab else { return }
+            ws.closeTab(id: tab.id)
+        }
+        shortcuts.actions["n"] = { manager.selectedWorkspace?.selectNextTab() }
+        shortcuts.actions["p"] = { manager.selectedWorkspace?.selectPrevTab() }
+        for i in 1...9 {
+            let idx = i - 1
+            shortcuts.actions["\(i)"] = { manager.selectedWorkspace?.selectTab(at: idx) }
+        }
+        shortcuts.actions["v"] = { manager.selectedWorkspace?.selectedTab?.splitRight(colorScheme: .dark) }
+        shortcuts.actions["s"] = { manager.selectedWorkspace?.selectedTab?.splitBottom(colorScheme: .dark) }
+        shortcuts.actions["h"] = { manager.selectedWorkspace?.selectedTab?.focusPane(direction: .left) }
+        shortcuts.actions["j"] = { manager.selectedWorkspace?.selectedTab?.focusPane(direction: .down) }
+        shortcuts.actions["k"] = { manager.selectedWorkspace?.selectedTab?.focusPane(direction: .up) }
+        shortcuts.actions["l"] = { manager.selectedWorkspace?.selectedTab?.focusPane(direction: .right) }
     }
 
     private func saveLayout() {
@@ -957,12 +950,17 @@ struct ContentView: View {
                         processedCount = lines.count
                     }
                 }
+                let staleThreshold = Date().timeIntervalSince1970 - 300
+                for ws in manager.allWorkspaces {
+                    for tab in ws.tabs { tab.clearWorkingIfStale(before: staleThreshold) }
+                }
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
         }
     }
 
 private func applyAgentHookEvent(_ event: AgentHookEvent) {
+ guard event.tabID != nil || event.paneID != nil else { return }
  guard let status = AgentRunStatus(event: event.event) else { return }
  guard let tab = bestMatchingTab(for: event) else { return }
  guard tab.applyAgentStatus(status, summary: event.summary, at: event.timestamp, paneHookID: event.paneID) else { return }
@@ -1798,13 +1796,15 @@ private struct TerminalContentView: View {
             let pl = tab.primaryLayout
 
             ZStack(alignment: .topLeading) {
-                // Primary — always child 0
-                paneView(
-                    ref: .primary, state: tab.viewState, layout: pl,
-                    onClose: { tab.closePrimaryPane(); onPaneResizeFinished() }, sz: sz,
-                    focused: tab.focusedPaneID == nil
-                )
-                .simultaneousGesture(TapGesture().onEnded { tab.focusedPaneID = nil })
+                // Primary — always child 0, hidden when collapsed
+                if !tab.primaryExited {
+                    paneView(
+                        ref: .primary, state: tab.viewState, layout: pl,
+                        onClose: { tab.closePrimaryPane(); onPaneResizeFinished() }, sz: sz,
+                        focused: tab.focusedPaneID == nil
+                    )
+                    .simultaneousGesture(TapGesture().onEnded { tab.focusedPaneID = nil })
+                }
 
                 ForEach(tab.secondaryPanes) { entry in
                     if let l = tab.layouts[entry.id] {
@@ -1816,6 +1816,11 @@ private struct TerminalContentView: View {
                         .simultaneousGesture(TapGesture().onEnded {
                             tab.focusedPaneID = entry.id
                         })
+                        .onAppear {
+                            if tab.focusedPaneID == entry.id {
+                                requestKeyboardFocus(for: entry.viewState)
+                            }
+                        }
                     }
                 }
 
@@ -1837,6 +1842,14 @@ private struct TerminalContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .coordinateSpace(name: "panes")
+            .onChange(of: tab.focusedPaneID) { _, newID in
+                if let id = newID,
+                   let entry = tab.secondaryPanes.first(where: { $0.id == id }) {
+                    requestKeyboardFocus(for: entry.viewState)
+                } else {
+                    requestKeyboardFocus(for: tab.viewState)
+                }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -1947,6 +1960,27 @@ private struct TerminalContentView: View {
         let dy = abs(p.y - cy) / (sz.height * l.h)
         if dx > dy { return p.x < cx ? .left : .right }
         return p.y < cy ? .top : .bottom
+    }
+
+    private func requestKeyboardFocus(for state: TerminalViewState) {
+        DispatchQueue.main.async {
+            guard let window = NSApp.keyWindow, let root = window.contentView else { return }
+            if let tv = Self.findTerminalView(for: state, in: root) {
+                window.makeFirstResponder(tv)
+            }
+        }
+    }
+
+    private static func findTerminalView(for state: TerminalViewState, in view: NSView) -> NSView? {
+        if let v = view as? TerminalView,
+           let del = v.delegate,
+           ObjectIdentifier(del) == ObjectIdentifier(state) {
+            return v
+        }
+        for sub in view.subviews {
+            if let found = findTerminalView(for: state, in: sub) { return found }
+        }
+        return nil
     }
 
     private struct DividerSegment { let isVertical: Bool; let at: CGFloat; let from: CGFloat; let to: CGFloat }
