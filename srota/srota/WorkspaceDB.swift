@@ -400,6 +400,7 @@ final class WorkspaceDB {
             id TEXT PRIMARY KEY,
             tab_id TEXT NOT NULL,
             is_primary INTEGER NOT NULL DEFAULT 1,
+            position INTEGER NOT NULL DEFAULT 0,
             lx REAL NOT NULL DEFAULT 0,
             ly REAL NOT NULL DEFAULT 0,
             lw REAL NOT NULL DEFAULT 1,
