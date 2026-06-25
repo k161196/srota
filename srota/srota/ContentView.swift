@@ -195,10 +195,6 @@ final class TerminalTab: Identifiable, ObservableObject {
         return true
     }
 
-    func clearWorkingIfStale(before timestamp: Double) {
-        agentNotification.clearWorkingIfStale(before: timestamp)
-    }
-
     var statusPath: String? {
         resolveCWD(focusedViewState.workingDirectory) ?? initialWorkingDirectory
     }
@@ -931,10 +927,6 @@ struct ContentView: View {
                         }
                         processedCount = lines.count
                     }
-                }
-                let staleThreshold = Date().timeIntervalSince1970 - 300
-                for ws in manager.allWorkspaces {
-                    for tab in ws.tabs { tab.clearWorkingIfStale(before: staleThreshold) }
                 }
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }

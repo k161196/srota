@@ -5,6 +5,7 @@ import Observation
 final class AppSettings {
     var baseWorkingDirectory: String?
     var mcpServerPath: String?
+    var shortcutPrefix: String = "ctrl+b"
 
     private static let path = NSHomeDirectory() + "/.srota/settings.toml"
 
@@ -20,6 +21,7 @@ final class AppSettings {
             if val.hasPrefix("\"") && val.hasSuffix("\"") { val = String(val.dropFirst().dropLast()) }
             if key == "base_working_directory" { baseWorkingDirectory = val }
             if key == "mcp_server_path" { mcpServerPath = val }
+            if key == "shortcut_prefix" { shortcutPrefix = val }
         }
     }
 
@@ -29,6 +31,7 @@ final class AppSettings {
         var lines: [String] = []
         if let d = baseWorkingDirectory { lines.append("base_working_directory = \"\(d)\"") }
         if let m = mcpServerPath { lines.append("mcp_server_path = \"\(m)\"") }
+        lines.append("shortcut_prefix = \"\(shortcutPrefix)\"")
         try? lines.joined(separator: "\n").write(toFile: Self.path, atomically: true, encoding: .utf8)
     }
 }

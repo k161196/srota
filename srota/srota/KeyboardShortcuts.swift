@@ -215,6 +215,7 @@ struct PrefixKeyRecorder: NSViewRepresentable {
     class KeyRecorderView: NSView {
         var onCapture: ((String) -> Void)?
         var isRecording = false
+        private var lastDisplay = ""
         private let label = NSTextField(labelWithString: "")
 
         override init(frame: NSRect) {
@@ -239,6 +240,7 @@ struct PrefixKeyRecorder: NSViewRepresentable {
 
         func update(display: String, recording: Bool) {
             isRecording = recording
+            if !recording { lastDisplay = display }
             if recording {
                 label.stringValue = "Type shortcut…"
                 label.textColor = .white.withAlphaComponent(0.4)
@@ -261,7 +263,7 @@ struct PrefixKeyRecorder: NSViewRepresentable {
 
         override func resignFirstResponder() -> Bool {
             guard super.resignFirstResponder() else { return false }
-            if isRecording { update(display: "", recording: false) }
+            if isRecording { update(display: lastDisplay, recording: false) }
             return true
         }
 

@@ -7,6 +7,7 @@ struct srotaApp: App {
     @State private var presetsStore = PresetsStore()
     @State private var agentFocus = FeatureAgentFocus()
     @State private var issueAgentFocus = IssueAgentFocus()
+    @State private var shortcuts = KeyboardShortcutManager()
     @State private var hookSetupResult: HookSetupResult? = nil
 
     var body: some Scene {
@@ -18,10 +19,15 @@ struct srotaApp: App {
                 .environment(presetsStore)
                 .environment(agentFocus)
                 .environment(issueAgentFocus)
+                .environment(shortcuts)
                 .onAppear {
+                    shortcuts.prefixKey = settings.shortcutPrefix
                     setupShellIntegration()
                     if let dir = settings.baseWorkingDirectory { db.scan(baseDir: dir) }
                     Task { await runHookCheck() }
+                }
+                .onChange(of: settings.shortcutPrefix) { _, new in
+                    shortcuts.prefixKey = new
                 }
                 .sheet(item: $hookSetupResult) { result in
                     if let script = findCheckScript() {

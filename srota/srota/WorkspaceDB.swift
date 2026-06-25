@@ -420,9 +420,24 @@ final class WorkspaceDB {
         }
         guard !cols.contains("position") else { return }
         exec("ALTER TABLE ws_panes ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
-        // Seed position: primary gets 0, others get 1 (exact order of old secondaries not recoverable)
-        exec("UPDATE ws_panes SET position = 0 WHERE is_primary = 1")
-        exec("UPDATE ws_panes SET position = 1 WHERE is_primary = 0")
+        // Seed position from insert order so restored panes stay deterministic.
+        // Legacy rows did not persist exact secondary ordering, but rowid preserves the old insert sequence.
+        let rowsToMigrate = rows(
+            "SELECT id, tab_id FROM ws_panes ORDER BY tab_id, rowid",
+            bind: []
+        ) { stmt -> (String, String) in
+            (col(stmt, 0), col(stmt, 1))
+        }
+        var currentTabID: String? = nil
+        var position = 0
+        for (id, tabID) in rowsToMigrate {
+            if tabID != currentTabID {
+                currentTabID = tabID
+                position = 0
+            }
+            exec("UPDATE ws_panes SET position = ? WHERE id = ?", [String(position), id])
+            position += 1
+        }
     }
 
     func saveWorkspaceSession(_ session: WorkspaceSession) {

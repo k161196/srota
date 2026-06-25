@@ -49,6 +49,7 @@ struct AgentNotificationState {
         updatedAt = 0
         ownerPaneID = nil
     }
+
 }
 
 struct AgentNotificationEvent {

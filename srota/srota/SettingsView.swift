@@ -13,10 +13,13 @@ private extension Color {
 
 // MARK: - Panel
 
+private enum SettingsSection { case terminal, shortcuts }
+
 struct SettingsPanel: View {
     @Binding var isPresented: Bool
     @Environment(PresetsStore.self) private var store
     @State private var activeSheet: SettingsSheet? = nil
+    @State private var section: SettingsSection = .terminal
 
     enum SettingsSheet: Identifiable {
         case add
@@ -31,14 +34,20 @@ struct SettingsPanel: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            SettingsSidebar(onBack: { isPresented = false })
+            SettingsSidebar(onBack: { isPresented = false }, section: $section)
                 .frame(width: 200)
             Rectangle().fill(Color.stBorder).frame(width: 1)
-            TerminalSettingsView(
-                onEdit: { activeSheet = .edit($0) },
-                onAdd:  { activeSheet = .add }
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            switch section {
+            case .terminal:
+                TerminalSettingsView(
+                    onEdit: { activeSheet = .edit($0) },
+                    onAdd:  { activeSheet = .add }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .shortcuts:
+                ShortcutsSettingsView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.stBg)
@@ -67,6 +76,7 @@ struct SettingsPanel: View {
 
 private struct SettingsSidebar: View {
     let onBack: () -> Void
+    @Binding var section: SettingsSection
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -90,7 +100,10 @@ private struct SettingsSidebar: View {
                 .padding(.horizontal, 16)
                 .padding(.bottom, 12)
 
-            SidebarRow(label: "Terminal", icon: "terminal", isSelected: true)
+            SidebarRow(label: "Terminal", icon: "terminal", isSelected: section == .terminal)
+                .onTapGesture { section = .terminal }
+            SidebarRow(label: "Shortcuts", icon: "keyboard", isSelected: section == .shortcuts)
+                .onTapGesture { section = .shortcuts }
 
             Spacer()
         }
@@ -256,6 +269,89 @@ private struct PresetRow: View {
         .padding(.vertical, 12)
         .background(hovered ? Color.white.opacity(0.04) : Color.clear)
         .onHover { hovered = $0 }
+    }
+}
+
+// MARK: - Shortcuts settings
+
+private struct ShortcutsSettingsView: View {
+    @Environment(AppSettings.self) private var settings
+
+    private let bindings: [(key: String, action: String)] = [
+        ("c",   "New tab"),
+        ("x",   "Close tab"),
+        ("n",   "Next tab"),
+        ("p",   "Previous tab"),
+        ("1–9", "Select tab by number"),
+        ("v",   "Split right"),
+        ("s",   "Split down"),
+        ("h",   "Focus pane left"),
+        ("j",   "Focus pane down"),
+        ("k",   "Focus pane up"),
+        ("l",   "Focus pane right"),
+    ]
+
+    var body: some View {
+        @Bindable var settings = settings
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Keyboard Shortcuts")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(Color.stLabel)
+                    Text("Tmux-style prefix key. Press prefix, then a key to trigger an action.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.stMuted)
+                }
+                .padding(.bottom, 28)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Prefix Key")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.stLabel)
+                    Text("Click to record a new shortcut. Press Escape to cancel.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.stMuted)
+                    PrefixKeyRecorder(value: $settings.shortcutPrefix)
+                        .frame(width: 120, height: 36)
+                        .onChange(of: settings.shortcutPrefix) { _, _ in settings.save() }
+                }
+                .padding(.bottom, 28)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Default Bindings")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.stLabel)
+                    VStack(spacing: 0) {
+                        ForEach(bindings, id: \.key) { b in
+                            HStack {
+                                Text(b.action)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Color.stLabel)
+                                Spacer()
+                                Text(b.key)
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(Color.stAccent)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(Color.stAccent.opacity(0.1))
+                                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            if b.key != bindings.last?.key {
+                                Rectangle().fill(Color.stBorder).frame(height: 1)
+                            }
+                        }
+                    }
+                    .background(Color.stSurface)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.stBorder))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+            }
+            .padding(28)
+        }
+        .background(Color.stBg)
     }
 }
 
