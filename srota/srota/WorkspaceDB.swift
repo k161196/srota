@@ -30,9 +30,10 @@ struct TabRecord: Identifiable {
 struct PaneRecord: Identifiable {
     var id: String
     var tabID: String
-    var isPrimary: Bool
+    var isPrimary: Bool      // kept for legacy migration read
     var lx, ly, lw, lh: Double
     var initialCWD: String
+    var position: Int = 0    // new: order in panes array
 }
 
 struct Organization: Identifiable, Hashable {
@@ -408,6 +409,19 @@ final class WorkspaceDB {
             initial_cwd TEXT NOT NULL DEFAULT ''
         );
         """)
+        migratePanesIfNeeded()
+    }
+
+    private func migratePanesIfNeeded() {
+        // Add position column if missing (SQLite 3.x safe — no DROP COLUMN needed)
+        let cols = rows("PRAGMA table_info(ws_panes)", bind: []) { stmt -> String in
+            col(stmt, 1)
+        }
+        guard !cols.contains("position") else { return }
+        exec("ALTER TABLE ws_panes ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
+        // Seed position: primary gets 0, others get 1 (exact order of old secondaries not recoverable)
+        exec("UPDATE ws_panes SET position = 0 WHERE is_primary = 1")
+        exec("UPDATE ws_panes SET position = 1 WHERE is_primary = 0")
     }
 
     func saveWorkspaceSession(_ session: WorkspaceSession) {
@@ -472,6 +486,7 @@ final class WorkspaceDB {
             "id": pane.id,
             "tab_id": pane.tabID,
             "is_primary": pane.isPrimary ? "1" : "0",
+            "position": String(pane.position),
             "lx": String(pane.lx),
             "ly": String(pane.ly),
             "lw": String(pane.lw),
@@ -485,7 +500,7 @@ final class WorkspaceDB {
     }
 
     func loadPanes(tabID: String) -> [PaneRecord] {
-        rows(sql("SELECT id,tab_id,is_primary,lx,ly,lw,lh,initial_cwd", sqlFrom, "ws_panes", sqlWhere, "tab_id=?"), bind: [tabID]) { stmt in
+        rows(sql("SELECT id,tab_id,is_primary,lx,ly,lw,lh,initial_cwd,position", sqlFrom, "ws_panes", sqlWhere, "tab_id=?", "ORDER BY position ASC"), bind: [tabID]) { stmt in
             PaneRecord(
                 id: col(stmt, 0),
                 tabID: col(stmt, 1),
@@ -494,7 +509,8 @@ final class WorkspaceDB {
                 ly: sqlite3_column_double(stmt, 4),
                 lw: sqlite3_column_double(stmt, 5),
                 lh: sqlite3_column_double(stmt, 6),
-                initialCWD: col(stmt, 7)
+                initialCWD: col(stmt, 7),
+                position: Int(sqlite3_column_int(stmt, 8))
             )
         }
     }
