@@ -124,10 +124,15 @@ final class WorkspaceDB {
     init() {
         let dir = NSHomeDirectory() + "/.srota"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        guard sqlite3_open(dir + "/srota.db", &handle.ptr) == SQLITE_OK else { return }
+        #if DEBUG
+        let dbName = "srota_debug.db"
+        #else
+        let dbName = "srota.db"
+        #endif
+        guard sqlite3_open(dir + "/" + dbName, &handle.ptr) == SQLITE_OK else { return }
         createTables()
         refresh()
-        startDBWatcher(dbPath: dir + "/srota.db")
+        startDBWatcher(dbPath: dir + "/" + dbName)
     }
 
     private func startDBWatcher(dbPath: String) {

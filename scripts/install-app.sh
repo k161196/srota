@@ -7,7 +7,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT_PATH="$ROOT_DIR/srota/srota.xcodeproj"
 SCHEME="srota"
 DERIVED_DATA_PATH="$ROOT_DIR/.build/install-app"
-BUILT_APP_PATH="$DERIVED_DATA_PATH/Build/Products/Debug/srota.app"
+BUILT_APP_PATH="$DERIVED_DATA_PATH/Build/Products/Release/srota.app"
 INSTALL_PATH="/Applications/srota.app"
 
 if [[ ! -d "$PROJECT_PATH" ]]; then
@@ -19,6 +19,7 @@ echo "Building $SCHEME..."
 xcodebuild \
   -project "$PROJECT_PATH" \
   -scheme "$SCHEME" \
+  -configuration Release \
   -destination 'platform=macOS,arch=arm64' \
   -derivedDataPath "$DERIVED_DATA_PATH" \
   build
