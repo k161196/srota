@@ -799,12 +799,51 @@ struct ContentView: View {
             Spacer()
             if shortcuts.awaitingChord {
                 ChordIndicator(display: KeyCombo(shortcuts.prefixKey)?.display ?? shortcuts.prefixKey)
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
-                    .padding(.bottom, 20)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                .padding(.bottom, 20)
             }
         }
         .animation(.easeInOut(duration: 0.15), value: shortcuts.awaitingChord)
         .allowsHitTesting(false)
+        if shortcuts.showWorkspaceSwitcher {
+            WorkspaceSwitcherOverlay(
+                workspaces: manager.allWorkspaces.map { ws in
+                    let folder = manager.folders.first(where: { $0.workspaces.contains(where: { $0.id == ws.id }) })?.name
+                    return SwitcherWorkspace(
+                        id: ws.id, name: ws.name, folder: folder,
+                        tabs: ws.tabs.map { tab in
+                            SwitcherTab(
+                                id: tab.id,
+                                title: tab.customName.isEmpty ? tab.titleFromCWD : tab.customName,
+                                cwd: tab.statusPath,
+                                panes: tab.panes.map { pane in
+                                    let paneCWD = resolveCWD(pane.viewState.workingDirectory) ?? pane.initialCWD
+                                    let paneName = tab.paneNames[pane.id].flatMap { $0.isEmpty ? nil : $0 }
+                                        ?? smartTitle(for: paneCWD)
+                                    return SwitcherPane(id: pane.id, name: paneName, cwd: paneCWD)
+                                },
+                                isSelected: tab.id == ws.selectedTabID
+                            )
+                        },
+                        isSelected: ws.id == manager.selectedWorkspaceID
+                    )
+                },
+                onSelectWorkspace: { id in manager.selectedWorkspaceID = id },
+                onSelectTab: { wsID, tabID in
+                    manager.selectedWorkspaceID = wsID
+                    manager.allWorkspaces.first(where: { $0.id == wsID })?.selectedTabID = tabID
+                },
+                onSelectPane: { wsID, tabID, paneID in
+                    manager.selectedWorkspaceID = wsID
+                    if let ws = manager.allWorkspaces.first(where: { $0.id == wsID }) {
+                        ws.selectedTabID = tabID
+                        ws.tabs.first(where: { $0.id == tabID })?.focusedPaneID = paneID
+                    }
+                },
+                onDismiss: { withAnimation(.easeInOut(duration: 0.15)) { shortcuts.showWorkspaceSwitcher = false } }
+            )
+            .transition(.opacity.combined(with: .scale(scale: 0.97)))
+        }
         } // end ZStack
         } // end VStack
     }
@@ -821,8 +860,11 @@ struct ContentView: View {
             let idx = i - 1
             shortcuts.actions["\(i)"] = { manager.selectedWorkspace?.selectTab(at: idx) }
         }
-        shortcuts.actions["v"] = { manager.selectedWorkspace?.selectedTab?.splitRight(colorScheme: .dark) }
-        shortcuts.actions["s"] = { manager.selectedWorkspace?.selectedTab?.splitBottom(colorScheme: .dark) }
+        shortcuts.actions["s"] = {
+            withAnimation(.easeInOut(duration: 0.15)) { shortcuts.showWorkspaceSwitcher = true }
+        }
+        shortcuts.actions["%"] = { manager.selectedWorkspace?.selectedTab?.splitRight(colorScheme: .dark); saveLayout() }
+        shortcuts.actions["\""] = { manager.selectedWorkspace?.selectedTab?.splitBottom(colorScheme: .dark); saveLayout() }
         shortcuts.actions["h"] = { manager.selectedWorkspace?.selectedTab?.focusPane(direction: .left) }
         shortcuts.actions["j"] = { manager.selectedWorkspace?.selectedTab?.focusPane(direction: .down) }
         shortcuts.actions["k"] = { manager.selectedWorkspace?.selectedTab?.focusPane(direction: .up) }

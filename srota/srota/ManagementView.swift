@@ -730,6 +730,7 @@ private struct ProjectDetailView: View {
     @State private var branches: [BranchRow] = []
     @State private var branchSearch = ""
     @State private var loadingBranches = false
+    @State private var gitRoot: String = ""
 
     var filteredBranches: [BranchRow] {
         let filtered = branchSearch.isEmpty ? branches
@@ -869,7 +870,7 @@ private struct ProjectDetailView: View {
                                                 "folderName":      project.name,
                                                 "folderTag":       orgName,
                                                 "createWorktree":  !hasLocal,
-                                                "projectPath":     branch.localPath ?? project.path,
+                                                "projectPath":     branch.localPath ?? gitRoot,
                                                 "branchRef":       branchRef
                                             ]
                                         )
@@ -915,6 +916,7 @@ private struct ProjectDetailView: View {
         for b in dbBranches { nameToPath[b.name] = b.path }
 
         let gitRoot = dbBranches.first?.path ?? project.path
+        self.gitRoot = gitRoot
         guard !gitRoot.isEmpty else {
             // No git root, just show DB branches
             branches = dbBranches.map { BranchRow(gitName: $0.name, isCurrent: false, localPath: $0.path) }
