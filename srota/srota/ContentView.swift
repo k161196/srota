@@ -420,14 +420,6 @@ final class Workspace: Identifiable, ObservableObject {
             guard let self, let tab else { return }
             self.closeTab(id: tab.id)
         }
-        tab.viewState.onClose = { [weak self, weak tab] _ in
-            guard let self, let tab else { return }
-            if tab.secondaryPanes.isEmpty {
-                self.closeTab(id: tab.id)
-            } else {
-                tab.collapsePrimary()
-            }
-        }
         tabs.append(tab)
         selectedTabID = tab.id
     }
@@ -439,11 +431,6 @@ final class Workspace: Identifiable, ObservableObject {
         tab.closeTabCallback = { [weak self, weak tab] in
             guard let self, let tab else { return }
             self.closeTab(id: tab.id)
-        }
-        tab.viewState.onClose = { [weak self, weak tab] _ in
-            guard let self, let tab else { return }
-            if tab.secondaryPanes.isEmpty { self.closeTab(id: tab.id) }
-            else { tab.collapsePrimary() }
         }
         tabs.append(tab)
         if record.isSelected { selectedTabID = tab.id }
@@ -862,18 +849,15 @@ struct ContentView: View {
                     position: ti,
                     initialCWD: tab.initialWorkingDirectory ?? "",
                     isSelected: tab.id == ws.selectedTabID))
-                db.savePane(PaneRecord(
-                    id: "\(tab.id)_primary", tabID: tab.id.uuidString, isPrimary: true,
-                    lx: Double(tab.primaryLayout.x), ly: Double(tab.primaryLayout.y),
-                    lw: Double(tab.primaryLayout.w), lh: Double(tab.primaryLayout.h),
-                    initialCWD: tab.initialWorkingDirectory ?? ""))
-                for pane in tab.secondaryPanes {
-                    if let layout = tab.layouts[pane.id] {
+                for (i, pane) in tab.panes.enumerated() {
+                    if let layout = tab.paneLayouts[pane.id] {
                         db.savePane(PaneRecord(
-                            id: pane.id.uuidString, tabID: tab.id.uuidString, isPrimary: false,
+                            id: pane.id.uuidString, tabID: tab.id.uuidString,
+                            isPrimary: i == 0,
                             lx: Double(layout.x), ly: Double(layout.y),
                             lw: Double(layout.w), lh: Double(layout.h),
-                            initialCWD: pane.initialCWD ?? ""))
+                            initialCWD: pane.initialCWD ?? "",
+                            position: i))
                     }
                 }
             }
@@ -904,14 +888,17 @@ struct ContentView: View {
                     ws.addRestoredTab(record: tabRecord, colorScheme: colorScheme)
                     if let tab = ws.tabs.last {
                         let panes = db.loadPanes(tabID: tabRecord.id)
-                        for pane in panes where !pane.isPrimary {
-                            tab.restorePane(record: pane, colorScheme: colorScheme)
+                        let sortedPanes = panes.sorted(by: { $0.position < $1.position })
+                        if let firstRecord = sortedPanes.first, !tab.panes.isEmpty {
+                            tab.paneLayouts[tab.panes[0].id] = PaneLayout(
+                                x: CGFloat(firstRecord.lx), y: CGFloat(firstRecord.ly),
+                                w: CGFloat(firstRecord.lw), h: CGFloat(firstRecord.lh))
+                            if firstRecord.lw == 0 || firstRecord.lh == 0 {
+                                tab.removePane(id: tab.panes[0].id)
+                            }
                         }
-                        if let primary = panes.first(where: { $0.isPrimary }) {
-                            tab.primaryLayout = PaneLayout(
-                                x: CGFloat(primary.lx), y: CGFloat(primary.ly),
-                                w: CGFloat(primary.lw), h: CGFloat(primary.lh))
-                            tab.primaryExited = primary.lw == 0 || primary.lh == 0
+                        for record in sortedPanes.dropFirst() {
+                            tab.restorePane(record: record, colorScheme: colorScheme)
                         }
                     }
                 }
@@ -967,7 +954,7 @@ private func bestMatchingTab(for event: AgentHookEvent) -> TerminalTab? {
      AgentNotificationTabSnapshot(
          tabID: tab.hookTabID,
          cwd: tab.statusPath,
-         paneIDs: Set([tab.primaryPaneHookID] + tab.secondaryPanes.map(\.hookPaneID))
+         paneIDs: Set(tab.panes.map(\.hookPaneID))
      )
  }
  guard let index = AgentNotificationRouter.bestMatchingTabIndex(
@@ -1471,11 +1458,11 @@ private struct TabBarView: View {
             if let tab = workspace.selectedTab {
                 HStack(spacing: 2) {
                     SplitButton(icon: "rectangle.split.2x1", tooltip: "Split Right",
-                                active: !tab.secondaryPanes.isEmpty) {
+                                active: tab.panes.count > 1) {
                         tab.splitRight(colorScheme: colorScheme); onMutation()
                     }
                     SplitButton(icon: "rectangle.split.1x2", tooltip: "Split Bottom",
-                                active: !tab.secondaryPanes.isEmpty) {
+                                active: tab.panes.count > 1) {
                         tab.splitBottom(colorScheme: colorScheme); onMutation()
                     }
                 }

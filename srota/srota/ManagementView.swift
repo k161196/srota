@@ -1299,7 +1299,7 @@ private struct FeaturesPanel: View {
             FeatureTerminalStack(tabs: agentFocus.agentTabs, activeTabID: agentFocus.activeTabID)
         }
         .onChange(of: agentFocus.activeTabID) {
-            agentFocus.activeViewState = agentFocus.agentTabs.first { $0.id == agentFocus.activeTabID }?.tab.viewState
+            agentFocus.activeViewState = agentFocus.agentTabs.first { $0.id == agentFocus.activeTabID }?.tab.focusedViewState
         }
     }
 }
@@ -1312,7 +1312,7 @@ private struct FeatureTerminalStack: View {
         ZStack {
             Color.black
             ForEach(tabs) { tab in
-                TerminalSurfaceView(context: tab.tab.viewState)
+                TerminalSurfaceView(context: tab.tab.focusedViewState)
                     .opacity(activeTabID == tab.id ? 1 : 0)
             }
         }
@@ -2050,14 +2050,14 @@ private struct IssuesPanel: View {
             ZStack {
                 Color.black
                 ForEach(agentFocus.agentTabs) { agentTab in
-                    TerminalSurfaceView(context: agentTab.tab.viewState)
+                    TerminalSurfaceView(context: agentTab.tab.focusedViewState)
                         .opacity(agentFocus.activeTabID == agentTab.id ? 1 : 0)
                 }
             }
         }
         .onChange(of: agentFocus.activeTabID) {
             agentFocus.activeViewState = agentFocus.agentTabs
-                .first { $0.id == agentFocus.activeTabID }?.tab.viewState
+                .first { $0.id == agentFocus.activeTabID }?.tab.focusedViewState
         }
     }
 
