@@ -96,11 +96,6 @@ private struct DoubleClickOverlay: NSViewRepresentable {
 
 // MARK: - Model
 
-enum PaneRef: Equatable, Hashable {
-    case primary
-    case secondary(UUID)
-}
-
 enum DropSide { case left, right, top, bottom }
 
 struct PaneLayout {
@@ -1627,9 +1622,9 @@ private final class PaneResizingView: NSView {
     private let hitZone: CGFloat = 5
     private var dragIsVertical: Bool? = nil
     private var dragStartPos: CGPoint = .zero
-    private var dragNegRefs: [PaneRef] = []
-    private var dragPosRefs: [PaneRef] = []
-    private var dragStartLayouts: [(PaneRef, PaneLayout)] = []
+    private var dragNegRefs: [UUID] = []
+    private var dragPosRefs: [UUID] = []
+    private var dragStartLayouts: [(UUID, PaneLayout)] = []
     private var showingResizeCursor = false
 
     init(tab: TerminalTab, onResizeFinished: @escaping () -> Void) {
@@ -1651,7 +1646,7 @@ private final class PaneResizingView: NSView {
         edgeNear(point) != nil ? self : nil
     }
 
-    private func edgeNear(_ p: CGPoint) -> (Bool, [PaneRef], [PaneRef])? {
+    private func edgeNear(_ p: CGPoint) -> (Bool, [UUID], [UUID])? {
         let sz = bounds.size
         guard sz.width > 0, sz.height > 0 else { return nil }
         let eps: CGFloat = 0.005
@@ -1751,23 +1746,16 @@ private final class PaneResizingView: NSView {
         onResizeFinished()
     }
 
-    private func allPanes() -> [(PaneRef, PaneLayout)] {
-        [(PaneRef.primary, tab.primaryLayout)] +
-        tab.secondaryPanes.compactMap { e in tab.layouts[e.id].map { (.secondary(e.id), $0) } }
+    private func allPanes() -> [(UUID, PaneLayout)] {
+        tab.panes.compactMap { e in tab.paneLayouts[e.id].map { (e.id, $0) } }
     }
 
-    private func currentLayout(_ ref: PaneRef) -> PaneLayout {
-        switch ref {
-        case .primary:           return tab.primaryLayout
-        case .secondary(let id): return tab.layouts[id] ?? PaneLayout()
-        }
+    private func currentLayout(_ id: UUID) -> PaneLayout {
+        tab.paneLayouts[id] ?? PaneLayout()
     }
 
-    private func setLayout(_ l: PaneLayout, for ref: PaneRef) {
-        switch ref {
-        case .primary:           tab.primaryLayout = l
-        case .secondary(let id): tab.layouts[id]   = l
-        }
+    private func setLayout(_ l: PaneLayout, for id: UUID) {
+        tab.paneLayouts[id] = l
     }
 }
 
@@ -1786,31 +1774,21 @@ private struct TerminalContentView: View {
     @ObservedObject var tab: TerminalTab
     let onPaneResizeFinished: () -> Void
     @State private var isDragging  = false
-    @State private var dragSource: PaneRef? = nil
-    @State private var dragHover:  PaneRef? = nil
+    @State private var dragSource: UUID? = nil
+    @State private var dragHover:  UUID? = nil
     @State private var dropSide:   DropSide? = nil
 
     var body: some View {
         GeometryReader { geo in
             let sz = geo.size
-            let pl = tab.primaryLayout
 
             ZStack(alignment: .topLeading) {
-                // Primary — always child 0, hidden when collapsed
-                if !tab.primaryExited {
-                    paneView(
-                        ref: .primary, state: tab.viewState, layout: pl,
-                        onClose: { tab.closePrimaryPane(); onPaneResizeFinished() }, sz: sz,
-                        focused: tab.focusedPaneID == nil
-                    )
-                    .simultaneousGesture(TapGesture().onEnded { tab.focusedPaneID = nil })
-                }
-
-                ForEach(tab.secondaryPanes) { entry in
-                    if let l = tab.layouts[entry.id] {
+                ForEach(tab.panes) { entry in
+                    if let l = tab.paneLayouts[entry.id] {
                         paneView(
-                            ref: .secondary(entry.id), state: entry.viewState, layout: l,
-                            onClose: { tab.removePane(id: entry.id); onPaneResizeFinished() }, sz: sz,
+                            id: entry.id, state: entry.viewState, layout: l,
+                            onClose: { tab.removePane(id: entry.id); onPaneResizeFinished() },
+                            sz: sz,
                             focused: tab.focusedPaneID == entry.id
                         )
                         .simultaneousGesture(TapGesture().onEnded {
@@ -1843,11 +1821,8 @@ private struct TerminalContentView: View {
             }
             .coordinateSpace(name: "panes")
             .onChange(of: tab.focusedPaneID) { _, newID in
-                if let id = newID,
-                   let entry = tab.secondaryPanes.first(where: { $0.id == id }) {
+                if let entry = tab.panes.first(where: { $0.id == newID }) {
                     requestKeyboardFocus(for: entry.viewState)
-                } else {
-                    requestKeyboardFocus(for: tab.viewState)
                 }
             }
         }
@@ -1855,11 +1830,11 @@ private struct TerminalContentView: View {
     }
 
     @ViewBuilder
-    private func paneView(ref: PaneRef, state: TerminalViewState,
-                          layout l: PaneLayout, onClose: (() -> Void)?,
+    private func paneView(id: UUID, state: TerminalViewState,
+                          layout l: PaneLayout, onClose: @escaping () -> Void,
                           sz: CGSize, focused: Bool) -> some View {
-        let isSource = isDragging && dragSource == ref
-        let isTarget = isDragging && dragHover  == ref && dragSource != ref
+        let isSource = isDragging && dragSource == id
+        let isTarget = isDragging && dragHover  == id && dragSource != id
 
         ZStack(alignment: .top) {
             Color.black
@@ -1883,26 +1858,20 @@ private struct TerminalContentView: View {
             }
         }
         .overlay(alignment: .top) {
-            let customName: String = {
-                switch ref {
-                case .primary:           return tab.primaryPaneName
-                case .secondary(let id): return tab.paneNames[id] ?? ""
-                }
-            }()
             ReactivePaneHeader(
                 state: state,
-                customName: customName,
+                customName: tab.paneNames[id] ?? "",
                 focused: focused,
-                showClose: onClose != nil,
-                onClose: onClose ?? {},
-                onRename: { tab.rename(ref: ref, to: $0) },
+                showClose: true,
+                onClose: onClose,
+                onRename: { tab.rename(id: id, to: $0) },
                 onDragChanged: { loc in
                     isDragging = true
-                    dragSource = ref
+                    dragSource = id
                     let h = paneAt(loc, in: sz)
-                    if let h = h, h != ref {
+                    if let h = h, h != id {
                         dragHover = h
-                        dropSide = sideOf(loc, pane: h, in: sz)
+                        dropSide  = sideOf(loc, paneID: h, in: sz)
                     } else {
                         dragHover = nil
                         dropSide  = nil
@@ -1910,9 +1879,9 @@ private struct TerminalContentView: View {
                 },
                 onDragEnded: { loc in
                     let t = paneAt(loc, in: sz)
-                    if let t = t, t != ref {
-                        if let side = dropSide { tab.performDrop(source: ref, target: t, side: side) }
-                        else                   { tab.swapLayouts(ref, t) }
+                    if let t = t, t != id {
+                        if let side = dropSide { tab.performDrop(source: id, target: t, side: side) }
+                        else                   { tab.swapLayouts(id, t) }
                     }
                     isDragging = false; dragSource = nil; dragHover = nil; dropSide = nil
                 }
@@ -1929,31 +1898,19 @@ private struct TerminalContentView: View {
         .offset(x: sz.width * l.x, y: sz.height * l.y)
     }
 
-    private func paneAt(_ p: CGPoint, in sz: CGSize) -> PaneRef? {
-        for entry in tab.secondaryPanes.reversed() {
-            if let l = tab.layouts[entry.id] {
-                if CGRect(x: sz.width * l.x, y: sz.height * l.y,
-                          width: sz.width * l.w, height: sz.height * l.h).contains(p) {
-                    return .secondary(entry.id)
-                }
+    private func paneAt(_ p: CGPoint, in sz: CGSize) -> UUID? {
+        for entry in tab.panes.reversed() {
+            if let l = tab.paneLayouts[entry.id],
+               CGRect(x: sz.width * l.x, y: sz.height * l.y,
+                      width: sz.width * l.w, height: sz.height * l.h).contains(p) {
+                return entry.id
             }
-        }
-        let pl = tab.primaryLayout
-        if CGRect(x: sz.width * pl.x, y: sz.height * pl.y,
-                  width: sz.width * pl.w, height: sz.height * pl.h).contains(p) {
-            return .primary
         }
         return nil
     }
 
-    private func sideOf(_ p: CGPoint, pane: PaneRef, in sz: CGSize) -> DropSide? {
-        let l: PaneLayout
-        switch pane {
-        case .primary: l = tab.primaryLayout
-        case .secondary(let id):
-            guard let ll = tab.layouts[id] else { return nil }
-            l = ll
-        }
+    private func sideOf(_ p: CGPoint, paneID: UUID, in sz: CGSize) -> DropSide? {
+        guard let l = tab.paneLayouts[paneID] else { return nil }
         let cx = sz.width  * (l.x + l.w / 2)
         let cy = sz.height * (l.y + l.h / 2)
         let dx = abs(p.x - cx) / (sz.width  * l.w)
@@ -1974,9 +1931,7 @@ private struct TerminalContentView: View {
     private static func findTerminalView(for state: TerminalViewState, in view: NSView) -> NSView? {
         if let v = view as? TerminalView,
            let del = v.delegate,
-           ObjectIdentifier(del) == ObjectIdentifier(state) {
-            return v
-        }
+           ObjectIdentifier(del) == ObjectIdentifier(state) { return v }
         for sub in view.subviews {
             if let found = findTerminalView(for: state, in: sub) { return found }
         }
@@ -1986,8 +1941,7 @@ private struct TerminalContentView: View {
     private struct DividerSegment { let isVertical: Bool; let at: CGFloat; let from: CGFloat; let to: CGFloat }
 
     private func dividerSegments() -> [DividerSegment] {
-        let all: [(PaneRef, PaneLayout)] = [(.primary, tab.primaryLayout)] +
-            tab.secondaryPanes.compactMap { e in tab.layouts[e.id].map { (.secondary(e.id), $0) } }
+        let all = tab.panes.compactMap { e in tab.paneLayouts[e.id].map { (e.id, $0) } }
         let eps: CGFloat = 0.005
         var vSeen = Set<String>(), hSeen = Set<String>()
         var result: [DividerSegment] = []
