@@ -10,6 +10,8 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
 @main
 struct AgentNotificationRoutingTests {
     static func main() {
+        expect(AgentRunStatus(event: "SessionStart") == .working, "SessionStart should mark agent as working")
+
         var state = AgentNotificationState()
         state.apply(status: .waitingForResponse, summary: "approve", timestamp: 10, ownerPaneID: "pane-2")
         state.clearIfOwned(byPaneID: "pane-2")

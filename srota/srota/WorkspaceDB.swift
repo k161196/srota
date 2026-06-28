@@ -17,6 +17,7 @@ struct WorkspaceSession: Identifiable {
     var position: Int
     var lastCWD: String
     var lastAccessed: Int
+    var isPinned: Bool
 }
 
 struct TabRecord: Identifiable {
@@ -360,6 +361,7 @@ final class WorkspaceDB {
         execRaw("ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''")
         execRaw("ALTER TABLE features ADD COLUMN number INTEGER NOT NULL DEFAULT 0")
         execRaw("ALTER TABLE issues ADD COLUMN number INTEGER NOT NULL DEFAULT 0")
+        execRaw("ALTER TABLE ws_workspaces ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")
         execRaw("UPDATE features SET number = rowid WHERE number = 0")
         execRaw("UPDATE issues SET number = rowid WHERE number = 0")
         execRaw("""
@@ -390,7 +392,8 @@ final class WorkspaceDB {
             tmux_id TEXT,
             tmux_name TEXT,
             last_cwd TEXT NOT NULL DEFAULT '',
-            last_accessed INTEGER NOT NULL DEFAULT 0
+            last_accessed INTEGER NOT NULL DEFAULT 0,
+            is_pinned INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS ws_tabs (
             id TEXT PRIMARY KEY,
@@ -453,8 +456,13 @@ final class WorkspaceDB {
             "folder_tag": session.folderTag,
             "position": String(session.position),
             "last_cwd": session.lastCWD,
-            "last_accessed": String(session.lastAccessed)
+            "last_accessed": String(session.lastAccessed),
+            "is_pinned": session.isPinned ? "1" : "0"
         ])
+    }
+
+    func toggleWorkspacePin(id: String) {
+        exec("UPDATE ws_workspaces SET is_pinned = 1 - is_pinned WHERE id = ?", [id])
     }
 
     func touchWorkspaceSession(id: String, cwd: String) {
@@ -539,7 +547,7 @@ final class WorkspaceDB {
     func loadWorkspaceSessions() -> [WorkspaceSession] {
         let all = rows("""
         SELECT id, name, folder_name, folder_tag, position,
-               last_cwd, last_accessed
+               last_cwd, last_accessed, is_pinned
         FROM ws_workspaces ORDER BY folder_name, position
         """) { stmt in
             WorkspaceSession(
@@ -549,7 +557,8 @@ final class WorkspaceDB {
                 folderTag: col(stmt, 3),
                 position: Int(sqlite3_column_int(stmt, 4)),
                 lastCWD: col(stmt, 5),
-                lastAccessed: Int(sqlite3_column_int(stmt, 6))
+                lastAccessed: Int(sqlite3_column_int(stmt, 6)),
+                isPinned: sqlite3_column_int(stmt, 7) != 0
             )
         }
 

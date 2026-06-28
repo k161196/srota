@@ -51,6 +51,8 @@ final class KeyboardShortcutManager {
     }
     private(set) var awaitingChord = false
     var showWorkspaceSwitcher = false
+    var showLazygit = false
+    var lazygitCWD: String? = nil
     var actions: [String: () -> Void] = [:]
 
     private var prefixCombo: KeyCombo? = KeyCombo("ctrl+b")
@@ -69,7 +71,7 @@ final class KeyboardShortcutManager {
     }
 
     private func handle(_ event: NSEvent) -> Bool {
-        if showWorkspaceSwitcher { return false }
+        if showWorkspaceSwitcher || showLazygit { return false }
         // Don't intercept when user is editing text
         if let responder = NSApp.keyWindow?.firstResponder,
            responder is NSTextView || responder is NSTextField {
@@ -213,12 +215,14 @@ struct SwitcherWorkspace {
     let folder: String?
     let tabs: [SwitcherTab]
     let isSelected: Bool
+    let isPinned: Bool
+    let isActive: Bool
 }
 
 // MARK: - Workspace switcher overlay
 
 struct WorkspaceSwitcherOverlay: View {
-    let workspaces: [SwitcherWorkspace]
+    let allWorkspaces: [SwitcherWorkspace]
     let onSelectWorkspace: (UUID) -> Void
     let onSelectTab: (UUID, UUID) -> Void
     let onSelectPane: (UUID, UUID, UUID) -> Void
@@ -232,7 +236,14 @@ struct WorkspaceSwitcherOverlay: View {
 
     @State private var level: NavLevel = .workspaces
     @State private var highlighted: Int = 0
+    @State private var showAll = false
     private let accent = Color(red: 1.0, green: 0.45, blue: 0.15)
+
+    private var workspaces: [SwitcherWorkspace] {
+        guard !showAll else { return allWorkspaces }
+        let filtered = allWorkspaces.filter(\.isActive)
+        return filtered.isEmpty ? allWorkspaces : filtered
+    }
 
     var body: some View {
         ZStack {
@@ -241,7 +252,15 @@ struct WorkspaceSwitcherOverlay: View {
                 .onTapGesture { onDismiss() }
 
             VStack(alignment: .leading, spacing: 0) {
-                breadcrumb.padding(.bottom, 8)
+                HStack {
+                    breadcrumb
+                    Spacer()
+                    Button(showAll ? "Active" : "All") { showAll.toggle(); level = .workspaces; highlighted = 0 }
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(showAll ? Color.white.opacity(0.6) : accent.opacity(0.7))
+                        .buttonStyle(.plain)
+                }
+                .padding(.bottom, 8)
                 Divider().opacity(0.15).padding(.bottom, 8)
                 VStack(alignment: .leading, spacing: 3) { rows }
             }
@@ -346,6 +365,11 @@ struct WorkspaceSwitcherOverlay: View {
             }
             Spacer()
             HStack(spacing: 6) {
+                if ws.isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(accent.opacity(0.6))
+                }
                 if ws.isSelected { Circle().fill(accent).frame(width: 6, height: 6) }
                 if i == highlighted {
                     Image(systemName: "chevron.right").font(.system(size: 10))
@@ -499,7 +523,8 @@ private struct WorkspaceSwitcherKeyCapture: NSViewRepresentable {
         override var acceptsFirstResponder: Bool { true }
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            DispatchQueue.main.async { self.window?.makeFirstResponder(self) }
+            guard let window else { return }
+            DispatchQueue.main.async { window.makeFirstResponder(self) }
         }
         override func keyDown(with event: NSEvent) {
             switch event.keyCode {

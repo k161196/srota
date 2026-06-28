@@ -29,6 +29,16 @@ exec /bin/zsh -i "$@"
     return path
 }
 
+private func makeLazygitLauncher() -> String {
+    let dir = NSHomeDirectory() + "/.srota/launchers"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    let path = dir + "/lazygit.sh"
+    let script = "#!/bin/sh\nexport PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"\nexec lazygit\n"
+    try? script.write(toFile: path, atomically: true, encoding: .utf8)
+    try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+    return path
+}
+
 private func makeLauncherConfig(tabID: String, paneID: String) -> TerminalConfiguration {
     let launcher = makePaneLauncher(tabID: tabID, paneID: paneID)
     return TerminalConfiguration(configure: { b in b.withCustom("command", launcher) })
@@ -381,6 +391,9 @@ final class TerminalTab: Identifiable, ObservableObject {
 final class Workspace: Identifiable, ObservableObject {
     let id: UUID
     @Published var name: String
+    @Published var isPinned: Bool = false
+    var lastAccessed: Date = Date()
+    var isActive: Bool { isPinned || lastAccessed > Date(timeIntervalSinceNow: -172800) }
     @Published var tabs: [TerminalTab] = [] {
         didSet { rebindTabSinks() }
     }
@@ -494,6 +507,11 @@ final class TerminalManager: ObservableObject {
             workspaces.append(ws)
         }
         selectedWorkspaceID = ws.id
+    }
+
+    func selectWorkspace(id: UUID) {
+        selectedWorkspaceID = id
+        selectedWorkspace?.lastAccessed = Date()
     }
 
     /// Find existing folder by name or create one with optional tag.
@@ -709,7 +727,7 @@ struct ContentView: View {
             // if workspace with same name already exists in that folder, just select it
             let candidatePool = folder?.workspaces ?? manager.workspaces
             if let existing = candidatePool.first(where: { $0.name == wsName }) {
-                manager.selectedWorkspaceID = existing.id
+                manager.selectWorkspace(id: existing.id)
                 managementTab = .workspaces
                 return
             }
@@ -735,7 +753,8 @@ struct ContentView: View {
                             name: wsName ?? "", folderName: folderName ?? "",
                             folderTag: folderTag, position: 0,
                             lastCWD: path,
-                            lastAccessed: Int(Date().timeIntervalSince1970)))
+                            lastAccessed: Int(Date().timeIntervalSince1970),
+                            isPinned: false))
                         managementTab = .workspaces
                         saveLayout()
                         if let baseDir = settings.baseWorkingDirectory { db.scan(baseDir: baseDir) }
@@ -749,7 +768,8 @@ struct ContentView: View {
                         id: ws.id.uuidString, name: ws.name,
                         folderName: folderName ?? "", folderTag: folderTag,
                         position: candidatePool.count,
-                        lastCWD: path, lastAccessed: Int(Date().timeIntervalSince1970)))
+                        lastCWD: path, lastAccessed: Int(Date().timeIntervalSince1970),
+                        isPinned: false))
                 }
                 managementTab = .workspaces
                 saveLayout()
@@ -805,9 +825,21 @@ struct ContentView: View {
         }
         .animation(.easeInOut(duration: 0.15), value: shortcuts.awaitingChord)
         .allowsHitTesting(false)
+        if shortcuts.showLazygit {
+            LazygitOverlay(cwd: shortcuts.lazygitCWD) {
+                let prevState = manager.selectedWorkspace?.selectedTab?.focusedViewState
+                withAnimation(.easeInOut(duration: 0.15)) { shortcuts.showLazygit = false }
+                if let prevState {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        focusTerminalView(for: prevState)
+                    }
+                }
+            }
+            .transition(.opacity.combined(with: .scale(scale: 0.97)))
+        }
         if shortcuts.showWorkspaceSwitcher {
             WorkspaceSwitcherOverlay(
-                workspaces: manager.allWorkspaces.map { ws in
+                allWorkspaces: manager.allWorkspaces.map { ws in
                     let folder = manager.folders.first(where: { $0.workspaces.contains(where: { $0.id == ws.id }) })?.name
                     return SwitcherWorkspace(
                         id: ws.id, name: ws.name, folder: folder,
@@ -825,16 +857,18 @@ struct ContentView: View {
                                 isSelected: tab.id == ws.selectedTabID
                             )
                         },
-                        isSelected: ws.id == manager.selectedWorkspaceID
+                        isSelected: ws.id == manager.selectedWorkspaceID,
+                        isPinned: ws.isPinned,
+                        isActive: ws.isActive
                     )
                 },
-                onSelectWorkspace: { id in manager.selectedWorkspaceID = id },
+                    onSelectWorkspace: { id in manager.selectWorkspace(id: id) },
                 onSelectTab: { wsID, tabID in
-                    manager.selectedWorkspaceID = wsID
+                        manager.selectWorkspace(id: wsID)
                     manager.allWorkspaces.first(where: { $0.id == wsID })?.selectedTabID = tabID
                 },
                 onSelectPane: { wsID, tabID, paneID in
-                    manager.selectedWorkspaceID = wsID
+                        manager.selectWorkspace(id: wsID)
                     if let ws = manager.allWorkspaces.first(where: { $0.id == wsID }) {
                         ws.selectedTabID = tabID
                         ws.tabs.first(where: { $0.id == tabID })?.focusedPaneID = paneID
@@ -869,6 +903,10 @@ struct ContentView: View {
         shortcuts.actions["j"] = { manager.selectedWorkspace?.selectedTab?.focusPane(direction: .down) }
         shortcuts.actions["k"] = { manager.selectedWorkspace?.selectedTab?.focusPane(direction: .up) }
         shortcuts.actions["l"] = { manager.selectedWorkspace?.selectedTab?.focusPane(direction: .right) }
+        shortcuts.actions["g"] = {
+            shortcuts.lazygitCWD = manager.selectedWorkspace?.selectedTab?.statusPath
+            withAnimation(.easeInOut(duration: 0.15)) { shortcuts.showLazygit = true }
+        }
     }
 
     private func saveLayout() {
@@ -879,7 +917,8 @@ struct ContentView: View {
                 id: ws.id.uuidString, name: ws.name,
                 folderName: folderName, folderTag: folderTag, position: position,
                 lastCWD: ws.currentWorkingDirectory ?? "",
-                lastAccessed: Int(Date().timeIntervalSince1970)))
+                lastAccessed: Int(Date().timeIntervalSince1970),
+                isPinned: ws.isPinned))
             db.deleteTabs(workspaceID: ws.id.uuidString)
             for (ti, tab) in ws.tabs.enumerated() {
                 db.saveTab(TabRecord(
@@ -917,6 +956,8 @@ struct ContentView: View {
                 : manager.folder(named: session.folderName, tag: session.folderTag)
             let wsID = UUID(uuidString: session.id) ?? UUID()
             let ws = Workspace(id: wsID, name: session.name)
+            ws.isPinned = session.isPinned
+            ws.lastAccessed = Date(timeIntervalSince1970: TimeInterval(session.lastAccessed))
             let cwd = session.lastCWD.isEmpty ? nil : session.lastCWD
             let tabs = db.loadTabs(workspaceID: session.id)
             if tabs.isEmpty {
@@ -1099,7 +1140,7 @@ WorkspaceSidebarItem(
                             workspace: ws,
                             manager: manager,
                             isSelected: manager.selectedWorkspaceID == ws.id,
-                            onSelect: { manager.selectedWorkspaceID = ws.id },
+onSelect: { manager.selectWorkspace(id: ws.id) },
                             onClose:  { manager.closeWorkspace(id: ws.id) }
                         )
                     }
@@ -1221,7 +1262,7 @@ private struct FolderRow: View {
                         workspace: ws,
                         manager: manager,
                         isSelected: manager.selectedWorkspaceID == ws.id,
-                        onSelect: { manager.selectedWorkspaceID = ws.id },
+                        onSelect: { manager.selectWorkspace(id: ws.id) },
                         onClose:  { manager.closeWorkspace(id: ws.id) },
                         indented: true
                     )
@@ -1265,6 +1306,7 @@ private struct WorkspaceRow: View {
     var isExpanded: Bool? = nil
     var onToggleExpand: (() -> Void)? = nil
 
+    @Environment(WorkspaceDB.self) private var db
     @State private var isHovered = false
     @State private var isRenaming = false
     @State private var editText = ""
@@ -1308,10 +1350,17 @@ private struct WorkspaceRow: View {
                         .onExitCommand { isRenaming = false }
                 } else {
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(workspace.name)
-                            .font(.system(size: 13, weight: isSelected ? .medium : .regular))
-                            .foregroundStyle(isSelected ? Color.labelPrimary : Color.labelSecondary)
-                            .lineLimit(1)
+                        HStack(spacing: 4) {
+                            Text(workspace.name)
+                                .font(.system(size: 13, weight: isSelected ? .medium : .regular))
+                                .foregroundStyle(isSelected ? Color.labelPrimary : Color.labelSecondary)
+                                .lineLimit(1)
+                            if workspace.isPinned {
+                                Image(systemName: "pin.fill")
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(Color.accentOrange.opacity(0.7))
+                            }
+                        }
                         Text("\(workspace.tabs.count) tab\(workspace.tabs.count == 1 ? "" : "s")")
                             .font(.system(size: 10))
                             .foregroundStyle(Color.sectionHeader)
@@ -1347,6 +1396,11 @@ private struct WorkspaceRow: View {
         .onHover { isHovered = $0 }
         .onDrag { NSItemProvider(object: workspace.id.uuidString as NSString) }
         .contextMenu {
+            Button(workspace.isPinned ? "Unpin" : "Pin") {
+                workspace.isPinned.toggle()
+                db.toggleWorkspacePin(id: workspace.id.uuidString)
+            }
+            Divider()
             Button("Rename") { startRename() }
 
             if !manager.folders.isEmpty {
@@ -1518,8 +1572,9 @@ private struct WorkspaceContent: View {
 
     var body: some View {
         ForEach(workspace.tabs) { tab in
-            TerminalContentView(tab: tab, onPaneResizeFinished: onPaneResizeFinished)
-                .opacity(workspace.id == selectedWorkspaceID && tab.id == workspace.selectedTabID ? 1 : 0)
+            let isSelected = workspace.id == selectedWorkspaceID && tab.id == workspace.selectedTabID
+            TerminalContentView(tab: tab, isSelected: isSelected, onPaneResizeFinished: onPaneResizeFinished)
+                .opacity(isSelected ? 1 : 0)
         }
     }
 }
@@ -1793,6 +1848,7 @@ private struct PaneResizeOverlay: NSViewRepresentable {
 
 private struct TerminalContentView: View {
     @ObservedObject var tab: TerminalTab
+    var isSelected: Bool = false
     let onPaneResizeFinished: () -> Void
     @State private var isDragging  = false
     @State private var dragSource: UUID? = nil
@@ -1845,6 +1901,10 @@ private struct TerminalContentView: View {
                 if let entry = tab.panes.first(where: { $0.id == newID }) {
                     requestKeyboardFocus(for: entry.viewState)
                 }
+            }
+            .onChange(of: isSelected) { _, selected in
+                guard selected, let entry = tab.panes.first(where: { $0.id == tab.focusedPaneID }) else { return }
+                requestKeyboardFocus(for: entry.viewState)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2116,6 +2176,100 @@ private struct SplitDivider: View {
             if vertical { h ? NSCursor.resizeLeftRight.push() : NSCursor.pop() }
             else        { h ? NSCursor.resizeUpDown.push()    : NSCursor.pop() }
         }
+    }
+}
+
+// MARK: - Lazygit overlay
+
+private func focusTerminalView(for state: TerminalViewState) {
+    guard let window = NSApp.keyWindow, let root = window.contentView else { return }
+    func find(_ v: NSView) -> NSView? {
+        if let tv = v as? TerminalView,
+           let del = tv.delegate,
+           ObjectIdentifier(del) == ObjectIdentifier(state) { return tv }
+        for sub in v.subviews { if let f = find(sub) { return f } }
+        return nil
+    }
+    if let tv = find(root) { window.makeFirstResponder(tv) }
+}
+
+private final class LazygitState: ObservableObject {
+    let viewState: TerminalViewState
+    init(cwd: String?) {
+        let config = TerminalConfiguration(configure: { b in b.withCustom("command", makeLazygitLauncher()) })
+        viewState = TerminalViewState(terminalConfiguration: config)
+        viewState.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: cwd)
+        viewState.controller.setColorScheme(.dark)
+    }
+}
+
+private struct LazygitOverlay: View {
+    let cwd: String?
+    let onDismiss: () -> Void
+    @StateObject private var lazygit: LazygitState
+
+    init(cwd: String?, onDismiss: @escaping () -> Void) {
+        self.cwd = cwd
+        self.onDismiss = onDismiss
+        _lazygit = StateObject(wrappedValue: LazygitState(cwd: cwd))
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.65)
+                .ignoresSafeArea()
+                .onTapGesture { onDismiss() }
+
+            GeometryReader { geo in
+                VStack(spacing: 0) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color.accentOrange)
+                        Text("lazygit")
+                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                            .foregroundStyle(Color.labelPrimary)
+                        if let cwd {
+                            Text(cwd.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(Color.labelMuted)
+                                .lineLimit(1)
+                                .truncationMode(.head)
+                        }
+                        Spacer()
+                        Button(action: onDismiss) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Color.labelMuted)
+                                .frame(width: 14, height: 14)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(height: 30)
+                    .background(Color.tabBarBg)
+                    .overlay(alignment: .bottom) {
+                        Rectangle().fill(Color.accentOrange.opacity(0.5)).frame(height: 1)
+                    }
+
+                    TerminalSurfaceView(context: lazygit.viewState)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .frame(width: geo.size.width * 0.9, height: geo.size.height * 0.9)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.accentOrange.opacity(0.2)))
+                .shadow(color: .black.opacity(0.7), radius: 40, y: 12)
+                .position(x: geo.size.width / 2, y: geo.size.height / 2)
+            }
+        }
+        .onAppear {
+            lazygit.viewState.onClose = { _ in onDismiss() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { focusTerminal() }
+        }
+    }
+
+    private func focusTerminal() {
+        focusTerminalView(for: lazygit.viewState)
     }
 }
 
