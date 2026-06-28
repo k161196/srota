@@ -13,7 +13,7 @@ private extension Color {
 
 // MARK: - Panel
 
-private enum SettingsSection { case terminal, shortcuts, agents }
+private enum SettingsSection { case terminal, shortcuts, agents, mcp }
 
 struct SettingsPanel: View {
     @Binding var isPresented: Bool
@@ -49,6 +49,9 @@ struct SettingsPanel: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .agents:
                 AgentsSettingsView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .mcp:
+                MCPSettingsView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -109,6 +112,8 @@ private struct SettingsSidebar: View {
                 .onTapGesture { section = .shortcuts }
             SidebarRow(label: "Agents", icon: "sparkles", isSelected: section == .agents)
                 .onTapGesture { section = .agents }
+            SidebarRow(label: "MCP", icon: "network", isSelected: section == .mcp)
+                .onTapGesture { section = .mcp }
 
             Spacer()
         }
@@ -504,6 +509,42 @@ struct PresetEditSheet: View {
             .padding(.vertical, 16)
         }
         .frame(width: 500)
+        .background(Color.stBg)
+    }
+}
+
+// MARK: - MCP settings
+
+private struct MCPSettingsView: View {
+    @Environment(AppSettings.self) private var settings
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("MCP Server")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(Color.stLabel)
+                    Text("The srota MCP server is installed automatically and kept up to date with the app.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.stMuted)
+                }
+                .padding(.bottom, 28)
+
+                if let path = settings.resolvedMCPServerPath {
+                    MCPPromptBlock(
+                        title: "MCP Setup",
+                        subtitle: "bun \"\(path)\"",
+                        content: "The srota MCP server is located at:\n\(path)\n\nTo run it:\nbun \"\(path)\"\n\nAdd it as an MCP server in your agent config with:\n  command: bun\n  args: [\"\(path)\"]"
+                    )
+                } else {
+                    Text("Not installed yet — relaunch the app to trigger installation.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.red.opacity(0.7))
+                }
+            }
+            .padding(28)
+        }
         .background(Color.stBg)
     }
 }

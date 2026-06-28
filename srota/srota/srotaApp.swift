@@ -29,6 +29,7 @@ struct srotaApp: App {
                     setupShellIntegration()
                     if let dir = settings.baseWorkingDirectory { db.scan(baseDir: dir) }
                     Task { await runHookCheck() }
+                    Task.detached { installMCPServer() }
                 }
                 .onChange(of: settings.shortcutPrefix) { _, new in
                     shortcuts.prefixKey = new
@@ -105,4 +106,47 @@ _srota_osc7
     let launcherPath = "\(dir)/zsh-launcher.sh"
     try? launcher.write(toFile: launcherPath, atomically: true, encoding: .utf8)
     try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launcherPath)
+}
+
+/// Copies the srota-mcp files to ~/.srota/srota-mcp/ and runs
+/// `bun install` if node_modules is missing or package.json changed.
+/// Source: app bundle (production) or scripts/srota-mcp/ via #filePath (dev).
+private func installMCPServer() {
+    let fm = FileManager.default
+
+    // Resolve source directory — bundle first, then dev source tree
+    let bundleSrc = Bundle.main.resourceURL?.appendingPathComponent("srota-mcp")
+    let devSrc = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("scripts/srota-mcp")
+    guard let src = [bundleSrc, devSrc].compactMap({ $0 }).first(where: {
+        fm.fileExists(atPath: $0.appendingPathComponent("index.ts").path)
+    }) else { return }
+
+    let dest = URL(fileURLWithPath: NSHomeDirectory())
+        .appendingPathComponent("\(Srota.dir)/srota-mcp")
+    try? fm.createDirectory(at: dest, withIntermediateDirectories: true)
+
+    var packageChanged = false
+    for file in ["index.ts", "package.json", "bun.lock"] {
+        let srcFile = src.appendingPathComponent(file)
+        guard fm.fileExists(atPath: srcFile.path) else { continue }
+        let dstFile = dest.appendingPathComponent(file)
+        if file == "package.json" {
+            packageChanged = (try? Data(contentsOf: dstFile)) != (try? Data(contentsOf: srcFile))
+        }
+        try? fm.removeItem(at: dstFile)
+        try? fm.copyItem(at: srcFile, to: dstFile)
+    }
+
+    let nodeModules = dest.appendingPathComponent("node_modules").path
+    guard !fm.fileExists(atPath: nodeModules) || packageChanged else { return }
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    task.arguments = ["bun", "install", "--frozen-lockfile"]
+    task.currentDirectoryURL = dest
+    try? task.run()
+    task.waitUntilExit()
 }

@@ -31,6 +31,21 @@ final class AppSettings {
         }
     }
 
+    /// Explicit override → installed ~/.srota/srota-mcp/ → dev source fallback.
+    var resolvedMCPServerPath: String? {
+        if let p = mcpServerPath, !p.isEmpty { return p }
+        let fm = FileManager.default
+        let installed = NSHomeDirectory() + "/\(Srota.dir)/srota-mcp/index.ts"
+        if fm.fileExists(atPath: installed) { return installed }
+        // Dev: walk up from source file to repo root
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let devPath = root.appendingPathComponent("scripts/srota-mcp/index.ts").path
+        return fm.fileExists(atPath: devPath) ? devPath : nil
+    }
+
     func save() {
         let dir = NSHomeDirectory() + "/\(Srota.dir)"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)

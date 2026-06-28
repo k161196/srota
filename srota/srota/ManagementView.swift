@@ -1026,7 +1026,8 @@ private struct FeaturesPanel: View {
     @Environment(AppSettings.self) var settings
     @Environment(FeatureAgentFocus.self) var agentFocus
 
-    @State private var showAdd = false
+    @State private var showAdd      = false
+    @State private var showMCPSetup = false
     @State private var newName = ""
     @State private var newDesc = ""
     @State private var selectedProject: Project?
@@ -1077,6 +1078,9 @@ private struct FeaturesPanel: View {
             agentFocus.agentTabs.append(FeatureAgentTab(id: feature.id, featureID: feature.id, tab: TerminalTab(colorScheme: colorScheme, workingDirectory: cwd)))
             agentFocus.activeTabID = feature.id
             cwds.forEach { injectContext(feature: feature, into: $0) }
+            if settings.resolvedMCPServerPath != nil && !UserDefaults.standard.bool(forKey: "mcpSetupDismissed") {
+                showMCPSetup = true
+            }
         }
     }
 
@@ -1102,79 +1106,6 @@ private struct FeaturesPanel: View {
         }
     }
 
-
-    private func injectMCPConfig(into dir: String, mcpPath: String) {
-        injectClaudeMCPConfig(into: dir, mcpPath: mcpPath)
-        injectCodexMCPConfig(into: dir, mcpPath: mcpPath)
-    }
-
-    private func injectClaudeMCPConfig(into dir: String, mcpPath: String) {
-        let settingsDir = dir + "/.claude"
-        try? FileManager.default.createDirectory(atPath: settingsDir, withIntermediateDirectories: true)
-        let settingsPath = settingsDir + "/settings.json"
-        var settings = (try? JSONSerialization.jsonObject(
-            with: Data(contentsOf: URL(fileURLWithPath: settingsPath))) as? [String: Any]) ?? [:]
-        var mcpServers = settings["mcpServers"] as? [String: Any] ?? [:]
-        mcpServers["srota"] = ["command": "bun", "args": [mcpPath]]
-        settings["mcpServers"] = mcpServers
-        if let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: URL(fileURLWithPath: settingsPath))
-        }
-    }
-
-    private func injectCodexMCPConfig(into dir: String, mcpPath: String) {
-        let configDir = dir + "/.codex"
-        try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
-        let configPath = configDir + "/config.toml"
-        var content = (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? ""
-        let block = """
-            # srota:start
-            [[mcp_servers]]
-            name = "srota"
-            command = "bun"
-            args = ["\(mcpPath)"]
-            # srota:end
-            """
-        if content.contains("# srota:start") {
-            content = replaceTomlBlock(in: content, with: block)
-        } else {
-            content = content.isEmpty ? block : content + "\n\n" + block
-        }
-        try? content.write(toFile: configPath, atomically: true, encoding: .utf8)
-    }
-
-    private func removeMCPConfig(from dir: String) {
-        // Claude
-        let settingsPath = dir + "/.claude/settings.json"
-        if var settings = (try? JSONSerialization.jsonObject(
-            with: Data(contentsOf: URL(fileURLWithPath: settingsPath))) as? [String: Any]) {
-            var mcpServers = settings["mcpServers"] as? [String: Any] ?? [:]
-            mcpServers.removeValue(forKey: "srota")
-            settings["mcpServers"] = mcpServers.isEmpty ? nil : mcpServers
-            if let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
-                try? data.write(to: URL(fileURLWithPath: settingsPath))
-            }
-        }
-        // Codex
-        let codexPath = dir + "/.codex/config.toml"
-        if var content = try? String(contentsOfFile: codexPath, encoding: .utf8) {
-            content = replaceTomlBlock(in: content, with: nil)
-            try? content.write(toFile: codexPath, atomically: true, encoding: .utf8)
-        }
-    }
-
-    private func replaceTomlBlock(in content: String, with replacement: String?) -> String {
-        let start = "# srota:start"; let end = "# srota:end"
-        guard let s = content.range(of: start), let e = content.range(of: end) else {
-            return replacement.map { content + "\n\n" + $0 } ?? content
-        }
-        let before = String(content[content.startIndex..<s.lowerBound]).trimmingCharacters(in: .newlines)
-        let after = String(content[e.upperBound...]).trimmingCharacters(in: .newlines)
-        guard let block = replacement else {
-            return [before, after].filter { !$0.isEmpty }.joined(separator: "\n\n")
-        }
-        return [before, block, after].filter { !$0.isEmpty }.joined(separator: "\n\n")
-    }
 
     private func injectContext(feature: Feature, into dir: String) {
         let proj = db.projects.first { $0.id == feature.projectID }?.name ?? feature.projectID
@@ -1212,9 +1143,6 @@ private struct FeaturesPanel: View {
             }
             try? content.write(toFile: path, atomically: true, encoding: .utf8)
         }
-        if let mcpPath = settings.mcpServerPath, !mcpPath.isEmpty {
-            injectMCPConfig(into: dir, mcpPath: mcpPath)
-        }
     }
 
     private func removeContext(from dir: String) {
@@ -1228,7 +1156,6 @@ private struct FeaturesPanel: View {
                 try? content.write(toFile: path, atomically: true, encoding: .utf8)
             }
         }
-        removeMCPConfig(from: dir)
     }
 
     private func replaceBlock(in content: String, with replacement: String?) -> String {
@@ -1298,6 +1225,9 @@ private struct FeaturesPanel: View {
                 }
             }
             .background(Color.mgBg)
+        }
+        .sheet(isPresented: $showMCPSetup) {
+            MCPSetupSheet(mcpPath: settings.resolvedMCPServerPath ?? "")
         }
     }
 
@@ -1768,7 +1698,8 @@ private struct IssuesPanel: View {
     @Environment(AppSettings.self) var settings
     @Environment(IssueAgentFocus.self) var agentFocus
 
-    @State private var showAdd = false
+    @State private var showAdd      = false
+    @State private var showMCPSetup = false
     @State private var newTitle = ""
     @State private var newBody  = ""
     @State private var selectedOrg:     Organization?
@@ -1805,6 +1736,9 @@ private struct IssuesPanel: View {
                          displayName: \.name, selected: $selectedFeature)
             }
         }
+        .sheet(isPresented: $showMCPSetup) {
+            MCPSetupSheet(mcpPath: settings.resolvedMCPServerPath ?? "")
+        }
     }
 
     // MARK: - Tab management
@@ -1829,6 +1763,9 @@ private struct IssuesPanel: View {
             ))
             agentFocus.activeTabID = issue.id
             cwds.forEach { injectContext(issue: issue, into: $0) }
+            if settings.resolvedMCPServerPath != nil && !UserDefaults.standard.bool(forKey: "mcpSetupDismissed") {
+                showMCPSetup = true
+            }
         }
     }
 
@@ -1895,9 +1832,6 @@ private struct IssuesPanel: View {
                 : (content.isEmpty ? block : content + "\n\n" + block)
             try? content.write(toFile: path, atomically: true, encoding: .utf8)
         }
-        if let mcpPath = settings.mcpServerPath, !mcpPath.isEmpty {
-            injectMCPConfig(into: dir, mcpPath: mcpPath)
-        }
     }
 
     private func removeContext(from dir: String) {
@@ -1911,7 +1845,6 @@ private struct IssuesPanel: View {
                 try? content.write(toFile: path, atomically: true, encoding: .utf8)
             }
         }
-        removeMCPConfig(from: dir)
     }
 
     private func replaceBlock(in content: String, with replacement: String?) -> String {
@@ -1927,68 +1860,6 @@ private struct IssuesPanel: View {
         return [before, block, after].filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
 
-    private func injectMCPConfig(into dir: String, mcpPath: String) {
-        // Claude
-        let settingsDir = dir + "/.claude"
-        try? FileManager.default.createDirectory(atPath: settingsDir, withIntermediateDirectories: true)
-        let settingsPath = settingsDir + "/settings.json"
-        var s = (try? JSONSerialization.jsonObject(
-            with: Data(contentsOf: URL(fileURLWithPath: settingsPath))) as? [String: Any]) ?? [:]
-        var mcpServers = s["mcpServers"] as? [String: Any] ?? [:]
-        mcpServers["srota"] = ["command": "bun", "args": [mcpPath]]
-        s["mcpServers"] = mcpServers
-        if let data = try? JSONSerialization.data(withJSONObject: s, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: URL(fileURLWithPath: settingsPath))
-        }
-        // Codex
-        let configDir = dir + "/.codex"
-        try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
-        let configPath = configDir + "/config.toml"
-        var toml = (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? ""
-        let block = """
-            # srota:start
-            [[mcp_servers]]
-            name = "srota"
-            command = "bun"
-            args = ["\(mcpPath)"]
-            # srota:end
-            """
-        toml = toml.contains("# srota:start")
-            ? replaceTomlBlock(in: toml, with: block)
-            : (toml.isEmpty ? block : toml + "\n\n" + block)
-        try? toml.write(toFile: configPath, atomically: true, encoding: .utf8)
-    }
-
-    private func removeMCPConfig(from dir: String) {
-        let settingsPath = dir + "/.claude/settings.json"
-        if var s = (try? JSONSerialization.jsonObject(
-            with: Data(contentsOf: URL(fileURLWithPath: settingsPath))) as? [String: Any]) {
-            var mcpServers = s["mcpServers"] as? [String: Any] ?? [:]
-            mcpServers.removeValue(forKey: "srota")
-            s["mcpServers"] = mcpServers.isEmpty ? nil : mcpServers
-            if let data = try? JSONSerialization.data(withJSONObject: s, options: [.prettyPrinted, .sortedKeys]) {
-                try? data.write(to: URL(fileURLWithPath: settingsPath))
-            }
-        }
-        let codexPath = dir + "/.codex/config.toml"
-        if var toml = try? String(contentsOfFile: codexPath, encoding: .utf8) {
-            toml = replaceTomlBlock(in: toml, with: nil)
-            try? toml.write(toFile: codexPath, atomically: true, encoding: .utf8)
-        }
-    }
-
-    private func replaceTomlBlock(in content: String, with replacement: String?) -> String {
-        let start = "# srota:start"; let end = "# srota:end"
-        guard let s = content.range(of: start), let e = content.range(of: end) else {
-            return replacement.map { content + "\n\n" + $0 } ?? content
-        }
-        let before = String(content[content.startIndex..<s.lowerBound]).trimmingCharacters(in: .newlines)
-        let after  = String(content[e.upperBound...]).trimmingCharacters(in: .newlines)
-        guard let block = replacement else {
-            return [before, after].filter { !$0.isEmpty }.joined(separator: "\n\n")
-        }
-        return [before, block, after].filter { !$0.isEmpty }.joined(separator: "\n\n")
-    }
 
     // MARK: - Sub-views
 
@@ -2222,5 +2093,126 @@ private struct StatusBadge: View {
             .padding(.vertical, 3)
             .background((status == "open" ? Color.green : Color.mgMuted).opacity(0.15))
             .clipShape(Capsule())
+    }
+}
+
+// MARK: - MCP setup popup
+
+struct MCPSetupSheet: View {
+    let mcpPath: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var dontShowAgain = UserDefaults.standard.bool(forKey: "mcpSetupDismissed")
+
+    private var setupPrompt: String {
+        "The srota MCP server is located at:\n\(mcpPath)\n\nTo run it:\nbun \"\(mcpPath)\"\n\nAdd it as an MCP server in your agent config with:\n  command: bun\n  args: [\"\(mcpPath)\"]"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Set up srota MCP")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.mgLabel)
+                    Text("Copy and paste this prompt into your agent to configure MCP.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.mgMuted)
+                }
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.mgMuted)
+                        .frame(width: 22, height: 22)
+                        .background(Color.mgSurface)
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(20)
+
+            Rectangle().fill(Color.mgBorder).frame(height: 1)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    MCPPromptBlock(title: "MCP Setup", subtitle: "bun \(mcpPath)", content: setupPrompt)
+                }
+                .padding(20)
+            }
+
+            Rectangle().fill(Color.mgBorder).frame(height: 1)
+
+            HStack {
+                Toggle("Don't show again", isOn: $dontShowAgain)
+                    .toggleStyle(.switch)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.mgMuted)
+                    .onChange(of: dontShowAgain) { _, val in
+                        UserDefaults.standard.set(val, forKey: "mcpSetupDismissed")
+                    }
+                Spacer()
+                Button("Close") { dismiss() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 14).padding(.vertical, 7)
+                    .background(Color.mgAccent)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .padding(20)
+        }
+        .frame(width: 560)
+        .background(Color.mgBg)
+    }
+}
+
+struct MCPPromptBlock: View {
+    let title: String
+    let subtitle: String
+    let content: String
+    @State private var copied = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.mgLabel)
+                    Text(subtitle)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Color.mgMuted)
+                }
+                Spacer()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(content, forType: .string)
+                    copied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 11))
+                        Text(copied ? "Copied" : "Copy prompt")
+                            .font(.system(size: 12))
+                    }
+                    .foregroundStyle(copied ? Color.mgAccent : Color.mgMuted)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(Color.mgSurface)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+                }
+                .buttonStyle(.plain)
+            }
+            Text(content)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(Color.mgLabel)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.mgSurface)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+                .textSelection(.enabled)
+        }
     }
 }

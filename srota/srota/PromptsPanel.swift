@@ -12,6 +12,7 @@ private extension Color {
 struct PromptsPanel: View {
     @Binding var isPresented: Bool
     @Environment(PromptsStore.self) private var store
+    @Environment(AppSettings.self)  private var appSettings
 
     @State private var searchText   = ""
     @State private var selectedID:  UUID? = nil
@@ -21,9 +22,23 @@ struct PromptsPanel: View {
     @State private var editContent     = ""
     private var isNew: Bool { pendingNewID == selectedID && selectedID != nil }
 
+    private static let mcpBuiltInID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    private var isBuiltIn: Bool { selectedID == Self.mcpBuiltInID }
+
+    private var builtInItems: [PromptItem] {
+        let path = appSettings.resolvedMCPServerPath ?? "<mcp-server-path>"
+        return [
+            PromptItem(id: Self.mcpBuiltInID,
+                       name: "MCP: srota setup",
+                       description: "Location and run command for the srota MCP server",
+                       content: "The srota MCP server is located at:\n\(path)\n\nTo run it:\nbun \"\(path)\"\n\nAdd it as an MCP server in your agent config with:\n  command: bun\n  args: [\"\(path)\"]"),
+        ]
+    }
+
     private var filtered: [PromptItem] {
-        guard !searchText.isEmpty else { return store.items }
-        return store.items.filter {
+        let all = builtInItems + store.items
+        guard !searchText.isEmpty else { return all }
+        return all.filter {
             $0.name.localizedCaseInsensitiveContains(searchText) ||
             $0.description.localizedCaseInsensitiveContains(searchText)
         }
@@ -79,7 +94,8 @@ struct PromptsPanel: View {
             ScrollView {
                 LazyVStack(spacing: 2) {
                     ForEach(filtered) { item in
-                        PromptListRow(item: item, isSelected: selectedID == item.id) {
+                        let builtIn = item.id == Self.mcpBuiltInID
+                        PromptListRow(item: item, isSelected: selectedID == item.id, isBuiltIn: builtIn) {
                             loadItem(item)
                         }
                     }
@@ -98,21 +114,43 @@ struct PromptsPanel: View {
         if selectedID != nil {
             VStack(alignment: .leading, spacing: 0) {
                 // Name
-                TextField("Name", text: $editName)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Color.ptLabel)
-                .padding(.horizontal, 20)
-                .padding(.top, 20)
-                .padding(.bottom, 6)
+                if isBuiltIn {
+                    HStack(spacing: 6) {
+                        Text(editName)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(Color.ptLabel)
+                        Image(systemName: "lock.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color.ptMuted)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 20)
+                    .padding(.bottom, 6)
+                } else {
+                    TextField("Name", text: $editName)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Color.ptLabel)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 20)
+                    .padding(.bottom, 6)
+                }
 
                 // Description
-                TextField("Short description…", text: $editDescription)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color.ptMuted)
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 12)
+                if isBuiltIn {
+                    Text(editDescription)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.ptMuted)
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 12)
+                } else {
+                    TextField("Short description…", text: $editDescription)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.ptMuted)
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 12)
+                }
 
                 Rectangle().fill(Color.ptBorder).frame(height: 1)
 
@@ -131,27 +169,29 @@ struct PromptsPanel: View {
                 Rectangle().fill(Color.ptBorder).frame(height: 1)
 
                 // Footer
-                HStack {
-                    if !isNew {
-                        Button("Delete") {
-                            if let id = selectedID { store.delete(id: id); selectedID = nil }
+                if !isBuiltIn {
+                    HStack {
+                        if !isNew {
+                            Button("Delete") {
+                                if let id = selectedID { store.delete(id: id); selectedID = nil }
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.red.opacity(0.7))
                         }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color.red.opacity(0.7))
+                        Spacer()
+                        Button("Save", action: saveEdit)
+                            .buttonStyle(.plain)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.ptAccent)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 6)
+                            .background(Color.ptAccent.opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
-                    Spacer()
-                    Button("Save", action: saveEdit)
-                        .buttonStyle(.plain)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.ptAccent)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 6)
-                        .background(Color.ptAccent.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
                 }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.ptBg)
@@ -186,7 +226,7 @@ struct PromptsPanel: View {
     }
 
     private func saveEdit() {
-        guard let id = selectedID else { return }
+        guard let id = selectedID, !isBuiltIn else { return }
         let item = PromptItem(id: id, name: editName, description: editDescription, content: editContent)
         if isNew {
             store.add(item)
@@ -202,6 +242,7 @@ struct PromptsPanel: View {
 private struct PromptListRow: View {
     let item: PromptItem
     let isSelected: Bool
+    let isBuiltIn: Bool
     let onSelect: () -> Void
     @State private var hovered = false
 
@@ -216,6 +257,10 @@ private struct PromptListRow: View {
                     Spacer()
                     if hovered && !item.content.isEmpty {
                         CopyButton(text: item.content)
+                    } else if isBuiltIn {
+                        Image(systemName: "lock.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color.ptMuted.opacity(0.5))
                     }
                 }
                 if !item.description.isEmpty {
