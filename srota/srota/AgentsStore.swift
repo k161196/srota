@@ -40,6 +40,27 @@ Use `--repo OWNER/REPO` when the user wants to target a specific repository.
 
     static let githubIssuesFirstMessage = "Hello! What would you like to do with GitHub issues today?"
 
+    static let jiraIssuesSystemPrompt = """
+You are a Jira Issues Agent with full access to the `jira` CLI tool (ankitpokhrel/jira-cli).
+
+When you start, greet the user and ask what they'd like to do with Jira issues.
+
+You can help with:
+- **List issues**: `jira issue list` (supports -s status, -y priority, -a assignee, -l label, --created, --updated filters)
+- **View an issue**: `jira issue view <KEY>`
+- **Create an issue**: `jira issue create` (with --summary, --body, --type, --priority, --assignee, --label)
+- **Edit an issue**: `jira issue edit <KEY>` (--summary, --body, --priority, --assignee, --label)
+- **Move / transition**: `jira issue move <KEY>` to change status
+- **Comment**: `jira issue comment add <KEY>`
+- **Link issues**: `jira issue link <KEY> <TARGET>`
+- **Raw JQL**: `jira issue list -q"<JQL>"` for advanced queries
+
+Common flags: `-p PROJECT` to target a project, `--plain --no-headers` for scriptable output, `--raw` for JSON.
+Always confirm destructive or irreversible actions before executing.
+"""
+
+    static let jiraIssuesFirstMessage = "Hello! What would you like to do with Jira issues today?"
+
     init() { loadEnsureBuiltIns() }
 
     func load() {
@@ -99,37 +120,58 @@ Use `--repo OWNER/REPO` when the user wants to target a specific repository.
 
     func resetToDefault(agent: AgentItem) {
         guard agent.isBuiltIn else { return }
-        // Only github issues agent is built-in for now
-        saveSystemPrompt(Self.githubIssuesSystemPrompt, to: agent.instructionsPath)
-        if let path = agent.firstMessagePath {
-            saveFirstMessage(Self.githubIssuesFirstMessage, to: path)
+        if agent.name == "Github Issues Agent" {
+            saveSystemPrompt(Self.githubIssuesSystemPrompt, to: agent.instructionsPath)
+            if let path = agent.firstMessagePath { saveFirstMessage(Self.githubIssuesFirstMessage, to: path) }
+        } else if agent.name == "Jira Issues Agent" {
+            saveSystemPrompt(Self.jiraIssuesSystemPrompt, to: agent.instructionsPath)
+            if let path = agent.firstMessagePath { saveFirstMessage(Self.jiraIssuesFirstMessage, to: path) }
         }
     }
 
     // Ensures built-in agents always exist, even after JSON corruption or first launch
     private func loadEnsureBuiltIns() {
         load()
-        if !agents.contains(where: { $0.isBuiltIn }) {
-            seedBuiltIns()
+        try? FileManager.default.createDirectory(atPath: Self.promptsDir, withIntermediateDirectories: true)
+        if !agents.contains(where: { $0.name == "Github Issues Agent" && $0.isBuiltIn }) {
+            seedGitHub()
+        }
+        if !agents.contains(where: { $0.name == "Jira Issues Agent" && $0.isBuiltIn }) {
+            seedJira()
         }
     }
 
-    private func seedBuiltIns() {
-        try? FileManager.default.createDirectory(atPath: Self.promptsDir, withIntermediateDirectories: true)
+    private func seedGitHub() {
         let sysPath   = Self.promptsDir + "/github_issues_system.md"
         let firstPath = Self.promptsDir + "/github_issues_first.md"
         try? Self.githubIssuesSystemPrompt.write(toFile: sysPath,   atomically: true, encoding: .utf8)
         try? Self.githubIssuesFirstMessage.write(toFile: firstPath, atomically: true, encoding: .utf8)
-        let github = AgentItem(
+        agents.insert(AgentItem(
             name: "Github Issues Agent",
             description: "Manage GitHub issues via gh CLI",
             instructionsPath: sysPath,
             firstMessagePath: firstPath,
             runInTempDir: false,
             isBuiltIn: true
-        )
-        // Prepend so built-ins always appear first
-        agents.insert(github, at: 0)
+        ), at: 0)
+        save()
+    }
+
+    private func seedJira() {
+        let sysPath   = Self.promptsDir + "/jira_issues_system.md"
+        let firstPath = Self.promptsDir + "/jira_issues_first.md"
+        try? Self.jiraIssuesSystemPrompt.write(toFile: sysPath,   atomically: true, encoding: .utf8)
+        try? Self.jiraIssuesFirstMessage.write(toFile: firstPath, atomically: true, encoding: .utf8)
+        // Insert after GitHub (index 1) so built-ins stay grouped at top
+        let insertIdx = agents.firstIndex(where: { $0.name == "Github Issues Agent" && $0.isBuiltIn }).map { $0 + 1 } ?? 0
+        agents.insert(AgentItem(
+            name: "Jira Issues Agent",
+            description: "Manage Jira issues via jira CLI",
+            instructionsPath: sysPath,
+            firstMessagePath: firstPath,
+            runInTempDir: false,
+            isBuiltIn: true
+        ), at: insertIdx)
         save()
     }
 }
