@@ -73,6 +73,7 @@ private extension Color {
 struct TopNavBar: View {
     @Binding var selected: ManagementTab
     var onSettings: () -> Void = {}
+    var onPrompts: () -> Void = {}
     var onPresetLaunch: (TerminalPreset) -> Void = { _ in }
     @Environment(PresetsStore.self) private var presetsStore
 
@@ -97,6 +98,14 @@ struct TopNavBar: View {
             }
 
             Spacer()
+
+            Button(action: onPrompts) {
+                Image(systemName: "note.text")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.mgMuted)
+                    .frame(width: 32, height: 36)
+            }
+            .buttonStyle(.plain)
 
             Button(action: onSettings) {
                 Image(systemName: "gear")

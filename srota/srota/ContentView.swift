@@ -631,6 +631,7 @@ struct ContentView: View {
     @State private var managementTab: ManagementTab = .workspaces
     @State private var restoredSessions = false
     @State private var showSettings = false
+    @State private var showPrompts = false
     @State private var agentEventTask: Task<Void, Never>? = nil
 
     var body: some View {
@@ -638,6 +639,7 @@ struct ContentView: View {
         TopNavBar(
             selected: $managementTab,
             onSettings: { showSettings.toggle() },
+            onPrompts: { showPrompts.toggle() },
             onPresetLaunch: { preset in
                 let filtered = preset.commands.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
                 guard !filtered.isEmpty else { return }
@@ -812,6 +814,11 @@ struct ContentView: View {
         }
         if showSettings {
             SettingsPanel(isPresented: $showSettings)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(red: 0.067, green: 0.067, blue: 0.075))
+        }
+        if showPrompts {
+            PromptsPanel(isPresented: $showPrompts)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(red: 0.067, green: 0.067, blue: 0.075))
         }
