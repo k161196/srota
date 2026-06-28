@@ -16,7 +16,7 @@ struct PromptItem: Codable, Identifiable {
 final class PromptsStore {
     var items: [PromptItem] = []
 
-    private static let path = NSHomeDirectory() + "/.srota/prompts.json"
+    private static let path = NSHomeDirectory() + "/\(Srota.dir)/prompts.json"
 
     init() { load() }
 
@@ -28,7 +28,7 @@ final class PromptsStore {
     }
 
     func save() {
-        let dir = NSHomeDirectory() + "/.srota"
+        let dir = NSHomeDirectory() + "/\(Srota.dir)"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         guard let data = try? JSONEncoder().encode(items) else { return }
         try? data.write(to: URL(fileURLWithPath: Self.path))

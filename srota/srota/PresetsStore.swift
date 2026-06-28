@@ -12,7 +12,7 @@ struct TerminalPreset: Codable, Identifiable {
 final class PresetsStore {
     var presets: [TerminalPreset] = []
 
-    private static let path = NSHomeDirectory() + "/.srota/presets.json"
+    private static let path = NSHomeDirectory() + "/\(Srota.dir)/presets.json"
 
     init() { load() }
 
@@ -24,7 +24,7 @@ final class PresetsStore {
     }
 
     func save() {
-        let dir = NSHomeDirectory() + "/.srota"
+        let dir = NSHomeDirectory() + "/\(Srota.dir)"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         guard let data = try? JSONEncoder().encode(presets) else { return }
         try? data.write(to: URL(fileURLWithPath: Self.path))

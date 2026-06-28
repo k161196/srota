@@ -1,13 +1,19 @@
 import Foundation
 import Observation
 
+#if DEBUG
+enum Srota { static let dir = ".srota-debug" }
+#else
+enum Srota { static let dir = ".srota" }
+#endif
+
 @Observable @MainActor
 final class AppSettings {
     var baseWorkingDirectory: String?
     var mcpServerPath: String?
     var shortcutPrefix: String = "ctrl+b"
 
-    private static let path = NSHomeDirectory() + "/.srota/settings.toml"
+    private static let path = NSHomeDirectory() + "/\(Srota.dir)/settings.toml"
 
     init() { load() }
 
@@ -26,7 +32,7 @@ final class AppSettings {
     }
 
     func save() {
-        let dir = NSHomeDirectory() + "/.srota"
+        let dir = NSHomeDirectory() + "/\(Srota.dir)"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         var lines: [String] = []
         if let d = baseWorkingDirectory { lines.append("base_working_directory = \"\(d)\"") }

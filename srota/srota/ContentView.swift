@@ -14,14 +14,14 @@ private func resolveCWD(_ raw: String?) -> String? {
 }
 
 private func makePaneLauncher(tabID: String, paneID: String) -> String {
-    let dir = NSHomeDirectory() + "/.srota/launchers"
+    let dir = NSHomeDirectory() + "/\(Srota.dir)/launchers"
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     let path = dir + "/\(tabID)-\(paneID).sh"
     let script = """
 #!/bin/sh
 export SROTA_TAB_ID="\(tabID)"
 export SROTA_PANE_ID="\(paneID)"
-export ZDOTDIR="$HOME/.srota"
+export ZDOTDIR="$HOME/\(Srota.dir)"
 exec /bin/zsh -i "$@"
 """
     try? script.write(toFile: path, atomically: true, encoding: .utf8)
@@ -30,7 +30,7 @@ exec /bin/zsh -i "$@"
 }
 
 private func makeLazygitLauncher() -> String {
-    let dir = NSHomeDirectory() + "/.srota/launchers"
+    let dir = NSHomeDirectory() + "/\(Srota.dir)/launchers"
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     let path = dir + "/lazygit.sh"
     let script = "#!/bin/sh\nexport PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"\nexec lazygit\n"
@@ -625,6 +625,7 @@ struct ContentView: View {
     @Environment(WorkspaceDB.self) private var db
     @Environment(FeatureAgentFocus.self) private var agentFocus
     @Environment(KeyboardShortcutManager.self) private var shortcuts
+    @Environment(PresetsStore.self) private var presetsStore
     @State private var sidebarVisible = true
     @State private var sidebarWidth: CGFloat = 220
     @State private var showBaseDirectoryPicker = false
@@ -632,6 +633,7 @@ struct ContentView: View {
     @State private var restoredSessions = false
     @State private var showSettings = false
     @State private var showPrompts = false
+    @State private var agentToLaunch: AgentItem? = nil
     @State private var agentEventTask: Task<Void, Never>? = nil
 
     var body: some View {
@@ -649,7 +651,8 @@ struct ContentView: View {
                 } else {
                     manager.selectedWorkspace?.selectedTab?.focusedViewState.send(cmd)
                 }
-            }
+            },
+            onAgentSelected: { agentToLaunch = $0 }
         )
         ZStack {
         HStack(spacing: 0) {
@@ -887,6 +890,69 @@ struct ContentView: View {
         }
         } // end ZStack
         } // end VStack
+        .sheet(item: $agentToLaunch) { agent in
+            AgentLaunchSheet(agent: agent) { systemPrompt, firstMessage, preset in
+                launchAgent(agent: agent, systemPrompt: systemPrompt, firstMessage: firstMessage, preset: preset)
+            }
+        }
+    }
+
+    private func launchAgent(agent: AgentItem, systemPrompt: String, firstMessage: String, preset: TerminalPreset?) {
+        // sheet preset wins; fall back to agent's saved presetID so it applies even if user didn't touch the picker
+        let resolvedPreset = preset ?? presetsStore.presets.first { $0.id == agent.presetID }
+        let base = resolvedPreset?.commands.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                         .joined(separator: " ") ?? "claude"
+        // Write system prompt to file — send() treats \n as Enter, so inlining a multiline prompt breaks the command
+        let hex = String(UUID().uuidString.filter { $0.isHexDigit }.prefix(6).lowercased())
+        let launchersDir = NSHomeDirectory() + "/\(Srota.dir)/launchers"
+        try? FileManager.default.createDirectory(atPath: launchersDir, withIntermediateDirectories: true)
+        let promptFile = launchersDir + "/agent-prompt-\(hex).txt"
+        try? systemPrompt.write(toFile: promptFile, atomically: true, encoding: .utf8)
+
+        // ponytail: first message uses echo with basic escaping; use file approach if messages contain $vars/backticks
+        let escapedFirst = firstMessage
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let cmd = firstMessage.isEmpty
+            ? "__SROTA_SP=$(cat '\(promptFile)'); \(base) --system-prompt \"$__SROTA_SP\"\n"
+            : "__SROTA_SP=$(cat '\(promptFile)'); echo \"\(escapedFirst)\" | \(base) --system-prompt \"$__SROTA_SP\"\n"
+
+        if agent.runInTempDir {
+            let df = DateFormatter(); df.dateFormat = "yyyy_MM_dd"
+            let dateStr = df.string(from: Date())
+            let slug = agent.name.lowercased().replacingOccurrences(of: " ", with: "_")
+            let sessionDir = NSHomeDirectory() + "/\(Srota.dir)/sessions/agents/\(slug)/\(dateStr)_\(hex)"
+            try? FileManager.default.createDirectory(atPath: sessionDir, withIntermediateDirectories: true)
+
+            struct Meta: Encodable {
+                var agentName: String; var systemPrompt: String; var firstMessage: String
+                var presetName: String?; var launchedAt: String
+            }
+            let meta = Meta(agentName: agent.name, systemPrompt: systemPrompt, firstMessage: firstMessage,
+                            presetName: resolvedPreset?.name,
+                            launchedAt: ISO8601DateFormatter().string(from: Date()))
+            if let data = try? JSONEncoder().encode(meta) {
+                try? data.write(to: URL(fileURLWithPath: sessionDir + "/agent.json"))
+            }
+
+            let displayDate = dateStr.replacingOccurrences(of: "_", with: "-")
+            let wsName = "\(agent.name), \(displayDate), \(hex)"
+            let folder = manager.folder(named: "Agents", tag: "agents")
+            manager.addWorkspace(colorScheme: colorScheme, inFolder: folder.id,
+                                 workingDirectory: sessionDir, name: wsName)
+            saveLayout()
+        } else {
+            let cwd = resolveCWD(manager.selectedWorkspace?.selectedTab?.focusedViewState.workingDirectory)
+                ?? manager.selectedWorkspace?.selectedTab?.statusPath
+            manager.selectedWorkspace?.addTab(colorScheme: colorScheme, workingDirectory: cwd)
+            manager.selectedWorkspace?.selectedTab?.customName = agent.name
+            saveLayout()
+        }
+
+        // ponytail: fixed delay for shell init; replace with terminal-ready signal if flaky
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            manager.selectedWorkspace?.selectedTab?.focusedViewState.send(cmd)
+        }
     }
 
     private func registerShortcutActions() {
@@ -940,7 +1006,7 @@ struct ContentView: View {
                             isPrimary: i == 0,
                             lx: Double(layout.x), ly: Double(layout.y),
                             lw: Double(layout.w), lh: Double(layout.h),
-                            initialCWD: pane.initialCWD ?? "",
+                            initialCWD: resolveCWD(pane.viewState.workingDirectory) ?? pane.initialCWD ?? "",
                             position: i))
                     }
                 }
@@ -1003,7 +1069,7 @@ struct ContentView: View {
     private func startAgentEventMonitor() {
         guard agentEventTask == nil else { return }
         agentEventTask = Task {
-            let url = URL(fileURLWithPath: NSHomeDirectory() + "/.srota/agent-events.jsonl")
+            let url = URL(fileURLWithPath: NSHomeDirectory() + "/\(Srota.dir)/agent-events.jsonl")
             let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
             var processedCount = existing.split(separator: "\n", omittingEmptySubsequences: true).count
             while !Task.isCancelled {

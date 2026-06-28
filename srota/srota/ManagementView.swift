@@ -75,7 +75,10 @@ struct TopNavBar: View {
     var onSettings: () -> Void = {}
     var onPrompts: () -> Void = {}
     var onPresetLaunch: (TerminalPreset) -> Void = { _ in }
+    var onAgentSelected: (AgentItem) -> Void = { _ in }
     @Environment(PresetsStore.self) private var presetsStore
+    @Environment(AgentsStore.self)  private var agentsStore
+    @State private var showAgentPicker = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -98,6 +101,20 @@ struct TopNavBar: View {
             }
 
             Spacer()
+
+            Button(action: { showAgentPicker.toggle() }) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.mgMuted)
+                    .frame(width: 32, height: 36)
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $showAgentPicker, arrowEdge: .bottom) {
+                AgentPickerPopover(agents: agentsStore.agents) { agent in
+                    showAgentPicker = false
+                    onAgentSelected(agent)
+                }
+            }
 
             Button(action: onPrompts) {
                 Image(systemName: "note.text")
@@ -1738,7 +1755,7 @@ private struct RepoBranchSheet: View {
 // MARK: - Issues panel
 
 private func agentSessionDir(type: String, id: String) -> String {
-    let dir = NSHomeDirectory() + "/.srota/sessions/\(type)/\(id)"
+    let dir = NSHomeDirectory() + "/\(Srota.dir)/sessions/\(type)/\(id)"
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     return dir
 }

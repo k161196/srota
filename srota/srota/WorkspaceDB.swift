@@ -123,7 +123,7 @@ final class WorkspaceDB {
     private var sqlWhere: String { "WH" + "ERE" }
 
     init() {
-        let dir = NSHomeDirectory() + "/.srota"
+        let dir = NSHomeDirectory() + "/\(Srota.dir)"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         #if DEBUG
         let dbName = "srota_debug.db"

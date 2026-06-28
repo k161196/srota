@@ -13,7 +13,7 @@ private extension Color {
 
 // MARK: - Panel
 
-private enum SettingsSection { case terminal, shortcuts }
+private enum SettingsSection { case terminal, shortcuts, agents }
 
 struct SettingsPanel: View {
     @Binding var isPresented: Bool
@@ -46,6 +46,9 @@ struct SettingsPanel: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .shortcuts:
                 ShortcutsSettingsView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .agents:
+                AgentsSettingsView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -104,6 +107,8 @@ private struct SettingsSidebar: View {
                 .onTapGesture { section = .terminal }
             SidebarRow(label: "Shortcuts", icon: "keyboard", isSelected: section == .shortcuts)
                 .onTapGesture { section = .shortcuts }
+            SidebarRow(label: "Agents", icon: "sparkles", isSelected: section == .agents)
+                .onTapGesture { section = .agents }
 
             Spacer()
         }
@@ -521,5 +526,256 @@ private struct STField: View {
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.stBorder))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
         }
+    }
+}
+
+// MARK: - Agents settings
+
+private struct AgentsSettingsView: View {
+    @Environment(AgentsStore.self)  private var store
+    @Environment(PresetsStore.self) private var presetsStore
+
+    @State private var selectedID:   UUID? = nil
+    @State private var pendingNewID: UUID? = nil
+    @State private var editName         = ""
+    @State private var editDescription  = ""
+    @State private var editSystemPrompt  = ""
+    @State private var editFirstMessage  = ""
+    @State private var editPresetID:    UUID? = nil
+    @State private var editRunInTempDir = false
+    private var isNew: Bool { pendingNewID == selectedID && selectedID != nil }
+
+    private var selected: AgentItem? { store.agents.first { $0.id == selectedID } }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // Agent list
+            VStack(spacing: 0) {
+                HStack {
+                    Text("Agents")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.stLabel)
+                    Spacer()
+                    Button(action: startNew) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.stAccent)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+
+                Rectangle().fill(Color.stBorder).frame(height: 1)
+
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(store.agents) { agent in
+                            AgentListRow(agent: agent, isSelected: selectedID == agent.id) {
+                                load(agent)
+                            }
+                        }
+                    }
+                    .padding(8)
+                }
+            }
+            .frame(width: 200)
+
+            Rectangle().fill(Color.stBorder).frame(width: 1)
+
+            // Detail / editor
+            if selectedID != nil {
+                VStack(alignment: .leading, spacing: 0) {
+                    TextField("Name", text: $editName)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.stLabel)
+                        .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 4)
+
+                    TextField("Short description…", text: $editDescription)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.stMuted)
+                        .padding(.horizontal, 20).padding(.bottom, 10)
+
+                    Rectangle().fill(Color.stBorder).frame(height: 1)
+
+                    // System Prompt
+                    HStack {
+                        Text("System Prompt")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Color.stMuted)
+                        Spacer()
+                        if selected?.isBuiltIn == true {
+                            Button("Reset to default") {
+                                if let agent = selected {
+                                    store.resetToDefault(agent: agent)
+                                    editSystemPrompt = store.systemPrompt(for: agent)
+                                    editFirstMessage = store.firstMessage(for: agent)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.stAccent)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.top, 10)
+                    .padding(.bottom, 2)
+
+                    TextEditor(text: $editSystemPrompt)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(Color.stLabel)
+                        .scrollContentBackground(.hidden)
+                        .background(Color.clear)
+                        .padding(.horizontal, 10)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    Rectangle().fill(Color.stBorder).frame(height: 1)
+
+                    // First Message
+                    Text("First Message")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.stMuted)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 10)
+                        .padding(.bottom, 2)
+
+                    TextEditor(text: $editFirstMessage)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.stLabel)
+                        .scrollContentBackground(.hidden)
+                        .background(Color.clear)
+                        .padding(.horizontal, 10)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 80)
+
+                    Rectangle().fill(Color.stBorder).frame(height: 1)
+
+                    HStack(spacing: 10) {
+                        // Preset picker
+                        if !presetsStore.presets.isEmpty {
+                            Menu {
+                                ForEach(presetsStore.presets) { p in
+                                    Button(p.name) { editPresetID = p.id }
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Text(presetsStore.presets.first { $0.id == editPresetID }?.name ?? "Select preset")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(editPresetID == nil ? Color.stMuted : Color.stLabel)
+                                    Image(systemName: "chevron.up.chevron.down")
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(Color.stMuted)
+                                }
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .background(Color.stSurface)
+                                .clipShape(RoundedRectangle(cornerRadius: 5))
+                                .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.stBorder))
+                            }
+                            .menuStyle(.borderlessButton).fixedSize()
+                        }
+
+                        Toggle("Temp dir", isOn: $editRunInTempDir)
+                            .toggleStyle(.switch)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.stMuted)
+                            .fixedSize()
+
+                        Spacer()
+
+                        if !isNew && selected?.isBuiltIn != true {
+                            Button("Delete") {
+                                if let id = selectedID { store.delete(id: id); selectedID = nil }
+                            }
+                            .buttonStyle(.plain).font(.system(size: 12))
+                            .foregroundStyle(Color.red.opacity(0.7))
+                        }
+
+                        Button("Save", action: saveEdit)
+                            .buttonStyle(.plain)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.stAccent)
+                            .padding(.horizontal, 14).padding(.vertical, 5)
+                            .background(Color.stAccent.opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .padding(.horizontal, 20).padding(.vertical, 12)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                VStack {
+                    Text("Select or add an agent")
+                        .font(.system(size: 13)).foregroundStyle(Color.stMuted)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .background(Color.stBg)
+    }
+
+    private func load(_ agent: AgentItem) {
+        pendingNewID    = nil
+        selectedID      = agent.id
+        editName        = agent.name
+        editDescription = agent.description
+        editSystemPrompt = store.systemPrompt(for: agent)
+        editFirstMessage = store.firstMessage(for: agent)
+        editPresetID     = agent.presetID
+        editRunInTempDir = agent.runInTempDir
+    }
+
+    private func startNew() {
+        let id       = UUID()
+        pendingNewID = id
+        selectedID   = id
+        editName = ""; editDescription = ""
+        editSystemPrompt = ""; editFirstMessage = ""
+        editPresetID = nil; editRunInTempDir = false
+    }
+
+    private func saveEdit() {
+        guard let id = selectedID else { return }
+        let label = editName.isEmpty ? id.uuidString : editName
+        let existing = store.agents.first { $0.id == id }
+        let sysPath   = existing?.instructionsPath  ?? store.newSystemPromptPath(for: label)
+        let firstPath = existing?.firstMessagePath  ?? (editFirstMessage.isEmpty ? nil : store.newFirstMessagePath(for: label))
+        store.saveSystemPrompt(editSystemPrompt, to: sysPath)
+        if let fp = firstPath { store.saveFirstMessage(editFirstMessage, to: fp) }
+        let item = AgentItem(id: id, name: editName, description: editDescription,
+                             instructionsPath: sysPath,
+                             firstMessagePath: editFirstMessage.isEmpty ? nil : (firstPath ?? store.newFirstMessagePath(for: label)),
+                             presetID: editPresetID,
+                             runInTempDir: editRunInTempDir,
+                             isBuiltIn: existing?.isBuiltIn ?? false)
+        if isNew { store.add(item); pendingNewID = nil } else { store.update(item) }
+    }
+}
+
+private struct AgentListRow: View {
+    let agent: AgentItem
+    let isSelected: Bool
+    let onSelect: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(agent.name.isEmpty ? "Untitled" : agent.name)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color.stLabel).lineLimit(1)
+                if !agent.description.isEmpty {
+                    Text(agent.description)
+                        .font(.system(size: 11)).foregroundStyle(Color.stMuted).lineLimit(1)
+                }
+            }
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(isSelected ? Color.stAccent.opacity(0.12)
+                        : hovered  ? Color.white.opacity(0.05) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
     }
 }

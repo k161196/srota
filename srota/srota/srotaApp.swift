@@ -6,6 +6,7 @@ struct srotaApp: App {
     @State private var db = WorkspaceDB()
     @State private var presetsStore = PresetsStore()
     @State private var promptsStore = PromptsStore()
+    @State private var agentsStore  = AgentsStore()
     @State private var agentFocus = FeatureAgentFocus()
     @State private var issueAgentFocus = IssueAgentFocus()
     @State private var shortcuts = KeyboardShortcutManager()
@@ -19,6 +20,7 @@ struct srotaApp: App {
                 .environment(db)
                 .environment(presetsStore)
                 .environment(promptsStore)
+                .environment(agentsStore)
                 .environment(agentFocus)
                 .environment(issueAgentFocus)
                 .environment(shortcuts)
@@ -80,7 +82,7 @@ struct srotaApp: App {
 /// gets OSC 7 working-directory reporting without user setup.
 private func setupShellIntegration() {
     let home = NSHomeDirectory()
-    let dir = "\(home)/.srota"
+    let dir = "\(home)/\(Srota.dir)"
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
 
     // Sourcing order mirrors a real interactive login shell, then appends our hook.
@@ -99,7 +101,7 @@ _srota_osc7
 """
     try? zshrc.write(toFile: "\(dir)/.zshrc", atomically: true, encoding: .utf8)
 
-    let launcher = "#!/bin/sh\nexport ZDOTDIR=\"$HOME/.srota\"\nexec /bin/zsh -i \"$@\"\n"
+    let launcher = "#!/bin/sh\nexport ZDOTDIR=\"$HOME/\(Srota.dir)\"\nexec /bin/zsh -i \"$@\"\n"
     let launcherPath = "\(dir)/zsh-launcher.sh"
     try? launcher.write(toFile: launcherPath, atomically: true, encoding: .utf8)
     try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launcherPath)
