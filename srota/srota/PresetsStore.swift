@@ -6,6 +6,10 @@ struct TerminalPreset: Codable, Identifiable {
     var name: String
     var description: String = ""
     var commands: [String]
+    var systemPrompt: String = ""
+    // Flag used to pass system prompt. Empty = positional first arg (e.g. codex 'PROMPT').
+    // Non-empty = appended flag (e.g. --system-prompt for claude).
+    var systemPromptFlag: String = "--system-prompt"
 }
 
 @Observable @MainActor

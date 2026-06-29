@@ -18,6 +18,7 @@ struct WorkspaceSession: Identifiable {
     var lastCWD: String
     var lastAccessed: Int
     var isPinned: Bool
+    var directory: String = ""
 }
 
 struct TabRecord: Identifiable {
@@ -63,7 +64,7 @@ struct RepoEntry: Identifiable, Hashable {
     var id: String
     var name: String
     var url: String
-    var localPath: String
+    var defaultBranch: String
 }
 
 struct FeatureRepo: Identifiable, Hashable {
@@ -77,7 +78,6 @@ struct RepoBranch: Identifiable, Hashable {
     var id: String
     var repoID: String
     var name: String
-    var description: String
 }
 
 struct Issue: Identifiable, Hashable {
@@ -88,6 +88,17 @@ struct Issue: Identifiable, Hashable {
     var orgID: String
     var featureID: String
     var number: Int
+    var externalID: String
+    var externalURL: String
+    var source: String
+    var externalStatus: String
+}
+
+struct IssueRepo: Identifiable, Hashable {
+    var id: String
+    var issueID: String
+    var repoID: String
+    var branch: String
 }
 
 @Observable
@@ -105,6 +116,7 @@ final class WorkspaceDB {
     var featureRepos: [FeatureRepo] = []
     var repoBranches: [RepoBranch] = []
     var issues: [Issue] = []
+    var issueRepos: [IssueRepo] = []
 
     private struct ScannedBranch {
         let id: String
@@ -137,10 +149,9 @@ final class WorkspaceDB {
     }
 
     private func startDBWatcher(dbPath: String) {
-        let dir = (dbPath as NSString).deletingLastPathComponent
-        let fd = open(dir, O_EVTONLY)
+        let fd = open(dbPath, O_EVTONLY)
         guard fd >= 0 else { return }
-        let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: .main)
+        let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .extend, .attrib], queue: .main)
         src.setEventHandler { [weak self] in self?.refresh() }
         src.setCancelHandler { close(fd) }
         src.resume()
@@ -229,23 +240,15 @@ final class WorkspaceDB {
         refresh()
     }
 
-    func addRepo(name: String, url: String = "", localPath: String = "") {
-        upsert("repos", [
-            "id": UUID().uuidString,
-            "name": name,
-            "url": url,
-            "local_path": localPath
-        ])
+    func addRepo(name: String, url: String = "", defaultBranch: String = "main") {
+        let id = UUID().uuidString
+        upsert("repos", ["id": id, "name": name, "url": url, "default_branch": defaultBranch])
+        upsert("repo_branches", ["id": UUID().uuidString, "repo_id": id, "name": defaultBranch])
         refresh()
     }
 
     func updateRepo(_ repo: RepoEntry) {
-        upsert("repos", [
-            "id": repo.id,
-            "name": repo.name,
-            "url": repo.url,
-            "local_path": repo.localPath
-        ])
+        upsert("repos", ["id": repo.id, "name": repo.name, "url": repo.url, "default_branch": repo.defaultBranch])
         refresh()
     }
 
@@ -256,23 +259,13 @@ final class WorkspaceDB {
         refresh()
     }
 
-    func addRepoBranch(repoID: String, name: String, description: String = "") {
-        upsert("repo_branches", [
-            "id": UUID().uuidString,
-            "repo_id": repoID,
-            "name": name,
-            "description": description
-        ])
+    func addRepoBranch(repoID: String, name: String) {
+        upsert("repo_branches", ["id": UUID().uuidString, "repo_id": repoID, "name": name])
         refresh()
     }
 
     func updateRepoBranch(_ branch: RepoBranch) {
-        upsert("repo_branches", [
-            "id": branch.id,
-            "repo_id": branch.repoID,
-            "name": branch.name,
-            "description": branch.description
-        ])
+        upsert("repo_branches", ["id": branch.id, "repo_id": branch.repoID, "name": branch.name])
         refresh()
     }
 
@@ -296,7 +289,7 @@ final class WorkspaceDB {
         refresh()
     }
 
-    func addIssue(title: String, body: String = "", status: String = "open", orgID: String = "", featureID: String = "") {
+    func addIssue(title: String, body: String = "", status: String = "open", orgID: String = "", featureID: String = "", externalID: String = "", externalURL: String = "", source: String = "", externalStatus: String = "") {
         upsert("issues", [
             "id": UUID().uuidString,
             "title": title,
@@ -304,7 +297,11 @@ final class WorkspaceDB {
             "status": status,
             "org_id": orgID,
             "feature_id": featureID,
-            "number": String(nextNumber(in: "issues"))
+            "number": String(nextNumber(in: "issues")),
+            "external_id": externalID,
+            "external_url": externalURL,
+            "source": source,
+            "external_status": externalStatus
         ])
         refresh()
     }
@@ -317,13 +314,28 @@ final class WorkspaceDB {
             "status": issue.status,
             "org_id": issue.orgID,
             "feature_id": issue.featureID,
-            "number": String(issue.number)
+            "number": String(issue.number),
+            "external_id": issue.externalID,
+            "external_url": issue.externalURL,
+            "source": issue.source,
+            "external_status": issue.externalStatus
         ])
         refresh()
     }
 
     func deleteIssue(id: String) {
+        exec(sql("DELETE", sqlFrom, "issue_repos", sqlWhere, "issue_id = ?"), [id])
         exec(sql("DELETE", sqlFrom, "issues", sqlWhere, "id = ?"), [id])
+        refresh()
+    }
+
+    func addIssueRepo(issueID: String, repoID: String, branch: String) {
+        upsert("issue_repos", [
+            "id": UUID().uuidString,
+            "issue_id": issueID,
+            "repo_id": repoID,
+            "branch": branch
+        ])
         refresh()
     }
 
@@ -343,17 +355,20 @@ final class WorkspaceDB {
         features = rows(sql("SELECT id, project_id, name, description, number", sqlFrom, "features", "ORDER BY number")) {
             Feature(id: col($0, 0), projectID: col($0, 1), name: col($0, 2), description: col($0, 3), number: Int(sqlite3_column_int($0, 4)))
         }
-        repos = rows(sql("SELECT id, name, url, local_path", sqlFrom, "repos", "ORDER BY name")) {
-            RepoEntry(id: col($0, 0), name: col($0, 1), url: col($0, 2), localPath: col($0, 3))
+        repos = rows(sql("SELECT id, name, url, default_branch", sqlFrom, "repos", "ORDER BY name")) {
+            RepoEntry(id: col($0, 0), name: col($0, 1), url: col($0, 2), defaultBranch: col($0, 3))
         }
         featureRepos = rows(sql("SELECT id, feature_id, repo_id, branch", sqlFrom, "feature_repos", "ORDER BY branch")) {
             FeatureRepo(id: col($0, 0), featureID: col($0, 1), repoID: col($0, 2), branch: col($0, 3))
         }
-        repoBranches = rows(sql("SELECT id, repo_id, name, description", sqlFrom, "repo_branches", "ORDER BY name")) {
-            RepoBranch(id: col($0, 0), repoID: col($0, 1), name: col($0, 2), description: col($0, 3))
+        repoBranches = rows(sql("SELECT id, repo_id, name", sqlFrom, "repo_branches", "ORDER BY name")) {
+            RepoBranch(id: col($0, 0), repoID: col($0, 1), name: col($0, 2))
         }
-        issues = rows(sql("SELECT id, title, body, status, org_id, feature_id, number", sqlFrom, "issues", "ORDER BY number")) {
-            Issue(id: col($0, 0), title: col($0, 1), body: col($0, 2), status: col($0, 3), orgID: col($0, 4), featureID: col($0, 5), number: Int(sqlite3_column_int($0, 6)))
+        issues = rows(sql("SELECT id, title, body, status, org_id, feature_id, number, external_id, external_url, source, external_status", sqlFrom, "issues", "ORDER BY number")) {
+            Issue(id: col($0, 0), title: col($0, 1), body: col($0, 2), status: col($0, 3), orgID: col($0, 4), featureID: col($0, 5), number: Int(sqlite3_column_int($0, 6)), externalID: col($0, 7), externalURL: col($0, 8), source: col($0, 9), externalStatus: col($0, 10))
+        }
+        issueRepos = rows(sql("SELECT id, issue_id, repo_id, branch", sqlFrom, "issue_repos", "ORDER BY rowid")) {
+            IssueRepo(id: col($0, 0), issueID: col($0, 1), repoID: col($0, 2), branch: col($0, 3))
         }
     }
 
@@ -361,7 +376,14 @@ final class WorkspaceDB {
         execRaw("ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''")
         execRaw("ALTER TABLE features ADD COLUMN number INTEGER NOT NULL DEFAULT 0")
         execRaw("ALTER TABLE issues ADD COLUMN number INTEGER NOT NULL DEFAULT 0")
+        execRaw("ALTER TABLE issues ADD COLUMN external_id TEXT NOT NULL DEFAULT ''")
+        execRaw("ALTER TABLE issues ADD COLUMN external_url TEXT NOT NULL DEFAULT ''")
+        execRaw("ALTER TABLE issues ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+        execRaw("ALTER TABLE issues ADD COLUMN external_status TEXT NOT NULL DEFAULT ''")
+        execRaw("ALTER TABLE repos ADD COLUMN default_branch TEXT NOT NULL DEFAULT 'main'")
+        execRaw("CREATE TABLE IF NOT EXISTS issue_repos (id TEXT PRIMARY KEY, issue_id TEXT NOT NULL, repo_id TEXT NOT NULL, branch TEXT NOT NULL DEFAULT '')")
         execRaw("ALTER TABLE ws_workspaces ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")
+        execRaw("ALTER TABLE ws_workspaces ADD COLUMN directory TEXT NOT NULL DEFAULT ''")
         execRaw("UPDATE features SET number = rowid WHERE number = 0")
         execRaw("UPDATE issues SET number = rowid WHERE number = 0")
         execRaw("""
@@ -375,14 +397,17 @@ final class WorkspaceDB {
         (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', number INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS repos
         (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL DEFAULT '',
-         local_path TEXT NOT NULL DEFAULT '');
+         local_path TEXT NOT NULL DEFAULT '', default_branch TEXT NOT NULL DEFAULT 'main');
         CREATE TABLE IF NOT EXISTS feature_repos
         (id TEXT PRIMARY KEY, feature_id TEXT NOT NULL, repo_id TEXT NOT NULL, branch TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS repo_branches
         (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS issues
         (id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
-         status TEXT NOT NULL DEFAULT 'open', org_id TEXT NOT NULL DEFAULT '', feature_id TEXT NOT NULL DEFAULT '', number INTEGER NOT NULL DEFAULT 0);
+         status TEXT NOT NULL DEFAULT 'open', org_id TEXT NOT NULL DEFAULT '', feature_id TEXT NOT NULL DEFAULT '', number INTEGER NOT NULL DEFAULT 0,
+         external_id TEXT NOT NULL DEFAULT '', external_url TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', external_status TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS issue_repos
+        (id TEXT PRIMARY KEY, issue_id TEXT NOT NULL, repo_id TEXT NOT NULL, branch TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS ws_workspaces (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -457,8 +482,13 @@ final class WorkspaceDB {
             "position": String(session.position),
             "last_cwd": session.lastCWD,
             "last_accessed": String(session.lastAccessed),
-            "is_pinned": session.isPinned ? "1" : "0"
+            "is_pinned": session.isPinned ? "1" : "0",
+            "directory": session.directory
         ])
+    }
+
+    func updateWorkspaceDirectory(id: String, directory: String) {
+        exec("UPDATE ws_workspaces SET directory = ? WHERE id = ?", [directory, id])
     }
 
     func toggleWorkspacePin(id: String) {
@@ -547,7 +577,7 @@ final class WorkspaceDB {
     func loadWorkspaceSessions() -> [WorkspaceSession] {
         let all = rows("""
         SELECT id, name, folder_name, folder_tag, position,
-               last_cwd, last_accessed, is_pinned
+               last_cwd, last_accessed, is_pinned, directory
         FROM ws_workspaces ORDER BY folder_name, position
         """) { stmt in
             WorkspaceSession(
@@ -558,7 +588,8 @@ final class WorkspaceDB {
                 position: Int(sqlite3_column_int(stmt, 4)),
                 lastCWD: col(stmt, 5),
                 lastAccessed: Int(sqlite3_column_int(stmt, 6)),
-                isPinned: sqlite3_column_int(stmt, 7) != 0
+                isPinned: sqlite3_column_int(stmt, 7) != 0,
+                directory: col(stmt, 8)
             )
         }
 

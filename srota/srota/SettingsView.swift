@@ -467,6 +467,41 @@ struct PresetEditSheet: View {
                         }
                         .buttonStyle(.plain)
                     }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("System Prompt")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.stMuted)
+                        Text("Appended at launch. Shown read-only in the Prompts panel.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.stMuted.opacity(0.7))
+                        TextEditor(text: $draft.systemPrompt)
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundStyle(Color.stLabel)
+                            .scrollContentBackground(.hidden)
+                            .padding(8)
+                            .frame(minHeight: 80)
+                            .background(Color.stSurface)
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.stBorder))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("System Prompt Flag")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.stMuted)
+                        Text("Flag to pass the prompt (e.g. --system-prompt). Empty = positional first arg (e.g. codex 'PROMPT').")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.stMuted.opacity(0.7))
+                        TextField("--system-prompt", text: $draft.systemPromptFlag)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundStyle(Color.stLabel)
+                            .padding(10)
+                            .background(Color.stSurface)
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.stBorder))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
                 }
                 .padding(.horizontal, 24)
                 .padding(.bottom, 20)

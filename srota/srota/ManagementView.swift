@@ -449,6 +449,7 @@ private struct SplitPanel<T: Identifiable & Hashable, Row: View, Detail: View, F
     let items: [T]
     let emptyHint: String
     let onDelete: (T) -> Void
+    var onRefresh: (() -> Void)? = nil
     @ViewBuilder var rowContent: (T) -> Row
     @ViewBuilder var detail: (T) -> Detail
     @ViewBuilder var addForm: (Binding<Bool>) -> Form
@@ -469,6 +470,18 @@ private struct SplitPanel<T: Identifiable & Hashable, Row: View, Detail: View, F
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(Color.mgSurface).clipShape(Capsule())
                     Spacer()
+                    if let onRefresh {
+                        Button { onRefresh() } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Color.mgAccent)
+                                .frame(width: 28, height: 28)
+                                .background(Color.mgAccent.opacity(0.12))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Refresh")
+                    }
                     Button { showAdd = true } label: {
                         Image(systemName: "plus")
                             .font(.system(size: 11, weight: .semibold))
@@ -1067,13 +1080,22 @@ private struct FeaturesPanel: View {
         agentFocus.agentTabs.insert(FeatureAgentTab(id: "global", featureID: nil, tab: TerminalTab(colorScheme: colorScheme, workingDirectory: agentSessionDir(type: "features", id: "global"))), at: 0)
     }
 
+    private func repoClonePath(repoID: String) -> String? {
+        guard let base = settings.baseWorkingDirectory,
+              let repo = db.repos.first(where: { $0.id == repoID }) else { return nil }
+        if let (org, repoName) = gitURLComponents(repo.url) {
+            return "\(base)/organizations/\(org)/projects/\(repoName)/branches/\(repo.defaultBranch)"
+        }
+        return "\(base)/repos/\(repo.name)/branches/\(repo.defaultBranch)"
+    }
+
     private func openTab(for feature: Feature) {
         if agentFocus.agentTabs.contains(where: { $0.id == feature.id }) {
             agentFocus.activeTabID = feature.id
         } else {
             let cwds = db.featureRepos
                 .filter { $0.featureID == feature.id }
-                .compactMap { fr in db.repos.first { $0.id == fr.repoID }?.localPath }
+                .compactMap { fr -> String? in repoClonePath(repoID: fr.repoID) }
             let cwd = agentSessionDir(type: "features", id: String(feature.number))
             agentFocus.agentTabs.append(FeatureAgentTab(id: feature.id, featureID: feature.id, tab: TerminalTab(colorScheme: colorScheme, workingDirectory: cwd)))
             agentFocus.activeTabID = feature.id
@@ -1089,7 +1111,7 @@ private struct FeaturesPanel: View {
            let fid = tab.featureID {
             let cwds = db.featureRepos
                 .filter { $0.featureID == fid }
-                .compactMap { fr in db.repos.first { $0.id == fr.repoID }?.localPath }
+                .compactMap { fr -> String? in repoClonePath(repoID: fr.repoID) }
             cwds.forEach { removeContext(from: $0) }
         }
         agentFocus.agentTabs.removeAll { $0.id == id }
@@ -1101,7 +1123,7 @@ private struct FeaturesPanel: View {
             guard let feature = db.features.first(where: { $0.id == agentTab.featureID }) else { continue }
             let cwds = db.featureRepos
                 .filter { $0.featureID == feature.id }
-                .compactMap { fr in db.repos.first { $0.id == fr.repoID }?.localPath }
+                .compactMap { fr -> String? in repoClonePath(repoID: fr.repoID) }
             cwds.forEach { injectContext(feature: feature, into: $0) }
         }
     }
@@ -1183,6 +1205,15 @@ private struct FeaturesPanel: View {
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(Color.mgSurface).clipShape(Capsule())
                 Spacer()
+                Button { db.refresh() } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.mgMuted)
+                        .frame(width: 28, height: 28)
+                        .background(Color.mgSurface)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .help("Refresh")
                 Button { showAdd = true } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.mgAccent)
@@ -1317,6 +1348,14 @@ private struct FeatureInfoSidebar: View {
     @State private var showAddIssue = false
 
     var linkedIssues: [Issue] { db.issues.filter { $0.featureID == feature.id } }
+    var linkedRepos: [(repo: RepoEntry, branch: String)] {
+        db.featureRepos
+            .filter { $0.featureID == feature.id }
+            .compactMap { fr in
+                guard let repo = db.repos.first(where: { $0.id == fr.repoID }) else { return nil }
+                return (repo, fr.branch)
+            }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1357,6 +1396,34 @@ private struct FeatureInfoSidebar: View {
                             .background(Color.mgSurface)
                             .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
                             .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+
+                    let repos = linkedRepos
+                    if !repos.isEmpty {
+                        DetailRow(label: "Repos") {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(repos, id: \.repo.id) { link in
+                                    HStack(spacing: 6) {
+                                        Text(link.repo.name)
+                                            .font(.system(size: 12, weight: .medium))
+                                            .foregroundStyle(Color.mgLabel)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                        Spacer(minLength: 4)
+                                        if !link.branch.isEmpty {
+                                            Text(link.branch)
+                                                .font(.system(size: 10, design: .monospaced))
+                                                .foregroundStyle(Color.mgMuted)
+                                                .lineLimit(1)
+                                                .truncationMode(.middle)
+                                        }
+                                    }
+                                    .padding(.horizontal, 8).padding(.vertical, 6)
+                                    .background(Color.mgSurface)
+                                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                                }
+                            }
+                        }
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
@@ -1490,36 +1557,49 @@ private struct AddIssueToFeatureSheet: View {
     }
 }
 
+// Parses git@github.com:org/repo.git or https://github.com/org/repo[.git]
+private func gitURLComponents(_ url: String) -> (org: String, repo: String)? {
+    var s = url
+    for prefix in ["git@github.com:", "https://github.com/", "http://github.com/"] {
+        if s.hasPrefix(prefix) { s = String(s.dropFirst(prefix.count)); break }
+    }
+    s = s.replacingOccurrences(of: ".git", with: "")
+    let parts = s.split(separator: "/", maxSplits: 1).map(String.init)
+    guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
+    return (parts[0], parts[1])
+}
+
 // MARK: - Repos panel
 
 private struct ReposPanel: View {
     @Environment(WorkspaceDB.self) var db
-    @State private var newName = ""
-    @State private var newURL  = ""
-    @State private var newPath = ""
+    @State private var newName          = ""
+    @State private var newURL           = ""
+    @State private var newDefaultBranch = "main"
 
     var body: some View {
         SplitPanel(
             title: "Repos",
             items: db.repos,
             emptyHint: "No repos — press +",
-            onDelete: { db.deleteRepo(id: $0.id) }
+            onDelete: { db.deleteRepo(id: $0.id) },
+            onRefresh: { db.refresh() }
         ) { repo in
             VStack(alignment: .leading, spacing: 2) {
                 RowPrimary(text: repo.name)
-                let sub = [repo.url, repo.localPath].filter { !$0.isEmpty }.first ?? ""
+                let sub = repo.url.isEmpty ? repo.defaultBranch : repo.url
                 if !sub.isEmpty { RowSecondary(text: sub) }
             }
         } detail: { repo in
             RepoDetailView(repo: repo, db: db)
         } addForm: { isPresented in
             AddSheet(title: "New Repo", isPresented: isPresented) {
-                db.addRepo(name: newName, url: newURL, localPath: newPath)
-                newName = ""; newURL = ""; newPath = ""
+                db.addRepo(name: newName, url: newURL, defaultBranch: newDefaultBranch)
+                newName = ""; newURL = ""; newDefaultBranch = "main"
             } content: {
                 MGField(label: "Name", text: $newName)
                 MGField(label: "Git URL", text: $newURL)
-                MGField(label: "Local path (optional)", text: $newPath)
+                MGField(label: "Default branch", text: $newDefaultBranch)
             }
         }
     }
@@ -1528,23 +1608,24 @@ private struct ReposPanel: View {
 private struct RepoDetailView: View {
     let repo: RepoEntry
     let db: WorkspaceDB
-    @State private var name = ""
-    @State private var repoURL = ""
-    @State private var localPath = ""
+    @Environment(AppSettings.self) var settings
+    @State private var name          = ""
+    @State private var repoURL       = ""
+    @State private var defaultBranch = ""
     @State private var showAddBranch = false
-    @State private var editingBranch: RepoBranch?
+    @State private var cloningBranch: String? = nil
 
     var branches: [RepoBranch] { db.repoBranches.filter { $0.repoID == repo.id } }
 
     var body: some View {
         EditDetailScaffold(heading: repo.name) {
             var updated = repo
-            updated.name = name; updated.url = repoURL; updated.localPath = localPath
+            updated.name = name; updated.url = repoURL; updated.defaultBranch = defaultBranch
             db.updateRepo(updated)
         } content: {
             MGField(label: "Name", text: $name)
             MGField(label: "Git URL", text: $repoURL)
-            MGField(label: "Local path", text: $localPath)
+            MGField(label: "Default branch", text: $defaultBranch)
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
@@ -1552,6 +1633,12 @@ private struct RepoDetailView: View {
                         .font(.system(size: 10, weight: .medium)).tracking(0.8)
                         .foregroundStyle(Color.mgMuted)
                     Spacer()
+                    if !repoURL.isEmpty {
+                        Button("Fetch") { fetchBranches() }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11)).foregroundStyle(Color.mgAccent)
+                            .help("Fetch branches from remote")
+                    }
                     Button { showAddBranch = true } label: {
                         Image(systemName: "plus")
                             .font(.system(size: 10, weight: .semibold))
@@ -1563,30 +1650,39 @@ private struct RepoDetailView: View {
                     .buttonStyle(.plain)
                 }
                 if branches.isEmpty {
-                    Text("No branches — press + to add")
+                    Text("No branches — press + or Fetch")
                         .font(.system(size: 12)).foregroundStyle(Color.mgMuted)
                 } else {
                     VStack(spacing: 0) {
                         ForEach(branches) { branch in
+                            let clonePath = branchPath(branch.name)
+                            let isCloned = clonePath.map { FileManager.default.fileExists(atPath: $0) } ?? false
                             HStack(spacing: 8) {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(branch.name)
                                         .font(.system(size: 12, design: .monospaced))
                                         .foregroundStyle(Color.mgLabel).lineLimit(1)
-                                    if !branch.description.isEmpty {
-                                        Text(branch.description.components(separatedBy: "\n").first ?? "")
-                                            .font(.system(size: 11))
-                                            .foregroundStyle(Color.mgMuted).lineLimit(1)
+                                    if let p = clonePath {
+                                        Text(p)
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(isCloned ? Color.mgAccent : Color.mgMuted)
+                                            .lineLimit(1)
                                     }
                                 }
                                 Spacer()
-                                Button { editingBranch = branch } label: {
-                                    Image(systemName: "pencil")
-                                        .font(.system(size: 9)).foregroundStyle(Color.mgMuted)
-                                        .frame(width: 20, height: 20)
+                                if cloningBranch == branch.name {
+                                    ProgressView().scaleEffect(0.6).frame(width: 28)
+                                } else if isCloned {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 12)).foregroundStyle(Color.mgAccent)
+                                        .frame(width: 28)
+                                } else if clonePath != nil {
+                                    Button("Clone") { clone(branch: branch.name, into: clonePath!) }
+                                        .buttonStyle(.plain)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(Color.mgAccent)
+                                        .frame(width: 40)
                                 }
-                                .buttonStyle(.plain)
-                                .help("Edit")
                                 Button { db.deleteRepoBranch(id: branch.id) } label: {
                                     Image(systemName: "trash")
                                         .font(.system(size: 9)).foregroundStyle(Color.red.opacity(0.6))
@@ -1608,16 +1704,55 @@ private struct RepoDetailView: View {
         .sheet(isPresented: $showAddBranch) {
             RepoBranchSheet(repoID: repo.id, existing: nil, db: db, isPresented: $showAddBranch)
         }
-        .sheet(item: $editingBranch) { branch in
-            RepoBranchSheet(repoID: repo.id, existing: branch, db: db,
-                            isPresented: Binding(get: { editingBranch != nil }, set: { if !$0 { editingBranch = nil } }))
-        }
         .onAppear { load() }
         .onChange(of: repo.id) { load() }
     }
 
     private func load() {
-        name = repo.name; repoURL = repo.url; localPath = repo.localPath
+        name = repo.name; repoURL = repo.url; defaultBranch = repo.defaultBranch
+    }
+
+    private func branchPath(_ branchName: String) -> String? {
+        guard let base = settings.baseWorkingDirectory else { return nil }
+        if let (org, repoName) = gitURLComponents(repoURL) {
+            return "\(base)/organizations/\(org)/projects/\(repoName)/branches/\(branchName)"
+        }
+        return "\(base)/repos/\(repo.name)/branches/\(branchName)"
+    }
+
+    private func clone(branch: String, into path: String) {
+        cloningBranch = branch
+        Task.detached {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = ["clone", "--branch", branch, "--single-branch", repoURL, path]
+            try? p.run(); p.waitUntilExit()
+            await MainActor.run { cloningBranch = nil }
+        }
+    }
+
+    private func fetchBranches() {
+        let url = repoURL
+        let repoID = repo.id
+        let existing = Set(branches.map { $0.name })
+        Task.detached {
+            let p = Process()
+            let pipe = Pipe()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = ["ls-remote", "--heads", url]
+            p.standardOutput = pipe
+            try? p.run(); p.waitUntilExit()
+            let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let names = out.split(separator: "\n").compactMap { line -> String? in
+                guard let ref = line.split(separator: "\t").last else { return nil }
+                return String(ref).replacingOccurrences(of: "refs/heads/", with: "")
+            }
+            await MainActor.run {
+                for n in names where !existing.contains(n) {
+                    db.addRepoBranch(repoID: repoID, name: n)
+                }
+            }
+        }
     }
 }
 
@@ -1627,7 +1762,6 @@ private struct RepoBranchSheet: View {
     let db: WorkspaceDB
     @Binding var isPresented: Bool
     @State private var branchName = ""
-    @State private var desc = ""
 
     var isEditing: Bool { existing != nil }
 
@@ -1638,21 +1772,6 @@ private struct RepoBranchSheet: View {
 
             MGField(label: "Branch name", text: $branchName)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("DESCRIPTION (MARKDOWN)")
-                    .font(.system(size: 10, weight: .medium)).tracking(0.8)
-                    .foregroundStyle(Color.mgMuted)
-                TextEditor(text: $desc)
-                    .font(.system(size: 13, design: .monospaced))
-                    .foregroundStyle(Color.mgLabel)
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
-                    .frame(minHeight: 160)
-                    .background(Color.mgSurface)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
-
             HStack {
                 Spacer()
                 Button("Cancel") { isPresented = false }
@@ -1660,10 +1779,10 @@ private struct RepoBranchSheet: View {
                     .padding(.horizontal, 14).padding(.vertical, 8)
                 Button(isEditing ? "Save" : "Add") {
                     if let b = existing {
-                        var updated = b; updated.name = branchName; updated.description = desc
+                        var updated = b; updated.name = branchName
                         db.updateRepoBranch(updated)
                     } else {
-                        db.addRepoBranch(repoID: repoID, name: branchName, description: desc)
+                        db.addRepoBranch(repoID: repoID, name: branchName)
                     }
                     isPresented = false
                 }
@@ -1674,11 +1793,8 @@ private struct RepoBranchSheet: View {
                 .disabled(branchName.isEmpty)
             }
         }
-        .padding(28).frame(width: 420).background(Color.mgBg)
-        .onAppear {
-            branchName = existing?.name ?? ""
-            desc = existing?.description ?? ""
-        }
+        .padding(28).frame(width: 360).background(Color.mgBg)
+        .onAppear { branchName = existing?.name ?? "" }
     }
 }
 
@@ -1778,11 +1894,20 @@ private struct IssuesPanel: View {
         if agentFocus.activeTabID == id { agentFocus.activeTabID = "global" }
     }
 
+    private func repoClonePath(repoID: String) -> String? {
+        guard let base = settings.baseWorkingDirectory,
+              let repo = db.repos.first(where: { $0.id == repoID }) else { return nil }
+        if let (org, repoName) = gitURLComponents(repo.url) {
+            return "\(base)/organizations/\(org)/projects/\(repoName)/branches/\(repo.defaultBranch)"
+        }
+        return "\(base)/repos/\(repo.name)/branches/\(repo.defaultBranch)"
+    }
+
     private func repoPaths(for issue: Issue) -> [String] {
         guard !issue.featureID.isEmpty else { return [] }
         return db.featureRepos
             .filter { $0.featureID == issue.featureID }
-            .compactMap { fr in db.repos.first { $0.id == fr.repoID }?.localPath }
+            .compactMap { fr -> String? in repoClonePath(repoID: fr.repoID) }
     }
 
     private func repoPaths(forID issueID: String) -> [String] {
@@ -1874,6 +1999,15 @@ private struct IssuesPanel: View {
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(Color.mgSurface).clipShape(Capsule())
                 Spacer()
+                Button { db.refresh() } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.mgMuted)
+                        .frame(width: 28, height: 28)
+                        .background(Color.mgSurface)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .help("Refresh")
                 Button { showAdd = true } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.mgAccent)
@@ -1909,6 +2043,16 @@ private struct IssuesPanel: View {
                                 }
                                 Spacer()
                                 StatusBadge(status: issue.status)
+                                Button { launchIssueWorkspace(issue) } label: {
+                                    Image(systemName: "terminal")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Color.mgAccent)
+                                        .frame(width: 22, height: 22)
+                                        .background(Color.mgAccent.opacity(0.12))
+                                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                                }
+                                .buttonStyle(.plain)
+                                .help("Open workspace")
                             }
                         }
                     }
@@ -1968,6 +2112,50 @@ private struct IssuesPanel: View {
            let f = db.features.first(where: { $0.id == issue.featureID }) { parts.append(f.name) }
         return parts.joined(separator: " · ")
     }
+
+    private func launchIssueWorkspace(_ issue: Issue) {
+        // Prefer issue-specific branches; fall back to feature repos if none linked yet
+        let issueRepoLinks = db.issueRepos.filter { $0.issueID == issue.id }
+        let sourceLinks: [(repoID: String, branch: String)] = issueRepoLinks.isEmpty && !issue.featureID.isEmpty
+            ? db.featureRepos.filter { $0.featureID == issue.featureID }.map { ($0.repoID, $0.branch) }
+            : issueRepoLinks.map { ($0.repoID, $0.branch) }
+        let repoDetails: [(localPath: String, branch: String, name: String)] = sourceLinks.compactMap { link in
+            guard let path = repoClonePath(repoID: link.repoID),
+                  FileManager.default.fileExists(atPath: path),
+                  let repo = db.repos.first(where: { $0.id == link.repoID }) else { return nil }
+            return (path, link.branch, repo.name)
+        }
+        let worktreeBase = NSHomeDirectory() + "/\(Srota.dir)/worktrees/issues/\(issue.id)"
+        let number = issue.number
+        let title = issue.title
+
+        Task.detached {
+            let fm = FileManager.default
+            try? fm.createDirectory(atPath: worktreeBase, withIntermediateDirectories: true)
+            for detail in repoDetails {
+                let worktreePath = worktreeBase + "/" + detail.name
+                guard !fm.fileExists(atPath: worktreePath) else { continue }
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                p.arguments = ["worktree", "add", worktreePath, detail.branch]
+                p.currentDirectoryURL = URL(fileURLWithPath: detail.localPath)
+                try? p.run(); p.waitUntilExit()
+            }
+            await MainActor.run {
+                NotificationCenter.default.post(
+                    name: .srotaOpenWorkspace,
+                    object: nil,
+                    userInfo: [
+                        "path": worktreeBase,
+                        "name": "issue #\(number)",
+                        "folderName": title,
+                        "folderTag": "Issues",
+                        "createWorktree": false
+                    ]
+                )
+            }
+        }
+    }
 }
 
 private struct IssueInfoSidebar: View {
@@ -1979,6 +2167,14 @@ private struct IssueInfoSidebar: View {
 
     var linkedFeature: Feature? { db.features.first { $0.id == issue.featureID } }
     var linkedOrg: Organization? { db.organizations.first { $0.id == issue.orgID } }
+    var linkedRepos: [(repo: RepoEntry, branch: String)] {
+        db.issueRepos
+            .filter { $0.issueID == issue.id }
+            .compactMap { ir in
+                guard let repo = db.repos.first(where: { $0.id == ir.repoID }) else { return nil }
+                return (repo, ir.branch)
+            }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -2043,6 +2239,34 @@ private struct IssueInfoSidebar: View {
                         DetailRow(label: "Org") {
                             Text(org.name)
                                 .font(.system(size: 13)).foregroundStyle(Color.mgLabel)
+                        }
+                    }
+
+                    let repos = linkedRepos
+                    if !repos.isEmpty {
+                        DetailRow(label: "Repos") {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(repos, id: \.repo.id) { link in
+                                    HStack(spacing: 6) {
+                                        Text(link.repo.name)
+                                            .font(.system(size: 12, weight: .medium))
+                                            .foregroundStyle(Color.mgLabel)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                        Spacer(minLength: 4)
+                                        if !link.branch.isEmpty {
+                                            Text(link.branch)
+                                                .font(.system(size: 10, design: .monospaced))
+                                                .foregroundStyle(Color.mgMuted)
+                                                .lineLimit(1)
+                                                .truncationMode(.middle)
+                                        }
+                                    }
+                                    .padding(.horizontal, 8).padding(.vertical, 6)
+                                    .background(Color.mgSurface)
+                                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                                }
+                            }
                         }
                     }
                 }

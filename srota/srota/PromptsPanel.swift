@@ -11,8 +11,9 @@ private extension Color {
 
 struct PromptsPanel: View {
     @Binding var isPresented: Bool
-    @Environment(PromptsStore.self) private var store
-    @Environment(AppSettings.self)  private var appSettings
+    @Environment(PromptsStore.self)  private var store
+    @Environment(AppSettings.self)   private var appSettings
+    @Environment(PresetsStore.self)  private var presetsStore
 
     @State private var searchText   = ""
     @State private var selectedID:  UUID? = nil
@@ -23,7 +24,20 @@ struct PromptsPanel: View {
     private var isNew: Bool { pendingNewID == selectedID && selectedID != nil }
 
     private static let mcpBuiltInID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
-    private var isBuiltIn: Bool { selectedID == Self.mcpBuiltInID }
+
+    private var presetSystemPromptItems: [PromptItem] {
+        presetsStore.presets.filter { !$0.systemPrompt.isEmpty }.map { preset in
+            let flagHint = preset.systemPromptFlag.isEmpty ? "positional arg" : preset.systemPromptFlag
+            return PromptItem(id: preset.id,
+                              name: "\(preset.name): system prompt",
+                              description: "Used at launch · \(flagHint)",
+                              content: preset.systemPrompt)
+        }
+    }
+
+    private var isBuiltIn: Bool {
+        selectedID == Self.mcpBuiltInID || presetSystemPromptItems.contains(where: { $0.id == selectedID })
+    }
 
     private var builtInItems: [PromptItem] {
         let path = appSettings.resolvedMCPServerPath ?? "<mcp-server-path>"
@@ -36,7 +50,7 @@ struct PromptsPanel: View {
     }
 
     private var filtered: [PromptItem] {
-        let all = builtInItems + store.items
+        let all = builtInItems + presetSystemPromptItems + store.items
         guard !searchText.isEmpty else { return all }
         return all.filter {
             $0.name.localizedCaseInsensitiveContains(searchText) ||

@@ -392,6 +392,7 @@ final class Workspace: Identifiable, ObservableObject {
     let id: UUID
     @Published var name: String
     @Published var isPinned: Bool = false
+    @Published var directory: String = ""
     var lastAccessed: Date = Date()
     var isActive: Bool { isPinned || lastAccessed > Date(timeIntervalSinceNow: -172800) }
     @Published var tabs: [TerminalTab] = [] {
@@ -424,7 +425,8 @@ final class Workspace: Identifiable, ObservableObject {
 
     func addTab(colorScheme: ColorScheme, workingDirectory: String? = nil) {
         lastColorScheme = colorScheme
-        let tab = TerminalTab(colorScheme: colorScheme, workingDirectory: workingDirectory)
+        let cwd = workingDirectory ?? (directory.isEmpty ? nil : directory)
+        let tab = TerminalTab(colorScheme: colorScheme, workingDirectory: cwd)
         tab.closeTabCallback = { [weak self, weak tab] in
             guard let self, let tab else { return }
             self.closeTab(id: tab.id)
@@ -500,6 +502,7 @@ final class TerminalManager: ObservableObject {
     func addWorkspace(colorScheme: ColorScheme, inFolder folderID: UUID? = nil, workingDirectory: String? = nil, name: String? = nil) {
         let wsName = name ?? "Workspace \(allWorkspaces.count + 1)"
         let ws = Workspace(name: wsName)
+        ws.directory = workingDirectory ?? ""
         ws.addTab(colorScheme: colorScheme, workingDirectory: workingDirectory)
         if let folderID, let folder = folders.first(where: { $0.id == folderID }) {
             folder.workspaces.append(ws)
@@ -645,7 +648,22 @@ struct ContentView: View {
             onPresetLaunch: { preset in
                 let filtered = preset.commands.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
                 guard !filtered.isEmpty else { return }
-                let cmd = filtered.joined(separator: "\n") + "\n"
+                let cmd: String
+                if !preset.systemPrompt.isEmpty {
+                    let hex = String(UUID().uuidString.filter { $0.isHexDigit }.prefix(6).lowercased())
+                    let launchersDir = NSHomeDirectory() + "/\(Srota.dir)/launchers"
+                    try? FileManager.default.createDirectory(atPath: launchersDir, withIntermediateDirectories: true)
+                    let promptFile = launchersDir + "/preset-prompt-\(hex).txt"
+                    try? preset.systemPrompt.write(toFile: promptFile, atomically: true, encoding: .utf8)
+                    let spVar = "__SROTA_SP=$(cat '\(promptFile)')"
+                    let lastCmd = filtered.last!
+                    let launch = preset.systemPromptFlag.isEmpty
+                        ? "\(spVar); \(lastCmd) \"$__SROTA_SP\""
+                        : "\(spVar); \(lastCmd) \(preset.systemPromptFlag) \"$__SROTA_SP\""
+                    cmd = filtered.dropLast().map { $0 + "\n" }.joined() + launch + "\n"
+                } else {
+                    cmd = filtered.joined(separator: "\n") + "\n"
+                }
                 if let featureState = agentFocus.activeViewState, managementTab == .features {
                     featureState.send(cmd)
                 } else {
@@ -759,7 +777,8 @@ struct ContentView: View {
                             folderTag: folderTag, position: 0,
                             lastCWD: path,
                             lastAccessed: Int(Date().timeIntervalSince1970),
-                            isPinned: false))
+                            isPinned: false,
+                            directory: path))
                         managementTab = .workspaces
                         saveLayout()
                         if let baseDir = settings.baseWorkingDirectory { db.scan(baseDir: baseDir) }
@@ -774,7 +793,7 @@ struct ContentView: View {
                         folderName: folderName ?? "", folderTag: folderTag,
                         position: candidatePool.count,
                         lastCWD: path, lastAccessed: Int(Date().timeIntervalSince1970),
-                        isPinned: false))
+                        isPinned: false, directory: path))
                 }
                 managementTab = .workspaces
                 saveLayout()
@@ -991,7 +1010,8 @@ struct ContentView: View {
                 folderName: folderName, folderTag: folderTag, position: position,
                 lastCWD: ws.currentWorkingDirectory ?? "",
                 lastAccessed: Int(Date().timeIntervalSince1970),
-                isPinned: ws.isPinned))
+                isPinned: ws.isPinned,
+                directory: ws.directory))
             db.deleteTabs(workspaceID: ws.id.uuidString)
             for (ti, tab) in ws.tabs.enumerated() {
                 db.saveTab(TabRecord(
@@ -1030,6 +1050,7 @@ struct ContentView: View {
             let wsID = UUID(uuidString: session.id) ?? UUID()
             let ws = Workspace(id: wsID, name: session.name)
             ws.isPinned = session.isPinned
+            ws.directory = session.directory
             ws.lastAccessed = Date(timeIntervalSince1970: TimeInterval(session.lastAccessed))
             let cwd = session.lastCWD.isEmpty ? nil : session.lastCWD
             let tabs = db.loadTabs(workspaceID: session.id)
@@ -1397,6 +1418,19 @@ private struct WorkspaceRow: View {
         isRenaming = false
     }
 
+    private func pickDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Set Directory"
+        let startPath = workspace.currentWorkingDirectory ?? (workspace.directory.isEmpty ? nil : workspace.directory)
+        if let p = startPath { panel.directoryURL = URL(fileURLWithPath: p) }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        workspace.directory = url.path
+        db.updateWorkspaceDirectory(id: workspace.id.uuidString, directory: url.path)
+    }
+
     private var currentFolderID: UUID? {
         manager.folders.first { $0.workspaces.contains { $0.id == workspace.id } }?.id
     }
@@ -1475,6 +1509,9 @@ private struct WorkspaceRow: View {
             }
             Divider()
             Button("Rename") { startRename() }
+            Button(workspace.directory.isEmpty ? "Set Directory…" : "Change Directory…") {
+                pickDirectory()
+            }
 
             if !manager.folders.isEmpty {
                 Menu("Move to Folder") {
