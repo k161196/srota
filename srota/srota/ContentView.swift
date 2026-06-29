@@ -638,6 +638,7 @@ struct ContentView: View {
     @State private var showPrompts = false
     @State private var agentToLaunch: AgentItem? = nil
     @State private var agentEventTask: Task<Void, Never>? = nil
+    @State private var worktreeError: String? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -760,14 +761,22 @@ struct ContentView: View {
                     let p = Process()
                     p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
                     p.arguments = ["-C", projectPath, "worktree", "add", path, branchRef]
-                p.standardError = Pipe()
-                do {
-                    try p.run()
-                    p.waitUntilExit()
-                } catch {
-                    return
-                }
-                guard p.terminationStatus == 0 else { return }
+                    let errPipe = Pipe()
+                    p.standardError = errPipe
+                    do {
+                        try p.run()
+                        p.waitUntilExit()
+                    } catch {
+                        let msg = error.localizedDescription
+                        await MainActor.run { worktreeError = msg }
+                        return
+                    }
+                    guard p.terminationStatus == 0 else {
+                        let msg = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "git worktree add failed"
+                        await MainActor.run { worktreeError = msg.isEmpty ? "git worktree add failed" : msg }
+                        return
+                    }
                 await MainActor.run { [folderID] in
                         manager.addWorkspace(colorScheme: colorScheme, inFolder: folderID,
                                              workingDirectory: path, name: wsName)
@@ -782,6 +791,9 @@ struct ContentView: View {
                         managementTab = .workspaces
                         saveLayout()
                         if let baseDir = settings.baseWorkingDirectory { db.scan(baseDir: baseDir) }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                            manager.selectedWorkspace?.selectedTab?.focusedViewState.send("pwd\n")
+                        }
                     }
                 }
             } else {
@@ -797,6 +809,9 @@ struct ContentView: View {
                 }
                 managementTab = .workspaces
                 saveLayout()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    manager.selectedWorkspace?.selectedTab?.focusedViewState.send("pwd\n")
+                }
             }
         }
         .onAppear {
@@ -909,6 +924,14 @@ struct ContentView: View {
         }
         } // end ZStack
         } // end VStack
+        .alert("Worktree Error", isPresented: .init(
+            get: { worktreeError != nil },
+            set: { if !$0 { worktreeError = nil } }
+        )) {
+            Button("OK", role: .cancel) { worktreeError = nil }
+        } message: {
+            Text(worktreeError ?? "")
+        }
         .sheet(item: $agentToLaunch) { agent in
             AgentLaunchSheet(agent: agent) { systemPrompt, firstMessage, preset in
                 launchAgent(agent: agent, systemPrompt: systemPrompt, firstMessage: firstMessage, preset: preset)

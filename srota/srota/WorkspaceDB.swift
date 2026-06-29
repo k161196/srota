@@ -78,6 +78,7 @@ struct RepoBranch: Identifiable, Hashable {
     var id: String
     var repoID: String
     var name: String
+    var baseBranch: String
 }
 
 struct Issue: Identifiable, Hashable {
@@ -259,13 +260,13 @@ final class WorkspaceDB {
         refresh()
     }
 
-    func addRepoBranch(repoID: String, name: String) {
-        upsert("repo_branches", ["id": UUID().uuidString, "repo_id": repoID, "name": name])
+    func addRepoBranch(repoID: String, name: String, baseBranch: String = "") {
+        upsert("repo_branches", ["id": UUID().uuidString, "repo_id": repoID, "name": name, "base_branch": baseBranch])
         refresh()
     }
 
     func updateRepoBranch(_ branch: RepoBranch) {
-        upsert("repo_branches", ["id": branch.id, "repo_id": branch.repoID, "name": branch.name])
+        upsert("repo_branches", ["id": branch.id, "repo_id": branch.repoID, "name": branch.name, "base_branch": branch.baseBranch])
         refresh()
     }
 
@@ -361,8 +362,8 @@ final class WorkspaceDB {
         featureRepos = rows(sql("SELECT id, feature_id, repo_id, branch", sqlFrom, "feature_repos", "ORDER BY branch")) {
             FeatureRepo(id: col($0, 0), featureID: col($0, 1), repoID: col($0, 2), branch: col($0, 3))
         }
-        repoBranches = rows(sql("SELECT id, repo_id, name", sqlFrom, "repo_branches", "ORDER BY name")) {
-            RepoBranch(id: col($0, 0), repoID: col($0, 1), name: col($0, 2))
+        repoBranches = rows(sql("SELECT id, repo_id, name, base_branch", sqlFrom, "repo_branches", "ORDER BY name")) {
+            RepoBranch(id: col($0, 0), repoID: col($0, 1), name: col($0, 2), baseBranch: col($0, 3))
         }
         issues = rows(sql("SELECT id, title, body, status, org_id, feature_id, number, external_id, external_url, source, external_status", sqlFrom, "issues", "ORDER BY number")) {
             Issue(id: col($0, 0), title: col($0, 1), body: col($0, 2), status: col($0, 3), orgID: col($0, 4), featureID: col($0, 5), number: Int(sqlite3_column_int($0, 6)), externalID: col($0, 7), externalURL: col($0, 8), source: col($0, 9), externalStatus: col($0, 10))
@@ -381,6 +382,7 @@ final class WorkspaceDB {
         execRaw("ALTER TABLE issues ADD COLUMN source TEXT NOT NULL DEFAULT ''")
         execRaw("ALTER TABLE issues ADD COLUMN external_status TEXT NOT NULL DEFAULT ''")
         execRaw("ALTER TABLE repos ADD COLUMN default_branch TEXT NOT NULL DEFAULT 'main'")
+        execRaw("ALTER TABLE repo_branches ADD COLUMN base_branch TEXT NOT NULL DEFAULT ''")
         execRaw("CREATE TABLE IF NOT EXISTS issue_repos (id TEXT PRIMARY KEY, issue_id TEXT NOT NULL, repo_id TEXT NOT NULL, branch TEXT NOT NULL DEFAULT '')")
         execRaw("ALTER TABLE ws_workspaces ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")
         execRaw("ALTER TABLE ws_workspaces ADD COLUMN directory TEXT NOT NULL DEFAULT ''")
@@ -401,7 +403,7 @@ final class WorkspaceDB {
         CREATE TABLE IF NOT EXISTS feature_repos
         (id TEXT PRIMARY KEY, feature_id TEXT NOT NULL, repo_id TEXT NOT NULL, branch TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS repo_branches
-        (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '');
+        (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', base_branch TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS issues
         (id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
          status TEXT NOT NULL DEFAULT 'open', org_id TEXT NOT NULL DEFAULT '', feature_id TEXT NOT NULL DEFAULT '', number INTEGER NOT NULL DEFAULT 0,

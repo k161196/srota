@@ -738,12 +738,14 @@ private struct BranchRow: Identifiable, Sendable {
     let isCurrent: Bool
     let localPath: String?       // from DB checkout if matched
     let gitIsWorktree: Bool      // git "+" prefix = checked out in another worktree
+    let hasRemote: Bool          // local branch has a remote tracking counterpart
 
-    nonisolated init(gitName: String, isCurrent: Bool, localPath: String?, gitIsWorktree: Bool = false) {
+    nonisolated init(gitName: String, isCurrent: Bool, localPath: String?, gitIsWorktree: Bool = false, hasRemote: Bool = false) {
         self.gitName = gitName
         self.isCurrent = isCurrent
         self.localPath = localPath
         self.gitIsWorktree = gitIsWorktree
+        self.hasRemote = hasRemote
     }
 
     var isWorktree: Bool {
@@ -756,15 +758,66 @@ private struct BranchRow: Identifiable, Sendable {
     }
 }
 
+private struct BranchTag: View {
+    enum Kind { case db, local, remote }
+    let kind: Kind
+
+    private var label: String {
+        switch kind { case .db: "db"; case .local: "local"; case .remote: "remote" }
+    }
+    private var icon: String {
+        switch kind { case .db: "cylinder"; case .local: "laptopcomputer"; case .remote: "cloud" }
+    }
+    // db = amber fill, local = green outline, remote = blue fill
+    private var fg: Color {
+        switch kind {
+        case .db:     Color(red: 0.96, green: 0.74, blue: 0.24)
+        case .local:  Color(red: 0.35, green: 0.85, blue: 0.55)
+        case .remote: Color(red: 0.40, green: 0.70, blue: 1.00)
+        }
+    }
+    private var bg: Color {
+        switch kind {
+        case .db:     fg.opacity(0.18)
+        case .local:  Color.clear
+        case .remote: fg.opacity(0.18)
+        }
+    }
+    private var strokeColor: Color {
+        switch kind {
+        case .local: fg.opacity(0.55)
+        default:     Color.clear
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon).font(.system(size: 7, weight: .medium))
+            Text(label).font(.system(size: 9, weight: .medium))
+        }
+        .foregroundStyle(fg)
+        .padding(.horizontal, 5).padding(.vertical, 2)
+        .background(bg)
+        .clipShape(Capsule())
+        .overlay(Capsule().stroke(strokeColor, lineWidth: 0.8))
+    }
+}
+
 private struct ProjectDetailView: View {
     let project: Project
     let db: WorkspaceDB
     let manager: TerminalManager
     @State private var editDesc = ""
+    @State private var editPath = ""
 
     var openWorkspaceNames: Set<String> {
         let all = manager.folders.flatMap(\.workspaces) + manager.workspaces
         return Set(all.map(\.name))
+    }
+
+    var isBaseCloned: Bool {
+        guard !project.path.isEmpty else { return false }
+        return FileManager.default.fileExists(atPath: project.path + "/.git")
     }
     @State private var branches: [BranchRow] = []
     @State private var branchSearch = ""
@@ -775,9 +828,10 @@ private struct ProjectDetailView: View {
         let filtered = branchSearch.isEmpty ? branches
             : branches.filter { $0.gitName.localizedCaseInsensitiveContains(branchSearch) }
         return filtered.sorted { a, b in
-            if a.isWorktree != b.isWorktree { return a.isWorktree }
-            if a.localPath != nil && b.localPath == nil { return true }
-            if a.localPath == nil && b.localPath != nil { return false }
+            let aLocal = a.localPath != nil
+            let bLocal = b.localPath != nil
+            if aLocal != bLocal { return aLocal }
+            if aLocal && bLocal { return a.isWorktree && !b.isWorktree }
             return false
         }
     }
@@ -832,6 +886,41 @@ private struct ProjectDetailView: View {
                     }
                 }
 
+                // Base path
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("BASE PATH")
+                        .font(.system(size: 10, weight: .medium)).tracking(0.8)
+                        .foregroundStyle(Color.mgMuted)
+                    TextField("Cloned repo path…", text: $editPath)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(Color.mgLabel)
+                        .padding(8)
+                        .background(Color.mgSurface)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    HStack {
+                        if !editPath.isEmpty && !isBaseCloned {
+                            Text("No .git found at this path")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Color.orange.opacity(0.8))
+                        }
+                        Spacer()
+                        Button("Save") {
+                            var p = project; p.path = editPath
+                            db.updateProject(p)
+                            branches = []
+                            fetchBranches()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 14).padding(.vertical, 6)
+                        .background(Color.mgAccent)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+
                 // Branches
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -871,7 +960,7 @@ private struct ProjectDetailView: View {
                         VStack(alignment: .leading, spacing: 0) {
                             ForEach(filteredBranches) { branch in
                                 HStack(spacing: 8) {
-                                    let branchShortName = branch.gitName.components(separatedBy: "/").last ?? branch.gitName
+                                    let branchShortName = branch.gitName.replacingOccurrences(of: "/", with: ":")
                                     let isOpen = openWorkspaceNames.contains(branchShortName)
                                     Image(systemName: isOpen ? "terminal.fill" : "circle")
                                         .font(.system(size: 10))
@@ -881,16 +970,13 @@ private struct ProjectDetailView: View {
                                         .foregroundStyle(isOpen ? Color.mgLabel : Color.mgMuted)
                                         .lineLimit(1)
                                     Spacer()
-                                    if branch.isWorktree {
-                                        Text("worktree")
-                                            .font(.system(size: 9, weight: .medium))
-                                            .foregroundStyle(Color.purple)
-                                            .padding(.horizontal, 5).padding(.vertical, 2)
-                                            .background(Color.purple.opacity(0.15))
-                                            .clipShape(Capsule())
+                                    HStack(spacing: 4) {
+                                        if branch.localPath != nil { BranchTag(kind: .db) }
+                                        if !branch.gitName.hasPrefix("remotes/") { BranchTag(kind: .local) }
+                                        if branch.gitName.hasPrefix("remotes/") || branch.hasRemote { BranchTag(kind: .remote) }
                                     }
                                     // Open button for every branch
-                                    let branchShort = branch.gitName.components(separatedBy: "/").last ?? branch.gitName
+                                    let branchShort = branch.gitName.replacingOccurrences(of: "/", with: ":")
                                     let orgName = db.organizations.first { $0.id == project.orgID }?.name ?? ""
                                     let localPath = branch.localPath ?? (project.path + "/branches/" + branchShort)
                                     let hasLocal = branch.localPath != nil
@@ -909,20 +995,21 @@ private struct ProjectDetailView: View {
                                                 "folderName":      project.name,
                                                 "folderTag":       orgName,
                                                 "createWorktree":  !hasLocal,
-                                                "projectPath":     branch.localPath ?? gitRoot,
+                                                "projectPath":     project.path,
                                                 "branchRef":       branchRef
                                             ]
                                         )
                                     } label: {
                                         Image(systemName: hasLocal ? "terminal" : "plus.rectangle")
                                             .font(.system(size: 10))
-                                            .foregroundStyle(Color.mgAccent)
+                                            .foregroundStyle(isBaseCloned ? Color.mgAccent : Color.mgMuted.opacity(0.4))
                                             .frame(width: 22, height: 22)
-                                            .background(Color.mgAccent.opacity(0.12))
+                                            .background((isBaseCloned ? Color.mgAccent : Color.mgMuted).opacity(0.12))
                                             .clipShape(RoundedRectangle(cornerRadius: 4))
                                     }
                                     .buttonStyle(.plain)
-                                    .help(hasLocal ? "Open in workspace" : "Create worktree & open")
+                                    .disabled(!isBaseCloned && !hasLocal)
+                                    .help(hasLocal ? "Open in workspace" : isBaseCloned ? "Create worktree & open" : "Set base path first")
                                 }
                                 .padding(.horizontal, 10).padding(.vertical, 6)
                                 .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
@@ -939,10 +1026,12 @@ private struct ProjectDetailView: View {
         .background(Color.mgBg)
         .onAppear {
             editDesc = project.description
+            editPath = project.path
             fetchBranches()
         }
         .onChange(of: project.id) {
             editDesc = project.description
+            editPath = project.path
             branches = []
             fetchBranches()
         }
@@ -982,6 +1071,12 @@ private struct ProjectDetailView: View {
                 let (name, _, _) = parseLine(line)
                 return name.hasPrefix("remotes/") ? nil : name
             })
+            // collect remote branch short-names to detect local+remote overlap
+            let remoteNames: Set<String> = Set(lines.compactMap { line -> String? in
+                let (name, _, _) = parseLine(line)
+                guard name.hasPrefix("remotes/origin/") else { return nil }
+                return String(name.dropFirst("remotes/origin/".count))
+            })
 
             let rows: [BranchRow] = lines.compactMap { line in
                 let (name, isCurrent, isGitWorktree) = parseLine(line)
@@ -991,10 +1086,10 @@ private struct ProjectDetailView: View {
                     if localNames.contains(localEquiv) { return nil }
                 }
                 let shortName = name.components(separatedBy: "/").last ?? name
-                // git "+" prefix means checked out in another worktree — honour that too
                 let path = nameToPath[shortName]
+                let hasRemote = !name.hasPrefix("remotes/") && remoteNames.contains(name)
                 return BranchRow(gitName: name, isCurrent: isCurrent,
-                                 localPath: path, gitIsWorktree: isGitWorktree)
+                                 localPath: path, gitIsWorktree: isGitWorktree, hasRemote: hasRemote)
             }
             await MainActor.run {
                 branches = rows
@@ -1083,10 +1178,14 @@ private struct FeaturesPanel: View {
     private func repoClonePath(repoID: String) -> String? {
         guard let base = settings.baseWorkingDirectory,
               let repo = db.repos.first(where: { $0.id == repoID }) else { return nil }
+        let safeBranch = repo.defaultBranch.replacingOccurrences(of: "/", with: ":")
         if let (org, repoName) = gitURLComponents(repo.url) {
-            return "\(base)/organizations/\(org)/projects/\(repoName)/branches/\(repo.defaultBranch)"
+            let safeOrg = org.replacingOccurrences(of: "/", with: ":")
+            let safeRepo = repoName.replacingOccurrences(of: "/", with: ":")
+            return "\(base)/organizations/\(safeOrg)/projects/\(safeRepo)/branches/\(safeBranch)"
         }
-        return "\(base)/repos/\(repo.name)/branches/\(repo.defaultBranch)"
+        let safeRepo = repo.name.replacingOccurrences(of: "/", with: ":")
+        return "\(base)/repos/\(safeRepo)/branches/\(safeBranch)"
     }
 
     private func openTab(for feature: Feature) {
@@ -1614,8 +1713,31 @@ private struct RepoDetailView: View {
     @State private var defaultBranch = ""
     @State private var showAddBranch = false
     @State private var cloningBranch: String? = nil
+    @State private var branchSearch = ""
+    @State private var remoteBranchNames: Set<String> = []
+    @State private var localBranchNames: Set<String> = []
+    @State private var showBasePicker = false
+    @State private var pendingBranch = ""
+    @State private var pendingPath = ""
+    @State private var checkoutError: String? = nil
+    @State private var fetchingBranches = false
 
     var branches: [RepoBranch] { db.repoBranches.filter { $0.repoID == repo.id } }
+
+    var sortedFilteredBranches: [RepoBranch] {
+        let filtered = branchSearch.isEmpty ? branches
+            : branches.filter { $0.name.localizedCaseInsensitiveContains(branchSearch) }
+        func rank(_ branch: RepoBranch) -> Int {
+            let cloned = branchPath(branch.name).map { FileManager.default.fileExists(atPath: $0) } ?? false
+            if cloned { return 0 }                              // workspace
+            if localBranchNames.contains(branch.name) { return 1 } // local
+            return 2                                            // remote only
+        }
+        return filtered.sorted { a, b in
+            let ra = rank(a), rb = rank(b)
+            return ra != rb ? ra < rb : a.name < b.name
+        }
+    }
 
     var body: some View {
         EditDetailScaffold(heading: repo.name) {
@@ -1627,6 +1749,21 @@ private struct RepoDetailView: View {
             MGField(label: "Git URL", text: $repoURL)
             MGField(label: "Default branch", text: $defaultBranch)
 
+            HStack {
+                Spacer()
+                Button("Save") {
+                    var updated = repo
+                    updated.name = name; updated.url = repoURL; updated.defaultBranch = defaultBranch
+                    db.updateRepo(updated)
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.black)
+                .padding(.horizontal, 14).padding(.vertical, 7)
+                .background(Color.mgAccent)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("BRANCHES")
@@ -1634,10 +1771,14 @@ private struct RepoDetailView: View {
                         .foregroundStyle(Color.mgMuted)
                     Spacer()
                     if !repoURL.isEmpty {
-                        Button("Fetch") { fetchBranches() }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 11)).foregroundStyle(Color.mgAccent)
-                            .help("Fetch branches from remote")
+                        if fetchingBranches {
+                            ProgressView().scaleEffect(0.6).frame(width: 32)
+                        } else {
+                            Button("Fetch") { fetchBranches() }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 11)).foregroundStyle(Color.mgAccent)
+                                .help("Fetch branches from remote")
+                        }
                     }
                     Button { showAddBranch = true } label: {
                         Image(systemName: "plus")
@@ -1649,12 +1790,25 @@ private struct RepoDetailView: View {
                     }
                     .buttonStyle(.plain)
                 }
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 11)).foregroundStyle(Color.mgMuted)
+                    TextField("Filter branches…", text: $branchSearch)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.mgLabel)
+                }
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                .background(Color.mgSurface)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
                 if branches.isEmpty {
                     Text("No branches — press + or Fetch")
                         .font(.system(size: 12)).foregroundStyle(Color.mgMuted)
                 } else {
                     VStack(spacing: 0) {
-                        ForEach(branches) { branch in
+                        ForEach(sortedFilteredBranches) { branch in
                             let clonePath = branchPath(branch.name)
                             let isCloned = clonePath.map { FileManager.default.fileExists(atPath: $0) } ?? false
                             HStack(spacing: 8) {
@@ -1670,26 +1824,70 @@ private struct RepoDetailView: View {
                                     }
                                 }
                                 Spacer()
+                                HStack(spacing: 4) {
+                                    BranchTag(kind: .db)
+                                    if isCloned || localBranchNames.contains(branch.name) { BranchTag(kind: .local) }
+                                    if remoteBranchNames.contains(branch.name) { BranchTag(kind: .remote) }
+                                }
                                 if cloningBranch == branch.name {
                                     ProgressView().scaleEffect(0.6).frame(width: 28)
                                 } else if isCloned {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.system(size: 12)).foregroundStyle(Color.mgAccent)
-                                        .frame(width: 28)
+                                    Button {
+                                        NotificationCenter.default.post(
+                                            name: .srotaOpenWorkspace,
+                                            object: nil,
+                                            userInfo: [
+                                                "path":           clonePath!,
+                                                "name":           branch.name,
+                                                "folderName":     repo.name,
+                                                "folderTag":      "",
+                                                "createWorktree": false,
+                                                "projectPath":    clonePath!,
+                                                "branchRef":      branch.name
+                                            ]
+                                        )
+                                    } label: {
+                                        Image(systemName: "terminal")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(Color.mgAccent)
+                                            .frame(width: 22, height: 22)
+                                            .background(Color.mgAccent.opacity(0.12))
+                                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Open in workspace")
                                 } else if clonePath != nil {
-                                    Button("Clone") { clone(branch: branch.name, into: clonePath!) }
-                                        .buttonStyle(.plain)
-                                        .font(.system(size: 11, weight: .medium))
-                                        .foregroundStyle(Color.mgAccent)
-                                        .frame(width: 40)
+                                    let isDefault = branch.name == defaultBranch
+                                    let canCheckout = isDefault || isMainCloned
+                                    Button(isDefault ? "Clone" : "Worktree") {
+                                        if isDefault || remoteBranchNames.contains(branch.name) || localBranchNames.contains(branch.name) {
+                                            checkout(branch: branch.name, into: clonePath!)
+                                        } else {
+                                            pendingBranch = branch.name
+                                            pendingPath = clonePath!
+                                            showBasePicker = true
+                                        }
+                                    }
+                                    .buttonStyle(.plain)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(canCheckout ? Color.mgAccent : Color.mgMuted.opacity(0.5))
+                                    .disabled(!canCheckout)
+                                    .help(canCheckout ? "" : "Clone \(defaultBranch) first")
+                                    .frame(width: 55)
                                 }
-                                Button { db.deleteRepoBranch(id: branch.id) } label: {
+                                Button {
+                                    if isCloned, let path = clonePath {
+                                        removeBranch(id: branch.id, worktreePath: path)
+                                    } else {
+                                        db.deleteRepoBranch(id: branch.id)
+                                    }
+                                } label: {
                                     Image(systemName: "trash")
                                         .font(.system(size: 9)).foregroundStyle(Color.red.opacity(0.6))
                                         .frame(width: 20, height: 20)
                                 }
                                 .buttonStyle(.plain)
-                                .help("Delete")
+                                .help(isCloned ? "Remove worktree & delete" : "Delete")
                             }
                             .padding(.horizontal, 10).padding(.vertical, 7)
                             .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
@@ -1704,6 +1902,23 @@ private struct RepoDetailView: View {
         .sheet(isPresented: $showAddBranch) {
             RepoBranchSheet(repoID: repo.id, existing: nil, db: db, isPresented: $showAddBranch)
         }
+        .sheet(isPresented: $showBasePicker) {
+            BaseBranchPicker(
+                newBranch: pendingBranch,
+                remoteBranches: remoteBranchNames.sorted(),
+                isPresented: $showBasePicker
+            ) { base in
+                checkout(branch: pendingBranch, baseBranch: base, into: pendingPath)
+            }
+        }
+        .alert("Error", isPresented: .init(
+            get: { checkoutError != nil },
+            set: { if !$0 { checkoutError = nil } }
+        )) {
+            Button("OK", role: .cancel) { checkoutError = nil }
+        } message: {
+            Text(checkoutError ?? "")
+        }
         .onAppear { load() }
         .onChange(of: repo.id) { load() }
     }
@@ -1714,45 +1929,203 @@ private struct RepoDetailView: View {
 
     private func branchPath(_ branchName: String) -> String? {
         guard let base = settings.baseWorkingDirectory else { return nil }
+        let safeName = branchName.replacingOccurrences(of: "/", with: ":")
         if let (org, repoName) = gitURLComponents(repoURL) {
-            return "\(base)/organizations/\(org)/projects/\(repoName)/branches/\(branchName)"
+            let safeOrg = org.replacingOccurrences(of: "/", with: ":")
+            let safeRepo = repoName.replacingOccurrences(of: "/", with: ":")
+            return "\(base)/organizations/\(safeOrg)/projects/\(safeRepo)/branches/\(safeName)"
         }
-        return "\(base)/repos/\(repo.name)/branches/\(branchName)"
+        let safeRepo = repo.name.replacingOccurrences(of: "/", with: ":")
+        return "\(base)/repos/\(safeRepo)/branches/\(safeName)"
     }
 
-    private func clone(branch: String, into path: String) {
+    private var mainClonePath: String? { branchPath(defaultBranch) }
+    private var isMainCloned: Bool {
+        guard let p = mainClonePath else { return false }
+        return FileManager.default.fileExists(atPath: p)
+    }
+
+    private func checkout(branch: String, baseBranch: String = "", into path: String) {
         cloningBranch = branch
+        let isDefault = branch == defaultBranch
+        let mainPath = mainClonePath ?? ""
         Task.detached {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            p.arguments = ["clone", "--branch", branch, "--single-branch", repoURL, path]
-            try? p.run(); p.waitUntilExit()
-            await MainActor.run { cloningBranch = nil }
+            let errPipe = Pipe()
+            p.standardError = errPipe
+            if !isDefault && !mainPath.isEmpty {
+                if baseBranch.isEmpty {
+                    p.arguments = ["-C", mainPath, "worktree", "add", path, branch]
+                } else {
+                    p.arguments = ["-C", mainPath, "worktree", "add", "-b", branch, path, baseBranch]
+                }
+            } else {
+                p.arguments = ["clone", "--branch", branch, "--single-branch", repoURL, path]
+            }
+            do { try p.run() } catch {
+                await MainActor.run { cloningBranch = nil; checkoutError = error.localizedDescription }
+                return
+            }
+            p.waitUntilExit()
+            if p.terminationStatus != 0 {
+                let msg = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                await MainActor.run {
+                    cloningBranch = nil
+                    checkoutError = msg.isEmpty ? "git command failed" : msg
+                }
+            } else {
+                await MainActor.run { cloningBranch = nil }
+            }
+        }
+    }
+
+    private func removeBranch(id: String, worktreePath: String) {
+        let runFrom = mainClonePath ?? worktreePath  // fall back to the worktree itself
+        Task.detached {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = ["-C", runFrom, "worktree", "remove", "--force", worktreePath]
+            let errPipe = Pipe()
+            p.standardError = errPipe
+            do { try p.run() } catch {
+                await MainActor.run { checkoutError = error.localizedDescription }
+                return
+            }
+            p.waitUntilExit()
+            if p.terminationStatus != 0 {
+                let msg = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                await MainActor.run { checkoutError = msg.isEmpty ? "git worktree remove failed" : msg }
+            } else {
+                await MainActor.run { db.deleteRepoBranch(id: id) }
+            }
         }
     }
 
     private func fetchBranches() {
+        fetchingBranches = true
         let url = repoURL
         let repoID = repo.id
-        let existing = Set(branches.map { $0.name })
+        let localRoot = mainClonePath
         Task.detached {
-            let p = Process()
-            let pipe = Pipe()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            p.arguments = ["ls-remote", "--heads", url]
-            p.standardOutput = pipe
-            try? p.run(); p.waitUntilExit()
-            let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let names = out.split(separator: "\n").compactMap { line -> String? in
-                guard let ref = line.split(separator: "\t").last else { return nil }
-                return String(ref).replacingOccurrences(of: "refs/heads/", with: "")
+            // remote branches via ls-remote
+            var remoteNames: Set<String> = []
+            if !url.isEmpty {
+                let p = Process(); let pipe = Pipe()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                p.arguments = ["ls-remote", "--heads", url]
+                p.standardOutput = pipe; p.standardError = Pipe()
+                try? p.run(); p.waitUntilExit()
+                let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                remoteNames = Set(out.split(separator: "\n").compactMap { line -> String? in
+                    guard let ref = line.split(separator: "\t").last else { return nil }
+                    return String(ref).replacingOccurrences(of: "refs/heads/", with: "")
+                })
             }
+            // local branches from main clone
+            var localNames: Set<String> = []
+            if let root = localRoot, FileManager.default.fileExists(atPath: root) {
+                let p2 = Process(); let pipe2 = Pipe()
+                p2.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                p2.arguments = ["-C", root, "branch", "--format=%(refname:short)"]
+                p2.standardOutput = pipe2; p2.standardError = Pipe()
+                try? p2.run(); p2.waitUntilExit()
+                let out2 = String(data: pipe2.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                localNames = Set(out2.split(separator: "\n")
+                    .map { String($0).trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty })
+            }
+            let allNames = remoteNames.union(localNames)
             await MainActor.run {
-                for n in names where !existing.contains(n) {
+                remoteBranchNames = remoteNames
+                localBranchNames = localNames
+                let existing = Set(db.repoBranches.filter { $0.repoID == repoID }.map { $0.name })
+                for n in allNames where !existing.contains(n) {
                     db.addRepoBranch(repoID: repoID, name: n)
                 }
+                fetchingBranches = false
             }
         }
+    }
+}
+
+private struct BaseBranchPicker: View {
+    let newBranch: String
+    let remoteBranches: [String]
+    @Binding var isPresented: Bool
+    let onConfirm: (String) -> Void
+    @State private var search = ""
+    @State private var selected = ""
+
+    private var filtered: [String] {
+        search.isEmpty ? remoteBranches : remoteBranches.filter { $0.localizedCaseInsensitiveContains(search) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Create \"\(newBranch)\"")
+                .font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.mgLabel)
+            Text("Branch not found in remote. Select a base branch:")
+                .font(.system(size: 12)).foregroundStyle(Color.mgMuted)
+
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11)).foregroundStyle(Color.mgMuted)
+                TextField("Search branches…", text: $search)
+                    .textFieldStyle(.plain).font(.system(size: 12)).foregroundStyle(Color.mgLabel)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            .background(Color.mgSurface)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(filtered, id: \.self) { branch in
+                        HStack {
+                            Text(branch)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(Color.mgLabel)
+                            Spacer()
+                            if selected == branch {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(Color.mgAccent)
+                            }
+                        }
+                        .padding(.horizontal, 10).padding(.vertical, 7)
+                        .background(selected == branch ? Color.mgAccent.opacity(0.1) : Color.clear)
+                        .contentShape(Rectangle())
+                        .onTapGesture { selected = branch }
+                        .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
+                    }
+                }
+            }
+            .frame(maxHeight: 220)
+            .background(Color.mgSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+
+            HStack {
+                Spacer()
+                Button("Cancel") { isPresented = false }
+                    .buttonStyle(.plain).foregroundStyle(Color.mgMuted)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                Button("Create & Worktree") {
+                    onConfirm(selected)
+                    isPresented = false
+                }
+                .buttonStyle(.plain).foregroundStyle(.black)
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(selected.isEmpty ? Color.mgMuted : Color.mgAccent)
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .disabled(selected.isEmpty)
+            }
+        }
+        .padding(24).frame(width: 380).background(Color.mgBg)
+        .onAppear { selected = remoteBranches.first ?? "" }
     }
 }
 
@@ -1897,10 +2270,14 @@ private struct IssuesPanel: View {
     private func repoClonePath(repoID: String) -> String? {
         guard let base = settings.baseWorkingDirectory,
               let repo = db.repos.first(where: { $0.id == repoID }) else { return nil }
+        let safeBranch = repo.defaultBranch.replacingOccurrences(of: "/", with: ":")
         if let (org, repoName) = gitURLComponents(repo.url) {
-            return "\(base)/organizations/\(org)/projects/\(repoName)/branches/\(repo.defaultBranch)"
+            let safeOrg = org.replacingOccurrences(of: "/", with: ":")
+            let safeRepo = repoName.replacingOccurrences(of: "/", with: ":")
+            return "\(base)/organizations/\(safeOrg)/projects/\(safeRepo)/branches/\(safeBranch)"
         }
-        return "\(base)/repos/\(repo.name)/branches/\(repo.defaultBranch)"
+        let safeRepo = repo.name.replacingOccurrences(of: "/", with: ":")
+        return "\(base)/repos/\(safeRepo)/branches/\(safeBranch)"
     }
 
     private func repoPaths(for issue: Issue) -> [String] {
