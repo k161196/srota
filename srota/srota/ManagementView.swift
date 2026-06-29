@@ -960,7 +960,7 @@ private struct ProjectDetailView: View {
                         VStack(alignment: .leading, spacing: 0) {
                             ForEach(filteredBranches) { branch in
                                 HStack(spacing: 8) {
-                                    let branchShortName = branch.gitName.replacingOccurrences(of: "/", with: ":")
+                                    let branchShortName = branch.gitName.replacingOccurrences(of: "/", with: "-")
                                     let isOpen = openWorkspaceNames.contains(branchShortName)
                                     Image(systemName: isOpen ? "terminal.fill" : "circle")
                                         .font(.system(size: 10))
@@ -976,7 +976,7 @@ private struct ProjectDetailView: View {
                                         if branch.gitName.hasPrefix("remotes/") || branch.hasRemote { BranchTag(kind: .remote) }
                                     }
                                     // Open button for every branch
-                                    let branchShort = branch.gitName.replacingOccurrences(of: "/", with: ":")
+                                    let branchShort = branch.gitName.replacingOccurrences(of: "/", with: "-")
                                     let orgName = db.organizations.first { $0.id == project.orgID }?.name ?? ""
                                     let localPath = branch.localPath ?? (project.path + "/branches/" + branchShort)
                                     let hasLocal = branch.localPath != nil
@@ -1178,13 +1178,13 @@ private struct FeaturesPanel: View {
     private func repoClonePath(repoID: String) -> String? {
         guard let base = settings.baseWorkingDirectory,
               let repo = db.repos.first(where: { $0.id == repoID }) else { return nil }
-        let safeBranch = repo.defaultBranch.replacingOccurrences(of: "/", with: ":")
+        let safeBranch = repo.defaultBranch.replacingOccurrences(of: "/", with: "-")
         if let (org, repoName) = gitURLComponents(repo.url) {
-            let safeOrg = org.replacingOccurrences(of: "/", with: ":")
-            let safeRepo = repoName.replacingOccurrences(of: "/", with: ":")
+            let safeOrg = org.replacingOccurrences(of: "/", with: "-")
+            let safeRepo = repoName.replacingOccurrences(of: "/", with: "-")
             return "\(base)/organizations/\(safeOrg)/projects/\(safeRepo)/branches/\(safeBranch)"
         }
-        let safeRepo = repo.name.replacingOccurrences(of: "/", with: ":")
+        let safeRepo = repo.name.replacingOccurrences(of: "/", with: "-")
         return "\(base)/repos/\(safeRepo)/branches/\(safeBranch)"
     }
 
@@ -1929,13 +1929,13 @@ private struct RepoDetailView: View {
 
     private func branchPath(_ branchName: String) -> String? {
         guard let base = settings.baseWorkingDirectory else { return nil }
-        let safeName = branchName.replacingOccurrences(of: "/", with: ":")
+        let safeName = branchName.replacingOccurrences(of: "/", with: "-")
         if let (org, repoName) = gitURLComponents(repoURL) {
-            let safeOrg = org.replacingOccurrences(of: "/", with: ":")
-            let safeRepo = repoName.replacingOccurrences(of: "/", with: ":")
+            let safeOrg = org.replacingOccurrences(of: "/", with: "-")
+            let safeRepo = repoName.replacingOccurrences(of: "/", with: "-")
             return "\(base)/organizations/\(safeOrg)/projects/\(safeRepo)/branches/\(safeName)"
         }
-        let safeRepo = repo.name.replacingOccurrences(of: "/", with: ":")
+        let safeRepo = repo.name.replacingOccurrences(of: "/", with: "-")
         return "\(base)/repos/\(safeRepo)/branches/\(safeName)"
     }
 
@@ -2270,13 +2270,13 @@ private struct IssuesPanel: View {
     private func repoClonePath(repoID: String) -> String? {
         guard let base = settings.baseWorkingDirectory,
               let repo = db.repos.first(where: { $0.id == repoID }) else { return nil }
-        let safeBranch = repo.defaultBranch.replacingOccurrences(of: "/", with: ":")
+        let safeBranch = repo.defaultBranch.replacingOccurrences(of: "/", with: "-")
         if let (org, repoName) = gitURLComponents(repo.url) {
-            let safeOrg = org.replacingOccurrences(of: "/", with: ":")
-            let safeRepo = repoName.replacingOccurrences(of: "/", with: ":")
+            let safeOrg = org.replacingOccurrences(of: "/", with: "-")
+            let safeRepo = repoName.replacingOccurrences(of: "/", with: "-")
             return "\(base)/organizations/\(safeOrg)/projects/\(safeRepo)/branches/\(safeBranch)"
         }
-        let safeRepo = repo.name.replacingOccurrences(of: "/", with: ":")
+        let safeRepo = repo.name.replacingOccurrences(of: "/", with: "-")
         return "\(base)/repos/\(safeRepo)/branches/\(safeBranch)"
     }
 
