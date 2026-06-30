@@ -1,6 +1,10 @@
 import Foundation
 
-private let daemonLabel = "com.kiran.srota.daemon"
+#if DEBUG
+let daemonLabel = "com.kiran.srota.daemon-debug"
+#else
+let daemonLabel = "com.kiran.srota.daemon"
+#endif
 
 /// Writes the LaunchAgent plist and bootstraps it if needed. Safe to call on every launch.
 func installDaemonLaunchAgent() {

@@ -335,31 +335,26 @@ final class DaemonConnection {
         into ref: DaemonPaneRef
     ) {
         stateLock.withLock {
-            if let existing = managedSessions[stableID] {
-                existing.paneID = nil
-                existing.isClosing = false
-                managedSessions[stableID] = ManagedSession(
-                    stableID: stableID,
-                    cwd: cwd,
-                    env: env,
-                    session: session,
-                    ref: ref
-                )
-            } else {
-                managedSessions[stableID] = ManagedSession(
-                    stableID: stableID,
-                    cwd: cwd,
-                    env: env,
-                    session: session,
-                    ref: ref
-                )
+            // BUG-2 fix: clean up stale paneID mappings before replacing the managed session
+            if let existing = managedSessions[stableID], let oldPaneID = existing.paneID {
+                sessionsByPaneID.removeValue(forKey: oldPaneID)
+                stableIDByPaneID.removeValue(forKey: oldPaneID)
             }
+            managedSessions[stableID] = ManagedSession(
+                stableID: stableID, cwd: cwd, env: env, session: session, ref: ref
+            )
         }
 
         if isConnectedSnapshot() {
             Task { [weak self] in await self?.restoreManagedSession(stableID: stableID) }
         } else {
             scheduleReconnect()
+        }
+    }
+
+    func killPane(paneID: String) {
+        ioQueue.async { [self] in
+            try? send(["type": "close", "paneID": paneID])
         }
     }
 
@@ -444,8 +439,14 @@ final class DaemonConnection {
             return
         }
 
-        guard let paneID = try? await createPTY(cmd: [], cwd: managed.cwd, stableID: stableID, env: managed.env),
-              let rebound = bind(paneID: paneID, stableID: stableID) else { return }
+        // BUG-1 fix: split the guard so a PTY created during the async gap doesn't get orphaned
+        guard let paneID = try? await createPTY(cmd: [], cwd: managed.cwd, stableID: stableID, env: managed.env) else { return }
+        guard let rebound = bind(paneID: paneID, stableID: stableID) else {
+            // Pane was closed while createPTY was in-flight — kill the orphaned daemon process
+            killPane(paneID: paneID)
+            stateLock.withLock { managedSessions.removeValue(forKey: stableID) }
+            return
+        }
         attach(paneID: paneID, session: rebound.session)
         applyPendingResize(for: rebound, paneID: paneID)
     }

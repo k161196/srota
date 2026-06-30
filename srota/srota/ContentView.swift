@@ -106,17 +106,21 @@ struct AgentHookEvent: Codable {
     var timestamp: Double
 }
 
+@Observable
 final class PaneEntry: Identifiable {
     let id = UUID()
     let hookPaneID: String
     let daemonStableID: String
     let viewState: TerminalViewState
     var initialCWD: String?
-    init(hookPaneID: String, daemonStableID: String, viewState: TerminalViewState, initialCWD: String? = nil) {
+    var isStarted: Bool = true
+    var startAction: (() -> Void)? = nil
+    init(hookPaneID: String, daemonStableID: String, viewState: TerminalViewState, initialCWD: String? = nil, isStarted: Bool = true) {
         self.hookPaneID = hookPaneID
         self.daemonStableID = daemonStableID
         self.viewState = viewState
         self.initialCWD = initialCWD
+        self.isStarted = isStarted
     }
 }
 
@@ -154,7 +158,7 @@ final class TerminalTab: Identifiable, ObservableObject {
     let initialWorkingDirectory: String?
     private var daemon: DaemonConnection?
 
-    init(colorScheme: ColorScheme, workingDirectory: String? = nil, daemon: DaemonConnection? = nil, firstPaneStableID: String? = nil) {
+    init(colorScheme: ColorScheme, workingDirectory: String? = nil, daemon: DaemonConnection? = nil, firstPaneStableID: String? = nil, autoStart: Bool = true) {
         self.initialWorkingDirectory = workingDirectory
         self.daemon = daemon
         let paneHookID = UUID().uuidString
@@ -192,13 +196,23 @@ final class TerminalTab: Identifiable, ObservableObject {
             self.daemon?.closeSession(stableID: stableID, paneID: ref.id)
             self.removePane(id: firstID)
         }
-        if let daemon {
+        if autoStart, let daemon {
             daemon.spawnOrAttach(
                 stableID: stableID,
                 cwd: workingDirectory ?? NSHomeDirectory(),
                 env: ["ZDOTDIR": "\(NSHomeDirectory())/\(Srota.dir)"],
                 session: session, into: ref
             )
+        } else if !autoStart {
+            first.isStarted = false
+            first.startAction = { [weak self] in
+                self?.daemon?.spawnOrAttach(
+                    stableID: stableID,
+                    cwd: workingDirectory ?? NSHomeDirectory(),
+                    env: ["ZDOTDIR": "\(NSHomeDirectory())/\(Srota.dir)"],
+                    session: session, into: ref
+                )
+            }
         }
     }
 
@@ -344,8 +358,9 @@ session: session, into: ref
             w: CGFloat(record.lw), h: CGFloat(record.lh))
         panes.append(entry)
         focusedPaneID = entry.id
-        if let daemon {
-            daemon.spawnOrAttach(
+        entry.isStarted = false
+        entry.startAction = { [weak self] in
+            self?.daemon?.spawnOrAttach(
                 stableID: record.id,
                 cwd: cwd ?? NSHomeDirectory(),
                 env: ["ZDOTDIR": "\(NSHomeDirectory())/\(Srota.dir)"],
@@ -502,7 +517,7 @@ final class Workspace: Identifiable, ObservableObject {
     func addRestoredTab(record: TabRecord, colorScheme: ColorScheme, firstPaneStableID: String? = nil) {
         lastColorScheme = colorScheme
         let cwd = record.initialCWD.isEmpty ? nil : record.initialCWD
-        let tab = TerminalTab(colorScheme: colorScheme, workingDirectory: cwd, daemon: daemon, firstPaneStableID: firstPaneStableID)
+        let tab = TerminalTab(colorScheme: colorScheme, workingDirectory: cwd, daemon: daemon, firstPaneStableID: firstPaneStableID, autoStart: false)
         tab.closeTabCallback = { [weak self, weak tab] in
             guard let self, let tab else { return }
             self.closeTab(id: tab.id)
@@ -817,6 +832,23 @@ struct ContentView: View {
         .onChange(of: sidebarVisible) { _, visible in
             guard !visible else { return }
             clearSidebarKeyboardFocus(restorePane: true)
+        }
+        .onChange(of: daemon.isConnected) { _, connected in
+            guard connected else { return }
+            Task {
+                guard let running = try? await daemon.list() else { return }
+                let ids = Set(running.filter { $0.exitCode == nil }.map(\.stableID))
+                for ws in manager.allWorkspaces {
+                    for tab in ws.tabs {
+                        for pane in tab.panes where !pane.isStarted {
+                            if ids.contains(pane.daemonStableID) {
+                                pane.startAction?()
+                                pane.isStarted = true
+                            }
+                        }
+                    }
+                }
+            }
         }
         .onAppear {
             if !restoredSessions {
@@ -1282,7 +1314,7 @@ struct ContentView: View {
                 for (i, pane) in tab.panes.enumerated() {
                     if let layout = tab.paneLayouts[pane.id] {
                         db.savePane(PaneRecord(
-                            id: pane.id.uuidString, tabID: tab.id.uuidString,
+                            id: pane.daemonStableID, tabID: tab.id.uuidString,
                             isPrimary: i == 0,
                             lx: Double(layout.x), ly: Double(layout.y),
                             lw: Double(layout.w), lh: Double(layout.h),
@@ -2246,6 +2278,40 @@ private struct PaneResizeOverlay: NSViewRepresentable {
 // Primary is always ZStack child 0. Named coordinate space "panes" lets drag gestures
 // report absolute positions — no manual offset math needed.
 
+private struct PaneStartOverlay: View {
+    let cwd: String?
+    let onStart: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.88)
+            VStack(spacing: 14) {
+                Image(systemName: "terminal")
+                    .font(.system(size: 28))
+                    .foregroundStyle(Color.labelMuted)
+                if let cwd, !cwd.isEmpty {
+                    Text(URL(fileURLWithPath: cwd).lastPathComponent)
+                        .font(.system(size: 12).monospaced())
+                        .foregroundStyle(Color.labelMuted)
+                        .lineLimit(1)
+                }
+                Button(action: onStart) {
+                    Text("Start")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.labelPrimary)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 7)
+                        .background(Color.accentOrange.opacity(0.15))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.accentOrange.opacity(0.45)))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .ignoresSafeArea()
+    }
+}
+
 private struct TerminalContentView: View {
     @ObservedObject var tab: TerminalTab
     var isSelected: Bool = false
@@ -2264,7 +2330,7 @@ private struct TerminalContentView: View {
                 ForEach(tab.panes) { entry in
                     if let l = tab.paneLayouts[entry.id] {
                         paneView(
-                            id: entry.id, state: entry.viewState, layout: l,
+                            entry: entry, layout: l,
                             onClose: { tab.removePane(id: entry.id); onPaneResizeFinished() },
                             sz: sz,
                             focused: tab.focusedPaneID == entry.id
@@ -2274,7 +2340,7 @@ private struct TerminalContentView: View {
                 tab.focusedPaneID = entry.id
             })
                         .onAppear {
-                            if tab.focusedPaneID == entry.id {
+                            if tab.focusedPaneID == entry.id && entry.isStarted {
                                 requestKeyboardFocus(for: entry.viewState)
                             }
                         }
@@ -2300,12 +2366,12 @@ private struct TerminalContentView: View {
             }
             .coordinateSpace(name: "panes")
             .onChange(of: tab.focusedPaneID) { _, newID in
-                if let entry = tab.panes.first(where: { $0.id == newID }) {
+                if let entry = tab.panes.first(where: { $0.id == newID }), entry.isStarted {
                     requestKeyboardFocus(for: entry.viewState)
                 }
             }
             .onChange(of: isSelected) { _, selected in
-                guard selected, let entry = tab.panes.first(where: { $0.id == tab.focusedPaneID }) else { return }
+                guard selected, let entry = tab.panes.first(where: { $0.id == tab.focusedPaneID }), entry.isStarted else { return }
                 requestKeyboardFocus(for: entry.viewState)
             }
         }
@@ -2313,9 +2379,11 @@ private struct TerminalContentView: View {
     }
 
     @ViewBuilder
-    private func paneView(id: UUID, state: TerminalViewState,
+    private func paneView(entry: PaneEntry,
                           layout l: PaneLayout, onClose: @escaping () -> Void,
                           sz: CGSize, focused: Bool) -> some View {
+        let id = entry.id
+        let state = entry.viewState
         let isSource = isDragging && dragSource == id
         let isTarget = isDragging && dragHover  == id && dragSource != id
 
@@ -2324,6 +2392,16 @@ private struct TerminalContentView: View {
             TerminalSurfaceView(context: state)
                 .padding(.top, 30)
                 .opacity(isSource ? 0.45 : 1)
+            if !entry.isStarted {
+                PaneStartOverlay(cwd: entry.initialCWD) {
+                    entry.startAction?()
+                    entry.isStarted = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        requestKeyboardFocus(for: entry.viewState)
+                    }
+                }
+                .padding(.top, 30)
+            }
             if isTarget {
                 switch dropSide {
                 case .left:

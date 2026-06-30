@@ -871,7 +871,7 @@ private struct LaunchdStatus {
 }
 
 private func loadLaunchdStatus() -> LaunchdStatus {
-    let plistPath = "\(NSHomeDirectory())/Library/LaunchAgents/com.kiran.srota.daemon.plist"
+    let plistPath = "\(NSHomeDirectory())/Library/LaunchAgents/\(daemonLabel).plist"
     let plistInstalled = FileManager.default.fileExists(atPath: plistPath)
 
     // Find binary (mirrors DaemonLifecycle.findDaemonBinary logic)
@@ -884,12 +884,12 @@ private func loadLaunchdStatus() -> LaunchdStatus {
         .appendingPathComponent("srota-daemon").path
     let binaryPath = [bundleExe, devExe].compactMap { $0 }.first { fm.fileExists(atPath: $0) }
 
-    // launchctl list com.kiran.srota.daemon → "<PID|->\t<exit>\t<label>"
+    // launchctl list <daemonLabel> → "<PID|->\t<exit>\t<label>"
     var pid: Int32? = nil
     var lastExitStatus: Int? = nil
     let task = Process()
     task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-    task.arguments = ["list", "com.kiran.srota.daemon"]
+    task.arguments = ["list", daemonLabel]
     let pipe = Pipe()
     task.standardOutput = pipe
     task.standardError = Pipe()
@@ -909,7 +909,7 @@ private func loadLaunchdStatus() -> LaunchdStatus {
 
 private func restartDaemon() {
     let domain = "gui/\(getuid())"
-    let label  = "com.kiran.srota.daemon"
+    let label  = daemonLabel
     let task = Process()
     task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
     // kickstart -k kills the running instance and starts a fresh one
@@ -1005,7 +1005,7 @@ private struct DaemonSettingsView: View {
                     VStack(spacing: 1) {
                         ForEach(panes, id: \.paneID) { pane in
                             PTYProcessRow(pane: pane) {
-                                        daemon.closeSession(stableID: pane.stableID, paneID: pane.paneID)
+                                daemon.killPane(paneID: pane.paneID)
                                 Task { try? await Task.sleep(nanoseconds: 1_200_000_000); await refresh() }
                             }
                         }
