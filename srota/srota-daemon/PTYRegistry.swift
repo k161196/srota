@@ -2,6 +2,7 @@ import Foundation
 
 final class PTYRegistry {
     private var processes: [String: PTYProcess] = [:]
+    private var pidToPaneID: [pid_t: String] = [:]
     private var clients: [ObjectIdentifier: ClientSession] = [:]
     private let lock = NSLock()
 
@@ -16,13 +17,17 @@ final class PTYRegistry {
     func removeClient(_ client: ClientSession) {
         lock.lock()
         clients.removeValue(forKey: ObjectIdentifier(client))
-        for proc in processes.values { proc.removeSubscriber(client) }
+        let procs = Array(processes.values)
         lock.unlock()
+
+        for proc in procs {
+            proc.removeSubscriber(client)
+        }
     }
 
     // MARK: - Command dispatch
 
-    func handle(_ req: DaemonRequest, from client: ClientSession) {
+    func handle(_ req: DaemonRequest, client: ClientSession) {
         switch req {
         case .create(let params):
             let paneID = UUID().uuidString
@@ -36,42 +41,36 @@ final class PTYRegistry {
                 )
                 lock.lock()
                 processes[paneID] = proc
+                pidToPaneID[proc.pid] = paneID
                 lock.unlock()
-                client.send(.created(paneID: paneID))
+                client.send(.created(paneID: paneID, requestID: params.requestID))
             } catch {
-                client.send(.error(error.localizedDescription))
+                client.send(.error(error.localizedDescription, requestID: params.requestID))
             }
 
         case .attach(let paneID):
-            lock.lock()
-            let proc = processes[paneID]
-            lock.unlock()
-            guard let proc else { client.send(.error("pane not found")); return }
+            let proc = withProcess(paneID: paneID)
+            guard let proc else {
+                client.send(.error("pane not found", requestID: nil))
+                return
+            }
             proc.attach(client: client)
 
         case .input(let paneID, let data):
-            lock.lock()
-            let proc = processes[paneID]
-            lock.unlock()
-            guard let proc, let bytes = Data(base64Encoded: data) else { return }
+            guard let proc = withProcess(paneID: paneID), let bytes = Data(base64Encoded: data) else { return }
             proc.write(bytes)
 
         case .resize(let paneID, let rows, let cols):
-            lock.lock()
-            let proc = processes[paneID]
-            lock.unlock()
-            proc?.resize(rows: rows, cols: cols)
+            withProcess(paneID: paneID)?.resize(rows: rows, cols: cols)
 
-        case .list:
+        case .list(let requestID):
             lock.lock()
-            let infos = processes.values.map { $0.info }
+            let infos = processes.values.map(\.info)
             lock.unlock()
-            client.send(.listed(infos))
+            client.send(.listed(infos, requestID: requestID))
 
         case .close(let paneID):
-            lock.lock()
-            let proc = processes.removeValue(forKey: paneID)
-            lock.unlock()
+            let proc = withProcess(paneID: paneID)
             proc?.terminate()
             client.send(.ok)
         }
@@ -80,10 +79,22 @@ final class PTYRegistry {
     // MARK: - Child reaping
 
     func reapExited(pid: pid_t, exitCode: Int32) {
+        let proc: PTYProcess?
         lock.lock()
-        for proc in processes.values where proc.pid == pid {
-            proc.markExited(code: exitCode)
+        if let paneID = pidToPaneID.removeValue(forKey: pid) {
+            proc = processes.removeValue(forKey: paneID)
+        } else {
+            proc = nil
         }
         lock.unlock()
+
+        proc?.markExited(code: exitCode)
+    }
+
+    private func withProcess(paneID: String) -> PTYProcess? {
+        lock.lock()
+        let proc = processes[paneID]
+        lock.unlock()
+        return proc
     }
 }

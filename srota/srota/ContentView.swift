@@ -109,11 +109,13 @@ struct AgentHookEvent: Codable {
 final class PaneEntry: Identifiable {
     let id = UUID()
     let hookPaneID: String
+    let daemonStableID: String
     let viewState: TerminalViewState
     var initialCWD: String?
-    init(hookPaneID: String, viewState: TerminalViewState, initialCWD: String? = nil) {
+    init(hookPaneID: String, daemonStableID: String, viewState: TerminalViewState, initialCWD: String? = nil) {
         self.hookPaneID = hookPaneID
-        self.viewState  = viewState
+        self.daemonStableID = daemonStableID
+        self.viewState = viewState
         self.initialCWD = initialCWD
     }
 }
@@ -173,7 +175,13 @@ final class TerminalTab: Identifiable, ObservableObject {
         )
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: workingDirectory)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
-        let first = PaneEntry(hookPaneID: paneHookID, viewState: state, initialCWD: workingDirectory)
+        let stableID = firstPaneStableID ?? UUID().uuidString
+        let first = PaneEntry(
+            hookPaneID: paneHookID,
+            daemonStableID: stableID,
+            viewState: state,
+            initialCWD: workingDirectory
+        )
         self.panes = [first]
         self.paneLayouts = [first.id: PaneLayout()]
         self.focusedPaneID = first.id
@@ -181,11 +189,10 @@ final class TerminalTab: Identifiable, ObservableObject {
         let firstID = first.id
         state.onClose = { [weak self, ref] _ in
             guard let self else { return }
-            if let paneID = ref.id { self.daemon?.closePTY(paneID: paneID) }
+            self.daemon?.closeSession(stableID: stableID, paneID: ref.id)
             self.removePane(id: firstID)
         }
         if let daemon {
-            let stableID = firstPaneStableID ?? first.id.uuidString
             daemon.spawnOrAttach(
                 stableID: stableID,
                 cwd: workingDirectory ?? NSHomeDirectory(),
@@ -250,16 +257,22 @@ final class TerminalTab: Identifiable, ObservableObject {
         expandNeighbor(of: id)
         panes.removeAll { $0.id == id }
         paneLayouts.removeValue(forKey: id)
-        paneNames.removeValue(forKey: id)
-        if let hookID { agentNotification.clearIfOwned(byPaneID: hookID) }
-        if panes.isEmpty {
-            closeTabCallback?()
-        } else if wasFocused {
-            focusedPaneID = panes[0].id
-        }
-    }
+paneNames.removeValue(forKey: id)
+if let hookID { agentNotification.clearIfOwned(byPaneID: hookID) }
+if panes.isEmpty {
+closeTabCallback?()
+} else if wasFocused {
+focusedPaneID = panes[0].id
+}
+}
 
-    private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirectory: String? = nil) {
+func shutdown() {
+for pane in panes {
+daemon?.closeSession(stableID: pane.daemonStableID)
+}
+}
+
+private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirectory: String? = nil) {
         let paneHookID = UUID().uuidString
         let state = TerminalViewState(terminalConfiguration: TerminalConfiguration())
         let ref = DaemonPaneRef()
@@ -278,23 +291,24 @@ final class TerminalTab: Identifiable, ObservableObject {
         )
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: workingDirectory)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
-        let entry = PaneEntry(hookPaneID: paneHookID, viewState: state, initialCWD: workingDirectory)
-        let entryID = entry.id
-        state.onClose = { [weak self, ref] _ in
-            guard let self else { return }
-            if let paneID = ref.id { self.daemon?.closePTY(paneID: paneID) }
-            self.removePane(id: entryID)
-        }
+let stableID = UUID().uuidString
+let entry = PaneEntry(hookPaneID: paneHookID, daemonStableID: stableID, viewState: state, initialCWD: workingDirectory)
+let entryID = entry.id
+state.onClose = { [weak self, ref] _ in
+guard let self else { return }
+self.daemon?.closeSession(stableID: stableID, paneID: ref.id)
+self.removePane(id: entryID)
+}
         paneLayouts[entry.id] = layout
         panes.append(entry)
         focusedPaneID = entry.id
         if let daemon {
-            daemon.spawnOrAttach(
-                stableID: entry.id.uuidString,
-                cwd: workingDirectory ?? NSHomeDirectory(),
-                env: ["ZDOTDIR": "\(NSHomeDirectory())/\(Srota.dir)"],
-                session: session, into: ref
-            )
+daemon.spawnOrAttach(
+stableID: stableID,
+cwd: workingDirectory ?? NSHomeDirectory(),
+env: ["ZDOTDIR": "\(NSHomeDirectory())/\(Srota.dir)"],
+session: session, into: ref
+)
         }
     }
 
@@ -318,13 +332,13 @@ final class TerminalTab: Identifiable, ObservableObject {
         )
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: cwd)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
-        let entry = PaneEntry(hookPaneID: paneHookID, viewState: state, initialCWD: cwd)
-        let entryID = entry.id
-        state.onClose = { [weak self, ref] _ in
-            guard let self else { return }
-            if let paneID = ref.id { self.daemon?.closePTY(paneID: paneID) }
-            self.removePane(id: entryID)
-        }
+ let entry = PaneEntry(hookPaneID: paneHookID, daemonStableID: record.id, viewState: state, initialCWD: cwd)
+ let entryID = entry.id
+ state.onClose = { [weak self, ref] _ in
+ guard let self else { return }
+ self.daemon?.closeSession(stableID: record.id, paneID: ref.id)
+ self.removePane(id: entryID)
+ }
         paneLayouts[entry.id] = PaneLayout(
             x: CGFloat(record.lx), y: CGFloat(record.ly),
             w: CGFloat(record.lw), h: CGFloat(record.lh))
@@ -497,10 +511,13 @@ final class Workspace: Identifiable, ObservableObject {
         if record.isSelected { selectedTabID = tab.id }
     }
 
-    func closeTab(id: UUID) {
-        if selectedTabID == id {
-            if let idx = tabs.firstIndex(where: { $0.id == id }) {
-                let next = tabs.indices.contains(idx + 1) ? tabs[idx + 1].id
+func closeTab(id: UUID) {
+ if let tab = tabs.first(where: { $0.id == id }) {
+ tab.shutdown()
+ }
+ if selectedTabID == id {
+ if let idx = tabs.firstIndex(where: { $0.id == id }) {
+ let next = tabs.indices.contains(idx + 1) ? tabs[idx + 1].id
                          : idx > 0 ? tabs[idx - 1].id : nil
                 selectedTabID = next
             }
@@ -580,10 +597,13 @@ final class TerminalManager: ObservableObject {
         return f
     }
 
-    func closeWorkspace(id: UUID) {
-        if selectedWorkspaceID == id {
-            let all = allWorkspaces
-            if let idx = all.firstIndex(where: { $0.id == id }) {
+func closeWorkspace(id: UUID) {
+if let workspace = allWorkspaces.first(where: { $0.id == id }) {
+for tab in workspace.tabs { tab.shutdown() }
+}
+if selectedWorkspaceID == id {
+let all = allWorkspaces
+if let idx = all.firstIndex(where: { $0.id == id }) {
                 selectedWorkspaceID = all.indices.contains(idx + 1) ? all[idx + 1].id
                                     : idx > 0 ? all[idx - 1].id : nil
             }

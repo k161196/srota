@@ -6,6 +6,10 @@ let srotaDir = ProcessInfo.processInfo.environment["SROTA_DIR"] ?? ".srota"
 let socketPath = ProcessInfo.processInfo.environment["SROTA_SOCKET_PATH"]
     ?? "\(NSHomeDirectory())/\(srotaDir)/daemon.sock"
 
+if runDaemonSelfCheck() {
+    exit(0)
+}
+
 // Ensure ~/.srota/ exists
 try? FileManager.default.createDirectory(
     atPath: "\(NSHomeDirectory())/\(srotaDir)",
@@ -28,7 +32,9 @@ reapTimer.setEventHandler {
     while true {
         let pid = waitpid(-1, &status, WNOHANG)
         if pid <= 0 { break }
-        if (status & 0x7f) == 0 { registry.reapExited(pid: pid, exitCode: (status >> 8) & 0xff) }
+        if let exitCode = processExitCode(from: status) {
+            registry.reapExited(pid: pid, exitCode: exitCode)
+        }
     }
 }
 reapTimer.resume()
@@ -73,3 +79,14 @@ acceptSource.resume()
 
 print("[srota-daemon] listening at \(socketPath)")
 dispatchMain()
+
+func processExitCode(from status: Int32) -> Int32? {
+    let signal = status & 0x7f
+    if signal == 0 {
+        return (status >> 8) & 0xff
+    }
+    if signal != 0x7f {
+        return 128 + signal
+    }
+    return nil
+}

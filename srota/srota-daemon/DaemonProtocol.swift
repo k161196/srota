@@ -3,21 +3,29 @@ import Foundation
 // MARK: - Requests
 
 struct CreateParams: Decodable {
-    let cmd: [String]       // empty = default shell
+    let requestID: String?
+    let cmd: [String] // empty = default shell
     let cwd: String
-    let stableID: String    // SROTA_PANE_ID — the app-side UUID, stable across daemon restarts
+    let stableID: String // SROTA_PANE_ID — app-side UUID, stable across daemon restarts
     let env: [String: String]
 }
 
 enum DaemonRequest: Decodable {
     case create(CreateParams)
     case attach(paneID: String)
-    case input(paneID: String, data: String)            // data is base64
+    case input(paneID: String, data: String) // data is base64
     case resize(paneID: String, rows: UInt16, cols: UInt16)
-    case list
+    case list(requestID: String?)
     case close(paneID: String)
 
-    private enum CodingKeys: String, CodingKey { case type, paneID, data, rows, cols }
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case requestID
+        case paneID
+        case data
+        case rows
+        case cols
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -38,7 +46,7 @@ enum DaemonRequest: Decodable {
                 cols: try c.decode(UInt16.self, forKey: .cols)
             )
         case "list":
-            self = .list
+            self = .list(requestID: try c.decodeIfPresent(String.self, forKey: .requestID))
         case "close":
             self = .close(paneID: try c.decode(String.self, forKey: .paneID))
         default:
@@ -53,26 +61,35 @@ struct PTYInfo: Encodable {
     let paneID: String
     let stableID: String
     let pid: Int32
-    let cwd: String         // initial CWD — live CWD comes from shell hooks
-    let exitCode: Int32?    // nil = still running
+    let cwd: String // initial CWD
+    let exitCode: Int32?
 }
 
 enum DaemonResponse: Encodable {
-    case created(paneID: String)
-    case ringBuffer(paneID: String, data: String)   // base64, replayed on attach
-    case live(paneID: String, data: String)         // base64, streaming output
-    case listed([PTYInfo])
+    case created(paneID: String, requestID: String?)
+    case ringBuffer(paneID: String, data: String)
+    case live(paneID: String, data: String)
+    case listed([PTYInfo], requestID: String?)
     case dead(paneID: String, exitCode: Int32)
     case ok
-    case error(String)
+    case error(String, requestID: String?)
 
-    private enum CodingKeys: String, CodingKey { case type, paneID, data, panes, message, exitCode }
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case requestID
+        case paneID
+        case data
+        case panes
+        case message
+        case exitCode
+    }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .created(let id):
+        case .created(let id, let requestID):
             try c.encode("created", forKey: .type)
+            try c.encodeIfPresent(requestID, forKey: .requestID)
             try c.encode(id, forKey: .paneID)
         case .ringBuffer(let id, let d):
             try c.encode("ring_buffer", forKey: .type)
@@ -82,8 +99,9 @@ enum DaemonResponse: Encodable {
             try c.encode("live", forKey: .type)
             try c.encode(id, forKey: .paneID)
             try c.encode(d, forKey: .data)
-        case .listed(let ps):
+        case .listed(let ps, let requestID):
             try c.encode("listed", forKey: .type)
+            try c.encodeIfPresent(requestID, forKey: .requestID)
             try c.encode(ps, forKey: .panes)
         case .dead(let id, let code):
             try c.encode("dead", forKey: .type)
@@ -91,8 +109,9 @@ enum DaemonResponse: Encodable {
             try c.encode(code, forKey: .exitCode)
         case .ok:
             try c.encode("ok", forKey: .type)
-        case .error(let m):
+        case .error(let m, let requestID):
             try c.encode("error", forKey: .type)
+            try c.encodeIfPresent(requestID, forKey: .requestID)
             try c.encode(m, forKey: .message)
         }
     }

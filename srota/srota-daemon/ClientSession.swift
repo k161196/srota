@@ -1,5 +1,5 @@
-import Foundation
 import Darwin
+import Foundation
 
 final class ClientSession {
     let fd: Int32
@@ -7,7 +7,7 @@ final class ClientSession {
     private var readBuffer = Data()
     private var readSource: DispatchSourceRead?
 
-    // Self-retain: DispatchSource holds event handler closure which captures self.
+    // Self-retain: DispatchSource holds event handler closure that captures self.
     // Released when source is cancelled on disconnect.
     private var selfRetain: ClientSession?
 
@@ -27,7 +27,7 @@ final class ClientSession {
         src.setCancelHandler { [self] in
             registry.removeClient(self)
             Darwin.close(fd)
-            selfRetain = nil     // release self-retain → dealloc if no other holders
+            selfRetain = nil
         }
         src.resume()
         readSource = src
@@ -36,7 +36,10 @@ final class ClientSession {
     private func handleReadable() {
         var tmp = [UInt8](repeating: 0, count: 4096)
         let n = Darwin.read(fd, &tmp, tmp.count)
-        guard n > 0 else { readSource?.cancel(); return }
+        guard n > 0 else {
+            readSource?.cancel()
+            return
+        }
 
         readBuffer.append(contentsOf: tmp[..<n])
         processLines()
@@ -53,10 +56,10 @@ final class ClientSession {
 
     private func handle(line: Data) {
         guard let req = try? JSONDecoder().decode(DaemonRequest.self, from: line) else {
-            send(.error("bad request"))
+            send(.error("bad request", requestID: nil))
             return
         }
-        registry.handle(req, from: self)
+        registry.handle(req, client: self)
     }
 
     // MARK: - Send
@@ -64,8 +67,26 @@ final class ClientSession {
     func send(_ response: DaemonResponse) {
         guard var data = try? JSONEncoder().encode(response) else { return }
         data.append(UInt8(ascii: "\n"))
-        data.withUnsafeBytes { ptr in
-            _ = Darwin.write(fd, ptr.baseAddress!, ptr.count)
-        }
+        _ = writeAll(fd: fd, data: data)
     }
+}
+
+@discardableResult
+private func writeAll(fd: Int32, data: Data) -> Bool {
+    var offset = 0
+    while offset < data.count {
+        let wrote = data.withUnsafeBytes { rawBytes -> Int in
+            let base = rawBytes.baseAddress!.advanced(by: offset)
+            return Darwin.write(fd, base, data.count - offset)
+        }
+        if wrote > 0 {
+            offset += wrote
+            continue
+        }
+        if wrote == -1 && errno == EINTR {
+            continue
+        }
+        return false
+    }
+    return true
 }

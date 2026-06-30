@@ -880,7 +880,8 @@ private func loadLaunchdStatus() -> LaunchdStatus {
         .deletingLastPathComponent().appendingPathComponent("srota-daemon").path
     let devExe = Bundle.main.executableURL?
         .deletingLastPathComponent().deletingLastPathComponent()
-        .deletingLastPathComponent().appendingPathComponent("srota-daemon").path
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("srota-daemon").path
     let binaryPath = [bundleExe, devExe].compactMap { $0 }.first { fm.fileExists(atPath: $0) }
 
     // launchctl list com.kiran.srota.daemon → "<PID|->\t<exit>\t<label>"
@@ -951,9 +952,10 @@ private struct DaemonSettingsView: View {
                               value: launchd.plistInstalled ? "Installed" : "Not installed")
                     Divider().background(Color.stBorder)
                     StatusRow(label: "Daemon process",
-                              ok: launchd.pid != nil,
+                              ok: launchd.pid != nil || daemon.isConnected,
                               value: launchd.pid.map { "Running (PID \($0))" }
-                                  ?? (launchd.lastExitStatus.map { "Stopped (exit \($0))" } ?? "Not running"))
+                                  ?? (daemon.isConnected ? "Running" :
+                                      launchd.lastExitStatus.map { "Stopped (exit \($0))" } ?? "Not running"))
                     Divider().background(Color.stBorder)
                     StatusRow(label: "Socket",
                               ok: daemon.isConnected,
@@ -1003,7 +1005,7 @@ private struct DaemonSettingsView: View {
                     VStack(spacing: 1) {
                         ForEach(panes, id: \.paneID) { pane in
                             PTYProcessRow(pane: pane) {
-                                daemon.closePTY(paneID: pane.paneID)
+                                        daemon.closeSession(stableID: pane.stableID, paneID: pane.paneID)
                                 Task { try? await Task.sleep(nanoseconds: 200_000_000); await refresh() }
                             }
                         }

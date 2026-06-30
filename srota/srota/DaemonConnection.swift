@@ -1,9 +1,9 @@
-import Foundation
-import Observation
-import GhosttyTerminal
 import Darwin
+import Foundation
+import GhosttyTerminal
+import Observation
 
-/// Thread-safe box for the daemon pane ID, which arrives asynchronously after createPTY.
+/// Thread-safe box for daemon pane ID, which arrives asynchronously from createPTY.
 final class DaemonPaneRef: @unchecked Sendable {
     private let lock = NSLock()
     nonisolated(unsafe) private var _id: String?
@@ -11,13 +11,17 @@ final class DaemonPaneRef: @unchecked Sendable {
 
     nonisolated var id: String? { lock.withLock { _id } }
 
-    /// Atomically sets the ID and returns any resize that arrived before the ID was known.
+    /// Atomically sets the active pane ID and returns any resize buffered before attach.
     nonisolated func setID(_ newID: String) -> (rows: UInt16, cols: UInt16)? {
         lock.withLock {
             _id = newID
             defer { _pendingResize = nil }
             return _pendingResize
         }
+    }
+
+    nonisolated func clearID() {
+        lock.withLock { _id = nil }
     }
 
     nonisolated func storePendingResize(rows: UInt16, cols: UInt16) {
@@ -43,6 +47,30 @@ struct PTYInfo {
     }
 }
 
+private final class ManagedSession {
+    let stableID: String
+    let cwd: String
+    let env: [String: String]
+    let session: InMemoryTerminalSession
+    let ref: DaemonPaneRef
+    var paneID: String?
+    var isClosing = false
+
+    init(
+        stableID: String,
+        cwd: String,
+        env: [String: String],
+        session: InMemoryTerminalSession,
+        ref: DaemonPaneRef
+    ) {
+        self.stableID = stableID
+        self.cwd = cwd
+        self.env = env
+        self.session = session
+        self.ref = ref
+    }
+}
+
 @Observable
 final class DaemonConnection {
     private(set) var isConnected = false
@@ -50,9 +78,14 @@ final class DaemonConnection {
     @ObservationIgnored private var fd: Int32 = -1
     @ObservationIgnored private var readBuffer = Data()
     @ObservationIgnored private var readSource: DispatchSourceRead?
-    @ObservationIgnored private var sessions: [String: InMemoryTerminalSession] = [:]
-    @ObservationIgnored private var pendingCreates: [CheckedContinuation<String, Error>] = []
-    @ObservationIgnored private var pendingLists: [CheckedContinuation<[PTYInfo], Error>] = []
+    @ObservationIgnored private var pendingCreates: [String: CheckedContinuation<String, Error>] = [:]
+    @ObservationIgnored private var pendingLists: [String: CheckedContinuation<[PTYInfo], Error>] = [:]
+    @ObservationIgnored private var sessionsByPaneID: [String: InMemoryTerminalSession] = [:]
+    @ObservationIgnored private var stableIDByPaneID: [String: String] = [:]
+    @ObservationIgnored private var managedSessions: [String: ManagedSession] = [:]
+    @ObservationIgnored private var restoringStableIDs: Set<String> = []
+    @ObservationIgnored private var reconnectScheduled = false
+    @ObservationIgnored private let stateLock = NSLock()
     @ObservationIgnored private let ioQueue = DispatchQueue(label: "in.trackk.srota.daemon-io")
 
     private var socketPath: String {
@@ -62,9 +95,15 @@ final class DaemonConnection {
     // MARK: - Connect
 
     func connectWithRetry() async {
-        var delay: UInt64 = 250_000_000  // 250ms, doubles each attempt up to 4s
+        if isConnectedSnapshot() { return }
+        var delay: UInt64 = 250_000_000
         while !Task.isCancelled {
-            do { try await connect(); return } catch {}
+            do {
+                try await connect()
+                stateLock.withLock { reconnectScheduled = false }
+                await reconcileManagedSessions()
+                return
+            } catch {}
             try? await Task.sleep(nanoseconds: delay)
             delay = min(delay * 2, 4_000_000_000)
         }
@@ -73,13 +112,19 @@ final class DaemonConnection {
     private func connect() async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             ioQueue.async { [self] in
-                do { try connectSync(); cont.resume() }
-                catch { cont.resume(throwing: error) }
+                do {
+                    try connectSync()
+                    cont.resume(returning: ())
+                } catch {
+                    cont.resume(throwing: error)
+                }
             }
         }
     }
 
     private func connectSync() throws {
+        if fd >= 0 { return }
+
         let sockFD = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard sockFD >= 0 else { throw err("socket() failed") }
 
@@ -90,7 +135,8 @@ final class DaemonConnection {
             socketPath.withCString { src in
                 _ = Darwin.strlcpy(
                     UnsafeMutableRawPointer(ptr).assumingMemoryBound(to: CChar.self),
-                    src, pathSize
+                    src,
+                    pathSize
                 )
             }
         }
@@ -100,7 +146,10 @@ final class DaemonConnection {
                 Darwin.connect(sockFD, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        guard result == 0 else { Darwin.close(sockFD); throw err("connect() failed") }
+        guard result == 0 else {
+            Darwin.close(sockFD)
+            throw err("connect() failed")
+        }
 
         fd = sockFD
         startReadLoop()
@@ -114,9 +163,7 @@ final class DaemonConnection {
         src.setEventHandler { [weak self] in self?.handleReadable() }
         src.setCancelHandler { [weak self] in
             guard let self else { return }
-            Darwin.close(fd); fd = -1
-            DispatchQueue.main.async { self.isConnected = false }
-            Task { [weak self] in await self?.connectWithRetry() }
+            self.handleDisconnect()
         }
         src.resume()
         readSource = src
@@ -125,7 +172,10 @@ final class DaemonConnection {
     private func handleReadable() {
         var tmp = [UInt8](repeating: 0, count: 4096)
         let n = Darwin.read(fd, &tmp, tmp.count)
-        guard n > 0 else { readSource?.cancel(); return }
+        guard n > 0 else {
+            readSource?.cancel()
+            return
+        }
         readBuffer.append(contentsOf: tmp[..<n])
         processLines()
     }
@@ -145,77 +195,138 @@ final class DaemonConnection {
 
         switch type {
         case "created":
-            guard let paneID = json["paneID"] as? String else { return }
-            guard !pendingCreates.isEmpty else { return }
-            pendingCreates.removeFirst().resume(returning: paneID)
+            guard let requestID = json["requestID"] as? String,
+                  let paneID = json["paneID"] as? String else { return }
+            let cont = stateLock.withLock { pendingCreates.removeValue(forKey: requestID) }
+            cont?.resume(returning: paneID)
 
         case "ring_buffer", "live":
             guard let paneID = json["paneID"] as? String,
                   let encoded = json["data"] as? String,
                   let data = Data(base64Encoded: encoded) else { return }
-            let session = sessions[paneID]
-            // ghostty_surface_write_buffer must be called on main thread
+            let session = stateLock.withLock { sessionsByPaneID[paneID] }
             DispatchQueue.main.async { session?.receive(data) }
 
         case "listed":
-            let panes = (json["panes"] as? [[String: Any]] ?? []).compactMap { PTYInfo(json: $0) }
-            guard !pendingLists.isEmpty else { return }
-            pendingLists.removeFirst().resume(returning: panes)
+            guard let requestID = json["requestID"] as? String else { return }
+            let panes = (json["panes"] as? [[String: Any]] ?? []).compactMap(PTYInfo.init)
+            let cont = stateLock.withLock { pendingLists.removeValue(forKey: requestID) }
+            cont?.resume(returning: panes)
 
         case "dead":
             guard let paneID = json["paneID"] as? String else { return }
             let code = (json["exitCode"] as? Int).map(Int32.init) ?? 0
-            let session = sessions[paneID]
-            DispatchQueue.main.async { session?.finish(exitCode: UInt32(bitPattern: code), runtimeMilliseconds: 0) }
+            let session = stateLock.withLock { detachPaneLocked(paneID: paneID) }
+            DispatchQueue.main.async {
+                session?.finish(exitCode: UInt32(bitPattern: code), runtimeMilliseconds: 0)
+            }
 
         case "error":
-            let msg = json["message"] as? String ?? "daemon error"
-            if !pendingCreates.isEmpty { pendingCreates.removeFirst().resume(throwing: err(msg)) }
+            let message = json["message"] as? String ?? "daemon error"
+            guard let requestID = json["requestID"] as? String else { return }
+            if let cont = stateLock.withLock({ pendingCreates.removeValue(forKey: requestID) }) {
+                cont.resume(throwing: err(message))
+                return
+            }
+            if let cont = stateLock.withLock({ pendingLists.removeValue(forKey: requestID) }) {
+                cont.resume(throwing: err(message))
+            }
 
-        default: break
+        default:
+            break
         }
+    }
+
+    private func handleDisconnect() {
+        let pending = stateLock.withLock { () -> ([CheckedContinuation<String, Error>], [CheckedContinuation<[PTYInfo], Error>]) in
+            let creates = Array(pendingCreates.values)
+            let lists = Array(pendingLists.values)
+            pendingCreates.removeAll()
+            pendingLists.removeAll()
+            sessionsByPaneID.removeAll()
+            stableIDByPaneID.removeAll()
+            restoringStableIDs.removeAll()
+            for managed in managedSessions.values {
+                managed.paneID = nil
+                managed.ref.clearID()
+            }
+            return (creates, lists)
+        }
+
+        if fd >= 0 {
+            Darwin.close(fd)
+            fd = -1
+        }
+        readSource = nil
+        readBuffer.removeAll(keepingCapacity: false)
+        DispatchQueue.main.async { self.isConnected = false }
+
+        let disconnectError = err("daemon disconnected")
+        pending.0.forEach { $0.resume(throwing: disconnectError) }
+        pending.1.forEach { $0.resume(throwing: disconnectError) }
+        scheduleReconnect()
     }
 
     // MARK: - Public API
 
     func createPTY(cmd: [String], cwd: String, stableID: String, env: [String: String]) async throws -> String {
-        try await withCheckedThrowingContinuation { cont in
+        let requestID = UUID().uuidString
+        return try await withCheckedThrowingContinuation { cont in
             ioQueue.async { [self] in
-                pendingCreates.append(cont)
-                send(["type": "create", "cmd": cmd, "cwd": cwd, "stableID": stableID, "env": env])
+                stateLock.withLock { pendingCreates[requestID] = cont }
+                do {
+                    try send([
+                        "type": "create",
+                        "requestID": requestID,
+                        "cmd": cmd,
+                        "cwd": cwd,
+                        "stableID": stableID,
+                        "env": env,
+                    ])
+                } catch {
+                    let pending = stateLock.withLock { pendingCreates.removeValue(forKey: requestID) }
+                    pending?.resume(throwing: error)
+                }
             }
         }
     }
 
     func attach(paneID: String, session: InMemoryTerminalSession) {
         ioQueue.async { [self] in
-            sessions[paneID] = session
-            send(["type": "attach", "paneID": paneID])
+            stateLock.withLock { sessionsByPaneID[paneID] = session }
+            try? send(["type": "attach", "paneID": paneID])
         }
     }
 
     nonisolated func sendInput(paneID: String, data: Data) {
         let encoded = data.base64EncodedString()
-        ioQueue.async { [self] in send(["type": "input", "paneID": paneID, "data": encoded]) }
+        ioQueue.async { [self] in
+            try? send(["type": "input", "paneID": paneID, "data": encoded])
+        }
     }
 
     nonisolated func resize(paneID: String, rows: UInt16, cols: UInt16) {
         ioQueue.async { [self] in
-            send(["type": "resize", "paneID": paneID, "rows": rows, "cols": cols])
+            try? send(["type": "resize", "paneID": paneID, "rows": rows, "cols": cols])
         }
     }
 
     func list() async throws -> [PTYInfo] {
-        try await withCheckedThrowingContinuation { cont in
+        let requestID = UUID().uuidString
+        return try await withCheckedThrowingContinuation { cont in
             ioQueue.async { [self] in
-                pendingLists.append(cont)
-                send(["type": "list"])
+                stateLock.withLock { pendingLists[requestID] = cont }
+                do {
+                    try send(["type": "list", "requestID": requestID])
+                } catch {
+                    let pending = stateLock.withLock { pendingLists.removeValue(forKey: requestID) }
+                    pending?.resume(throwing: error)
+                }
             }
         }
     }
 
-    /// Try to attach to an existing PTY with matching stableID; create a new one if not found.
-    /// Centralises the reconnect-vs-create decision so every pane creation site is one call.
+    /// Registers a terminal session and either attaches immediately or restores it after reconnect.
     func spawnOrAttach(
         stableID: String,
         cwd: String,
@@ -223,41 +334,221 @@ final class DaemonConnection {
         session: InMemoryTerminalSession,
         into ref: DaemonPaneRef
     ) {
-        Task {
-            if let existing = try? await list(),
-               let match = existing.first(where: { $0.stableID == stableID && $0.exitCode == nil }) {
-                if let pending = ref.setID(match.paneID) {
-                    resize(paneID: match.paneID, rows: pending.rows, cols: pending.cols)
-                }
-                attach(paneID: match.paneID, session: session)
-                return
+        stateLock.withLock {
+            if let existing = managedSessions[stableID] {
+                existing.paneID = nil
+                existing.isClosing = false
+                managedSessions[stableID] = ManagedSession(
+                    stableID: stableID,
+                    cwd: cwd,
+                    env: env,
+                    session: session,
+                    ref: ref
+                )
+            } else {
+                managedSessions[stableID] = ManagedSession(
+                    stableID: stableID,
+                    cwd: cwd,
+                    env: env,
+                    session: session,
+                    ref: ref
+                )
             }
-            guard let paneID = try? await createPTY(
-                cmd: [], cwd: cwd, stableID: stableID, env: env
-            ) else { return }
-            if let pending = ref.setID(paneID) {
-                resize(paneID: paneID, rows: pending.rows, cols: pending.cols)
-            }
-            attach(paneID: paneID, session: session)
+        }
+
+        if isConnectedSnapshot() {
+            Task { [weak self] in await self?.restoreManagedSession(stableID: stableID) }
+        } else {
+            scheduleReconnect()
         }
     }
 
-    func closePTY(paneID: String) {
-        ioQueue.async { [self] in
-            sessions.removeValue(forKey: paneID)
-            send(["type": "close", "paneID": paneID])
+    func closeSession(stableID: String, paneID: String? = nil) {
+        let shouldRestore = stateLock.withLock { () -> Bool in
+            guard let managed = managedSessions[stableID] else { return false }
+            managed.isClosing = true
+            managed.ref.clearID()
+            if let paneID {
+                managed.paneID = paneID
+                sessionsByPaneID[paneID] = managed.session
+                stableIDByPaneID[paneID] = stableID
+            }
+            return managed.paneID == nil
         }
+
+        if shouldRestore {
+            Task { [weak self] in await self?.restoreManagedSession(stableID: stableID) }
+            return
+        }
+
+        requestClose(stableID: stableID)
     }
 
     // MARK: - Private
 
-    private func send(_ dict: [String: Any]) {
-        guard fd >= 0, var data = try? JSONSerialization.data(withJSONObject: dict) else { return }
+    private func scheduleReconnect() {
+        let shouldStart = stateLock.withLock { () -> Bool in
+            if reconnectScheduled || isConnected {
+                return false
+            }
+            reconnectScheduled = true
+            return true
+        }
+        guard shouldStart else { return }
+        Task { [weak self] in
+            await self?.connectWithRetry()
+        }
+    }
+
+    private func reconcileManagedSessions() async {
+        let stableIDs = stateLock.withLock { Array(managedSessions.keys) }
+        for stableID in stableIDs {
+            await restoreManagedSession(stableID: stableID)
+        }
+    }
+
+    private func restoreManagedSession(stableID: String) async {
+        guard beginRestore(stableID: stableID) else { return }
+        defer { endRestore(stableID: stableID) }
+
+        guard let managed = stateLock.withLock({ managedSessions[stableID] }) else { return }
+        guard isConnectedSnapshot() else {
+            scheduleReconnect()
+            return
+        }
+
+        guard let existing = try? await list() else { return }
+        if let match = existing.first(where: { $0.stableID == stableID && $0.exitCode == nil }) {
+            if managed.isClosing {
+                stateLock.withLock {
+                    managed.paneID = match.paneID
+                    sessionsByPaneID[match.paneID] = managed.session
+                    stableIDByPaneID[match.paneID] = stableID
+                }
+                requestClose(stableID: stableID)
+                return
+            }
+
+            if let rebound = bind(paneID: match.paneID, stableID: stableID) {
+                attach(paneID: match.paneID, session: rebound.session)
+                applyPendingResize(for: rebound, paneID: match.paneID)
+            }
+            return
+        }
+
+        if managed.isClosing {
+            stateLock.withLock {
+                managedSessions.removeValue(forKey: stableID)
+                managed.ref.clearID()
+            }
+            return
+        }
+
+        guard let paneID = try? await createPTY(cmd: [], cwd: managed.cwd, stableID: stableID, env: managed.env),
+              let rebound = bind(paneID: paneID, stableID: stableID) else { return }
+        attach(paneID: paneID, session: rebound.session)
+        applyPendingResize(for: rebound, paneID: paneID)
+    }
+
+    private func beginRestore(stableID: String) -> Bool {
+        stateLock.withLock {
+            if restoringStableIDs.contains(stableID) {
+                return false
+            }
+            restoringStableIDs.insert(stableID)
+            return true
+        }
+    }
+
+    private func endRestore(stableID: String) {
+        stateLock.withLock {
+            restoringStableIDs.remove(stableID)
+        }
+    }
+
+    private func requestClose(stableID: String) {
+        ioQueue.async { [self] in
+            let paneID = stateLock.withLock { managedSessions[stableID]?.paneID }
+            guard let paneID else {
+                Task { [weak self] in await self?.restoreManagedSession(stableID: stableID) }
+                return
+            }
+            do {
+                try send(["type": "close", "paneID": paneID])
+            } catch {
+                scheduleReconnect()
+            }
+        }
+    }
+
+    private func bind(paneID: String, stableID: String) -> ManagedSession? {
+        stateLock.withLock {
+            guard let managed = managedSessions[stableID], !managed.isClosing else { return nil }
+            if let oldPaneID = managed.paneID {
+                sessionsByPaneID.removeValue(forKey: oldPaneID)
+                stableIDByPaneID.removeValue(forKey: oldPaneID)
+            }
+            managed.paneID = paneID
+            sessionsByPaneID[paneID] = managed.session
+            stableIDByPaneID[paneID] = stableID
+            return managed
+        }
+    }
+
+    private func applyPendingResize(for managed: ManagedSession, paneID: String) {
+        if let pending = managed.ref.setID(paneID) {
+            resize(paneID: paneID, rows: pending.rows, cols: pending.cols)
+        }
+    }
+
+    private func detachPaneLocked(paneID: String) -> InMemoryTerminalSession? {
+        let session = sessionsByPaneID.removeValue(forKey: paneID)
+        if let stableID = stableIDByPaneID.removeValue(forKey: paneID),
+           let managed = managedSessions.removeValue(forKey: stableID) {
+            managed.paneID = nil
+            managed.ref.clearID()
+        }
+        return session
+    }
+
+    private func isConnectedSnapshot() -> Bool {
+        stateLock.withLock { fd >= 0 || isConnected }
+    }
+
+    private func send(_ dict: [String: Any]) throws {
+        guard fd >= 0 else { throw err("daemon not connected") }
+        var data = try JSONSerialization.data(withJSONObject: dict)
         data.append(UInt8(ascii: "\n"))
-        data.withUnsafeBytes { _ = Darwin.write(fd, $0.baseAddress!, $0.count) }
+        guard writeAll(fd: fd, data: data) else {
+            readSource?.cancel()
+            throw err("daemon write failed")
+        }
+        if dict["type"] as? String == "close" {
+            // Close is best-effort until the daemon reports the child exit.
+        }
     }
 
     private func err(_ msg: String) -> NSError {
         NSError(domain: "SrotaDaemon", code: -1, userInfo: [NSLocalizedDescriptionKey: msg])
     }
+}
+
+@discardableResult
+private func writeAll(fd: Int32, data: Data) -> Bool {
+    var offset = 0
+    while offset < data.count {
+        let wrote = data.withUnsafeBytes { rawBytes -> Int in
+            let base = rawBytes.baseAddress!.advanced(by: offset)
+            return Darwin.write(fd, base, data.count - offset)
+        }
+        if wrote > 0 {
+            offset += wrote
+            continue
+        }
+        if wrote == -1 && errno == EINTR {
+            continue
+        }
+        return false
+    }
+    return true
 }
