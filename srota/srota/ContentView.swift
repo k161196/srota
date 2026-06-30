@@ -639,6 +639,7 @@ struct ContentView: View {
     @State private var agentToLaunch: AgentItem? = nil
     @State private var agentEventTask: Task<Void, Never>? = nil
     @State private var worktreeError: String? = nil
+    @State private var workspaceSwitcherModel: SwitcherModel? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -814,16 +815,19 @@ struct ContentView: View {
                 }
             }
         }
-        .onAppear {
-            startAgentEventMonitor()
-            registerShortcutActions()
-            shortcuts.start()
-        }
-        .onDisappear {
-            agentEventTask?.cancel()
-            agentEventTask = nil
-            shortcuts.stop()
-        }
+            .onAppear {
+                startAgentEventMonitor()
+                registerShortcutActions()
+                shortcuts.start()
+            }
+            .onChange(of: shortcuts.showWorkspaceSwitcher) { _, isShowing in
+                workspaceSwitcherModel = isShowing ? makeWorkspaceSwitcherModel() : nil
+            }
+            .onDisappear {
+                agentEventTask?.cancel()
+                agentEventTask = nil
+                shortcuts.stop()
+            }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             saveLayout()
         }
@@ -881,41 +885,15 @@ struct ContentView: View {
             }
             .transition(.opacity.combined(with: .scale(scale: 0.97)))
                 }
-                if shortcuts.showWorkspaceSwitcher {
+                if shortcuts.showWorkspaceSwitcher, let workspaceSwitcherModel {
                     let dismissWorkspaceSwitcher = {
                         withAnimation(.easeInOut(duration: 0.15)) { shortcuts.showWorkspaceSwitcher = false }
                         if let state = manager.selectedWorkspace?.selectedTab?.focusedViewState {
                             DispatchQueue.main.async { focusTerminalView(for: state) }
                         }
                     }
-                    let folderNamesByWorkspaceID = Dictionary(
-                        uniqueKeysWithValues: manager.folders.flatMap { folder in
-                            folder.workspaces.map { ($0.id, folder.name) }
-                        }
-                    )
                     WorkspaceSwitcherOverlay(
-                        allWorkspaces: manager.allWorkspaces.map { ws in
-                            return SwitcherWorkspace(
-                        id: ws.id, name: ws.name, folder: folderNamesByWorkspaceID[ws.id],
-                        tabs: ws.tabs.map { tab in
-                            SwitcherTab(
-                                id: tab.id,
-                                title: tab.customName.isEmpty ? tab.titleFromCWD : tab.customName,
-                                cwd: tab.statusPath,
-                                panes: tab.panes.map { pane in
-                                    let paneCWD = resolveCWD(pane.viewState.workingDirectory) ?? pane.initialCWD
-                                    let paneName = tab.paneNames[pane.id].flatMap { $0.isEmpty ? nil : $0 }
-                                        ?? smartTitle(for: paneCWD)
-                                    return SwitcherPane(id: pane.id, name: paneName, cwd: paneCWD)
-                                },
-                                isSelected: tab.id == ws.selectedTabID
-                            )
-                        },
-                        isSelected: ws.id == manager.selectedWorkspaceID,
-                        isPinned: ws.isPinned,
-                        isActive: ws.isActive
-                            )
-                        },
+                        model: workspaceSwitcherModel,
                         onSelectWorkspace: { id in
                             manager.selectWorkspace(id: id)
                             dismissWorkspaceSwitcher()
@@ -1010,6 +988,51 @@ struct ContentView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             manager.selectedWorkspace?.selectedTab?.focusedViewState.send(cmd)
         }
+    }
+
+    private func makeWorkspaceSwitcherModel() -> SwitcherModel {
+        let folderNamesByWorkspaceID = Dictionary(
+            uniqueKeysWithValues: manager.folders.flatMap { folder in
+                folder.workspaces.map { ($0.id, folder.name) }
+            }
+        )
+        let allWorkspaces = manager.allWorkspaces
+        let switcherWorkspaces = allWorkspaces.map { ws in
+            SwitcherWorkspace(
+                id: ws.id,
+                name: ws.name,
+                folder: folderNamesByWorkspaceID[ws.id],
+                tabs: ws.tabs.map { tab in
+                    SwitcherTab(
+                        id: tab.id,
+                        title: tab.customName.isEmpty ? tab.titleFromCWD : tab.customName,
+                        cwd: tab.statusPath,
+                        panes: tab.panes.map { pane in
+                            let paneCWD = resolveCWD(pane.viewState.workingDirectory) ?? pane.initialCWD
+                            let paneName = tab.paneNames[pane.id].flatMap { $0.isEmpty ? nil : $0 }
+                                ?? smartTitle(for: paneCWD)
+                            return SwitcherPane(id: pane.id, name: paneName, cwd: paneCWD)
+                        },
+                        isSelected: tab.id == ws.selectedTabID
+                    )
+                },
+                isSelected: ws.id == manager.selectedWorkspaceID,
+                isPinned: ws.isPinned,
+                isActive: ws.isActive
+            )
+        }
+        return SwitcherModel(
+            workspaceByID: Dictionary(uniqueKeysWithValues: switcherWorkspaces.map { ($0.id, $0) }),
+            allWorkspaceIDs: switcherWorkspaces.map(\.id),
+            activeWorkspaceIDs: switcherWorkspaces.filter(\.isActive).map(\.id),
+            selectedWorkspaceID: manager.selectedWorkspaceID,
+            selectedTabIDByWorkspaceID: Dictionary(uniqueKeysWithValues: allWorkspaces.compactMap { ws in
+                ws.selectedTabID.map { (ws.id, $0) }
+            }),
+            selectedPaneIDByTabID: Dictionary(uniqueKeysWithValues: allWorkspaces.flatMap { ws in
+                ws.tabs.map { ($0.id, $0.focusedPaneID) }
+            })
+        )
     }
 
     private func registerShortcutActions() {

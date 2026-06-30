@@ -227,10 +227,24 @@ struct SwitcherWorkspace {
     let isActive: Bool
 }
 
+struct SwitcherModel {
+    let workspaceByID: [UUID: SwitcherWorkspace]
+    let allWorkspaceIDs: [UUID]
+    let activeWorkspaceIDs: [UUID]
+    let selectedWorkspaceID: UUID?
+    let selectedTabIDByWorkspaceID: [UUID: UUID]
+    let selectedPaneIDByTabID: [UUID: UUID]
+
+    func visibleWorkspaceIDs(showAll: Bool) -> [UUID] {
+        if showAll || activeWorkspaceIDs.isEmpty { return allWorkspaceIDs }
+        return activeWorkspaceIDs
+    }
+}
+
 // MARK: - Workspace switcher overlay
 
 struct WorkspaceSwitcherOverlay: View {
-    let allWorkspaces: [SwitcherWorkspace]
+    let model: SwitcherModel
     let onSelectWorkspace: (UUID) -> Void
     let onSelectTab: (UUID, UUID) -> Void
     let onSelectPane: (UUID, UUID, UUID) -> Void
@@ -245,10 +259,10 @@ struct WorkspaceSwitcherOverlay: View {
     @State private var showAll = false
     private let accent = Color(red: 1.0, green: 0.45, blue: 0.15)
 
+    private var visibleWorkspaceIDs: [UUID] { model.visibleWorkspaceIDs(showAll: showAll) }
+
     private var workspaces: [SwitcherWorkspace] {
-        guard !showAll else { return allWorkspaces }
-        let filtered = allWorkspaces.filter(\.isActive)
-        return filtered.isEmpty ? allWorkspaces : filtered
+        visibleWorkspaceIDs.compactMap { model.workspaceByID[$0] }
     }
 
     private var selectedWorkspace: SwitcherWorkspace? {
@@ -327,6 +341,79 @@ struct WorkspaceSwitcherOverlay: View {
         }
     }
 
+    private func normalizeSelection(preferredWorkspaceID: UUID? = nil) {
+        let workspaceIDs = visibleWorkspaceIDs
+        guard !workspaceIDs.isEmpty else {
+            highlighted = 0
+            tabHighlighted = 0
+            paneHighlighted = 0
+            panel = .workspaces
+            return
+        }
+
+        if let preferredWorkspaceID,
+           let idx = workspaceIDs.firstIndex(of: preferredWorkspaceID) {
+            highlighted = idx
+        } else if !workspaceIDs.indices.contains(highlighted) {
+            if let selectedWorkspaceID = model.selectedWorkspaceID,
+               let idx = workspaceIDs.firstIndex(of: selectedWorkspaceID) {
+                highlighted = idx
+            } else {
+                highlighted = min(highlighted, workspaceIDs.count - 1)
+            }
+        }
+
+        guard let ws = selectedWorkspace else {
+            highlighted = 0
+            tabHighlighted = 0
+            paneHighlighted = 0
+            panel = .workspaces
+            return
+        }
+
+        guard !ws.tabs.isEmpty else {
+            tabHighlighted = 0
+            paneHighlighted = 0
+            panel = .workspaces
+            return
+        }
+
+        if !ws.tabs.indices.contains(tabHighlighted) {
+            if let selectedTabID = model.selectedTabIDByWorkspaceID[ws.id],
+               let idx = ws.tabs.firstIndex(where: { $0.id == selectedTabID }) {
+                tabHighlighted = idx
+            } else {
+                tabHighlighted = min(tabHighlighted, ws.tabs.count - 1)
+            }
+        }
+
+        guard let tab = selectedTab else {
+            tabHighlighted = 0
+            paneHighlighted = 0
+            panel = .workspaces
+            return
+        }
+
+        if tab.panes.isEmpty {
+            paneHighlighted = 0
+            if panel == .panes { panel = .tabs }
+            return
+        }
+
+        if !tab.panes.indices.contains(paneHighlighted) {
+            if let selectedPaneID = model.selectedPaneIDByTabID[tab.id],
+               let idx = tab.panes.firstIndex(where: { $0.id == selectedPaneID }) {
+                paneHighlighted = idx
+            } else {
+                paneHighlighted = min(paneHighlighted, tab.panes.count - 1)
+            }
+        }
+
+        if tab.panes.count <= 1, panel == .panes {
+            panel = .tabs
+        }
+    }
+
     var body: some View {
         GeometryReader { geo in
             ZStack {
@@ -365,7 +452,10 @@ struct WorkspaceSwitcherOverlay: View {
                 )
             }
         }
-        .onAppear { highlighted = workspaces.firstIndex(where: { $0.isSelected }) ?? 0 }
+        .onAppear { normalizeSelection() }
+        .onChange(of: showAll) { _, _ in
+            normalizeSelection(preferredWorkspaceID: selectedWorkspace?.id)
+        }
     }
 
     // MARK: - Left panel: workspace list
@@ -377,7 +467,12 @@ struct WorkspaceSwitcherOverlay: View {
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .foregroundStyle(panel == .workspaces ? accent.opacity(0.8) : Color.white.opacity(0.3))
                 Spacer()
-                Button(showAll ? "Active" : "All") { showAll.toggle(); highlighted = 0; panel = .workspaces }
+                Button(showAll ? "Active" : "All") {
+                    let preferredWorkspaceID = selectedWorkspace?.id
+                    showAll.toggle()
+                    panel = .workspaces
+                    normalizeSelection(preferredWorkspaceID: preferredWorkspaceID)
+                }
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(showAll ? Color.white.opacity(0.6) : accent.opacity(0.7))
                     .buttonStyle(.plain)
