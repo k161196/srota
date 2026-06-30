@@ -8,6 +8,7 @@ PROJECT_PATH="$ROOT_DIR/srota/srota.xcodeproj"
 SCHEME="srota"
 DERIVED_DATA_PATH="$ROOT_DIR/.build/install-app"
 BUILT_APP_PATH="$DERIVED_DATA_PATH/Build/Products/Release/srota.app"
+BUILT_DAEMON_PATH="$DERIVED_DATA_PATH/Build/Products/Release/srota-daemon"
 INSTALL_PATH="/Applications/srota.app"
 
 if [[ ! -d "$PROJECT_PATH" ]]; then
@@ -37,6 +38,13 @@ fi
 if [[ ! -w "/Applications" ]]; then
   echo "Cannot write to /Applications. Re-run with sudo." >&2
   exit 1
+fi
+
+if [[ -f "$BUILT_DAEMON_PATH" ]]; then
+  echo "Embedding srota-daemon into app bundle..."
+  cp "$BUILT_DAEMON_PATH" "$BUILT_APP_PATH/Contents/MacOS/srota-daemon"
+else
+  echo "Warning: srota-daemon not found at $BUILT_DAEMON_PATH" >&2
 fi
 
 echo "Installing to $INSTALL_PATH..."

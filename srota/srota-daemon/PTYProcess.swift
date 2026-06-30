@@ -40,7 +40,7 @@ final class PTYProcess {
         }
         mergedEnv["SROTA_PANE_ID"] = stableID
         mergedEnv["SROTA_SOCKET_PATH"] = ProcessInfo.processInfo.environment["SROTA_SOCKET_PATH"]
-            ?? "\(NSHomeDirectory())/.srota/daemon.sock"
+            ?? "\(NSHomeDirectory())/\(srotaDir)/daemon.sock"
         if mergedEnv["TERM"] == nil { mergedEnv["TERM"] = "xterm-256color" }
         if mergedEnv["TERM_PROGRAM"] == nil { mergedEnv["TERM_PROGRAM"] = "srota" }
 

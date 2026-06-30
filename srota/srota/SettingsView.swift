@@ -1006,7 +1006,7 @@ private struct DaemonSettingsView: View {
                         ForEach(panes, id: \.paneID) { pane in
                             PTYProcessRow(pane: pane) {
                                         daemon.closeSession(stableID: pane.stableID, paneID: pane.paneID)
-                                Task { try? await Task.sleep(nanoseconds: 200_000_000); await refresh() }
+                                Task { try? await Task.sleep(nanoseconds: 1_200_000_000); await refresh() }
                             }
                         }
                     }
