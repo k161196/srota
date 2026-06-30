@@ -1949,6 +1949,7 @@ private struct RepoDetailView: View {
         cloningBranch = branch
         let isDefault = branch == defaultBranch
         let mainPath = mainClonePath ?? ""
+        let repoURL = self.repoURL
         Task.detached {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
@@ -2038,9 +2039,11 @@ private struct RepoDetailView: View {
                     .filter { !$0.isEmpty })
             }
             let allNames = remoteNames.union(localNames)
+            let resolvedRemoteNames = remoteNames
+            let resolvedLocalNames = localNames
             await MainActor.run {
-                remoteBranchNames = remoteNames
-                localBranchNames = localNames
+                remoteBranchNames = resolvedRemoteNames
+                localBranchNames = resolvedLocalNames
                 let existing = Set(db.repoBranches.filter { $0.repoID == repoID }.map { $0.name })
                 for n in allNames where !existing.contains(n) {
                     db.addRepoBranch(repoID: repoID, name: n)

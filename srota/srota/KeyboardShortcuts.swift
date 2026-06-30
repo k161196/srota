@@ -63,7 +63,8 @@ final class KeyboardShortcutManager {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
-            return MainActor.assumeIsolated { self.handle(event) ? nil : event }
+            guard Thread.isMainThread else { return event }
+            return self.handle(event) ? nil : event
         }
     }
 
