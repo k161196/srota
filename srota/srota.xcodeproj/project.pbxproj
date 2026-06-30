@@ -11,14 +11,42 @@
 		708DBD27518B419291EB9319 /* ShellCraftKit in Frameworks */ = {isa = PBXBuildFile; productRef = 82B3BACE48F643C7BE78BC55 /* ShellCraftKit */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		9F59ACAF2FF3D5C9001342C0 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 9F4EF2F42FE98A7E00023A48 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 9F4EF3E52FF3C82700023A48;
+			remoteInfo = "srota-daemon";
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		9F4EF3E42FF3C82700023A48 /* CopyFiles */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = /usr/share/man/man1/;
+			dstSubfolderSpec = 0;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 1;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		9F4EF2FC2FE98A7E00023A48 /* srota.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = srota.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		9F4EF3E62FF3C82700023A48 /* srota-daemon */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "srota-daemon"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		9F4EF2FE2FE98A7E00023A48 /* srota */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = srota;
+			sourceTree = "<group>";
+		};
+		9F4EF3E72FF3C82700023A48 /* srota-daemon */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "srota-daemon";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -33,6 +61,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		9F4EF3E32FF3C82700023A48 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -40,6 +75,7 @@
 			isa = PBXGroup;
 			children = (
 				9F4EF2FE2FE98A7E00023A48 /* srota */,
+				9F4EF3E72FF3C82700023A48 /* srota-daemon */,
 				9F4EF2FD2FE98A7E00023A48 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -48,6 +84,7 @@
 			isa = PBXGroup;
 			children = (
 				9F4EF2FC2FE98A7E00023A48 /* srota.app */,
+				9F4EF3E62FF3C82700023A48 /* srota-daemon */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -67,6 +104,7 @@
 			buildRules = (
 			);
 			dependencies = (
+				9F59ACB02FF3D5C9001342C0 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				9F4EF2FE2FE98A7E00023A48 /* srota */,
@@ -80,6 +118,28 @@
 			productReference = 9F4EF2FC2FE98A7E00023A48 /* srota.app */;
 			productType = "com.apple.product-type.application";
 		};
+		9F4EF3E52FF3C82700023A48 /* srota-daemon */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9F4EF3EA2FF3C82700023A48 /* Build configuration list for PBXNativeTarget "srota-daemon" */;
+			buildPhases = (
+				9F4EF3E22FF3C82700023A48 /* Sources */,
+				9F4EF3E32FF3C82700023A48 /* Frameworks */,
+				9F4EF3E42FF3C82700023A48 /* CopyFiles */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				9F4EF3E72FF3C82700023A48 /* srota-daemon */,
+			);
+			name = "srota-daemon";
+			packageProductDependencies = (
+			);
+			productName = "srota-daemon";
+			productReference = 9F4EF3E62FF3C82700023A48 /* srota-daemon */;
+			productType = "com.apple.product-type.tool";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -91,6 +151,9 @@
 				LastUpgradeCheck = 2620;
 				TargetAttributes = {
 					9F4EF2FB2FE98A7E00023A48 = {
+						CreatedOnToolsVersion = 26.2;
+					};
+					9F4EF3E52FF3C82700023A48 = {
 						CreatedOnToolsVersion = 26.2;
 					};
 				};
@@ -113,6 +176,7 @@
 			projectRoot = "";
 			targets = (
 				9F4EF2FB2FE98A7E00023A48 /* srota */,
+				9F4EF3E52FF3C82700023A48 /* srota-daemon */,
 			);
 		};
 /* End PBXProject section */
@@ -161,7 +225,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		9F4EF3E22FF3C82700023A48 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		9F59ACB02FF3D5C9001342C0 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 9F4EF3E52FF3C82700023A48 /* srota-daemon */;
+			targetProxy = 9F59ACAF2FF3D5C9001342C0 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		9F4EF3072FE98A7E00023A48 /* Debug */ = {
@@ -350,6 +429,32 @@
 			};
 			name = Release;
 		};
+		9F4EF3EB2FF3C82700023A48 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = G57VGR2JUP;
+				ENABLE_HARDENED_RUNTIME = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		9F4EF3EC2FF3C82700023A48 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = G57VGR2JUP;
+				ENABLE_HARDENED_RUNTIME = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -367,6 +472,15 @@
 			buildConfigurations = (
 				9F4EF30A2FE98A7E00023A48 /* Debug */,
 				9F4EF30B2FE98A7E00023A48 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		9F4EF3EA2FF3C82700023A48 /* Build configuration list for PBXNativeTarget "srota-daemon" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9F4EF3EB2FF3C82700023A48 /* Debug */,
+				9F4EF3EC2FF3C82700023A48 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

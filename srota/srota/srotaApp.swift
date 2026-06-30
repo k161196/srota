@@ -10,6 +10,7 @@ struct srotaApp: App {
     @State private var agentFocus = FeatureAgentFocus()
     @State private var issueAgentFocus = IssueAgentFocus()
     @State private var shortcuts = KeyboardShortcutManager()
+    @State private var daemonConnection = DaemonConnection()
     @State private var hookSetupResult: HookSetupResult? = nil
 
     var body: some Scene {
@@ -24,12 +25,15 @@ struct srotaApp: App {
                 .environment(agentFocus)
                 .environment(issueAgentFocus)
                 .environment(shortcuts)
+                .environment(daemonConnection)
                 .onAppear {
                     shortcuts.prefixKey = settings.shortcutPrefix
                     setupShellIntegration()
                     if let dir = settings.baseWorkingDirectory { db.scan(baseDir: dir) }
                     Task { await runHookCheck() }
                     Task.detached { installMCPServer() }
+                    Task.detached { installDaemonLaunchAgent() }
+                    Task { await daemonConnection.connectWithRetry() }
                 }
                 .onChange(of: settings.shortcutPrefix) { _, new in
                     shortcuts.prefixKey = new

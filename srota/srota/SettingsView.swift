@@ -13,7 +13,7 @@ private extension Color {
 
 // MARK: - Panel
 
-private enum SettingsSection { case terminal, shortcuts, agents, mcp }
+private enum SettingsSection { case terminal, shortcuts, agents, mcp, daemon }
 
 struct SettingsPanel: View {
     @Binding var isPresented: Bool
@@ -52,6 +52,9 @@ struct SettingsPanel: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .mcp:
                 MCPSettingsView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .daemon:
+                DaemonSettingsView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -114,6 +117,8 @@ private struct SettingsSidebar: View {
                 .onTapGesture { section = .agents }
             SidebarRow(label: "MCP", icon: "network", isSelected: section == .mcp)
                 .onTapGesture { section = .mcp }
+            SidebarRow(label: "Processes", icon: "square.stack.3d.up", isSelected: section == .daemon)
+                .onTapGesture { section = .daemon }
 
             Spacer()
         }
@@ -853,5 +858,243 @@ private struct AgentListRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
+    }
+}
+
+// MARK: - Daemon process list
+
+private struct LaunchdStatus {
+    var pid: Int32?          // nil = not running
+    var lastExitStatus: Int?
+    var plistInstalled: Bool
+    var binaryPath: String?
+}
+
+private func loadLaunchdStatus() -> LaunchdStatus {
+    let plistPath = "\(NSHomeDirectory())/Library/LaunchAgents/com.kiran.srota.daemon.plist"
+    let plistInstalled = FileManager.default.fileExists(atPath: plistPath)
+
+    // Find binary (mirrors DaemonLifecycle.findDaemonBinary logic)
+    let fm = FileManager.default
+    let bundleExe = Bundle.main.executableURL?
+        .deletingLastPathComponent().appendingPathComponent("srota-daemon").path
+    let devExe = Bundle.main.executableURL?
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent().appendingPathComponent("srota-daemon").path
+    let binaryPath = [bundleExe, devExe].compactMap { $0 }.first { fm.fileExists(atPath: $0) }
+
+    // launchctl list com.kiran.srota.daemon → "<PID|->\t<exit>\t<label>"
+    var pid: Int32? = nil
+    var lastExitStatus: Int? = nil
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    task.arguments = ["list", "com.kiran.srota.daemon"]
+    let pipe = Pipe()
+    task.standardOutput = pipe
+    task.standardError = Pipe()
+    if (try? task.run()) != nil {
+        task.waitUntilExit()
+        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let cols = out.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\t")
+        if cols.count >= 2 {
+            pid = Int32(cols[0])
+            lastExitStatus = Int(cols[1])
+        }
+    }
+
+    return LaunchdStatus(pid: pid, lastExitStatus: lastExitStatus,
+                         plistInstalled: plistInstalled, binaryPath: binaryPath)
+}
+
+private func restartDaemon() {
+    let domain = "gui/\(getuid())"
+    let label  = "com.kiran.srota.daemon"
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    // kickstart -k kills the running instance and starts a fresh one
+    task.arguments = ["kickstart", "-k", "\(domain)/\(label)"]
+    try? task.run()
+    task.waitUntilExit()
+}
+
+private struct DaemonSettingsView: View {
+    @Environment(DaemonConnection.self) private var daemon
+    @State private var panes: [PTYInfo] = []
+    @State private var launchd = LaunchdStatus(pid: nil, lastExitStatus: nil,
+                                               plistInstalled: false, binaryPath: nil)
+    @State private var isLoading = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+
+                // ── Header ──────────────────────────────────────
+                HStack(alignment: .top) {
+                    Text("PTY Daemon")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(Color.stLabel)
+                    Spacer()
+                    Button { Task { await refresh() } } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(isLoading ? Color.stMuted.opacity(0.4) : Color.stMuted)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isLoading)
+                }
+                .padding(.bottom, 20)
+
+                // ── Status card ──────────────────────────────────
+                VStack(alignment: .leading, spacing: 0) {
+                    StatusRow(label: "Launchd agent",
+                              ok: launchd.plistInstalled,
+                              value: launchd.plistInstalled ? "Installed" : "Not installed")
+                    Divider().background(Color.stBorder)
+                    StatusRow(label: "Daemon process",
+                              ok: launchd.pid != nil,
+                              value: launchd.pid.map { "Running (PID \($0))" }
+                                  ?? (launchd.lastExitStatus.map { "Stopped (exit \($0))" } ?? "Not running"))
+                    Divider().background(Color.stBorder)
+                    StatusRow(label: "Socket",
+                              ok: daemon.isConnected,
+                              value: daemon.isConnected ? "Connected" : "Not connected")
+                    Divider().background(Color.stBorder)
+                    StatusRow(label: "Binary",
+                              ok: launchd.binaryPath != nil,
+                              value: launchd.binaryPath.map { URL(fileURLWithPath: $0).lastPathComponent + " found" }
+                                  ?? "Not found")
+                }
+                .background(Color.stSurface)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.stBorder))
+                .padding(.bottom, 12)
+
+                // ── Restart button ───────────────────────────────
+                Button {
+                    Task.detached { restartDaemon() }
+                    Task {
+                        try? await Task.sleep(nanoseconds: 600_000_000)
+                        await refresh()
+                    }
+                } label: {
+                    Text("Restart Daemon")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.stLabel)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(Color.stSurface)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.stBorder))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .padding(.bottom, 28)
+
+                // ── Process list ─────────────────────────────────
+                Text("Processes")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.stLabel)
+                    .padding(.bottom, 10)
+
+                if panes.isEmpty {
+                    Text(isLoading ? "Loading…" : daemon.isConnected ? "No active PTY processes" : "Daemon not connected")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.stMuted)
+                } else {
+                    VStack(spacing: 1) {
+                        ForEach(panes, id: \.paneID) { pane in
+                            PTYProcessRow(pane: pane) {
+                                daemon.closePTY(paneID: pane.paneID)
+                                Task { try? await Task.sleep(nanoseconds: 200_000_000); await refresh() }
+                            }
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.stBorder))
+                }
+            }
+            .padding(24)
+        }
+        .task { await refresh() }
+    }
+
+    private func refresh() async {
+        launchd = loadLaunchdStatus()
+        guard daemon.isConnected else { return }
+        isLoading = true
+        defer { isLoading = false }
+        panes = (try? await daemon.list()) ?? []
+    }
+}
+
+private struct StatusRow: View {
+    let label: String
+    let ok: Bool
+    let value: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(ok ? Color.green.opacity(0.8) : Color(red: 0.7, green: 0.2, blue: 0.2).opacity(0.8))
+                .frame(width: 6, height: 6)
+            Text(label)
+                .font(.system(size: 13))
+                .foregroundStyle(Color.stMuted)
+            Spacer()
+            Text(value)
+                .font(.system(size: 12).monospaced())
+                .foregroundStyle(Color.stLabel)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+}
+
+private struct PTYProcessRow: View {
+    let pane: PTYInfo
+    let onKill: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Circle()
+                .fill(pane.exitCode == nil ? Color.green.opacity(0.75) : Color.stMuted.opacity(0.4))
+                .frame(width: 7, height: 7)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 10) {
+                    Text("PID \(pane.pid)")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.stLabel)
+                    if let code = pane.exitCode {
+                        Text("exited(\(code))")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.stMuted)
+                    }
+                }
+                Text(pane.cwd.isEmpty ? "—" : pane.cwd)
+                    .font(.system(size: 11).monospaced())
+                    .foregroundStyle(Color.stMuted)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer()
+
+            if pane.exitCode == nil {
+                Button(action: onKill) {
+                    Text("Kill")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.stMuted)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.stSurface)
+                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.stBorder))
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.stSurface)
     }
 }

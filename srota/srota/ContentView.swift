@@ -13,21 +13,6 @@ private func resolveCWD(_ raw: String?) -> String? {
     return raw
 }
 
-private func makePaneLauncher(tabID: String, paneID: String) -> String {
-    let dir = NSHomeDirectory() + "/\(Srota.dir)/launchers"
-    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    let path = dir + "/\(tabID)-\(paneID).sh"
-    let script = """
-#!/bin/sh
-export SROTA_TAB_ID="\(tabID)"
-export SROTA_PANE_ID="\(paneID)"
-export ZDOTDIR="$HOME/\(Srota.dir)"
-exec /bin/zsh -i "$@"
-"""
-    try? script.write(toFile: path, atomically: true, encoding: .utf8)
-    try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
-    return path
-}
 
 private func makeLazygitLauncher() -> String {
     let dir = NSHomeDirectory() + "/\(Srota.dir)/launchers"
@@ -39,10 +24,6 @@ private func makeLazygitLauncher() -> String {
     return path
 }
 
-private func makeLauncherConfig(tabID: String, paneID: String) -> TerminalConfiguration {
-    let launcher = makePaneLauncher(tabID: tabID, paneID: paneID)
-    return TerminalConfiguration(configure: { b in b.withCustom("command", launcher) })
-}
 
 /// Smart tab/pane title from CWD:
 ///   - git repo  → "reponame/branch"
@@ -169,24 +150,48 @@ final class TerminalTab: Identifiable, ObservableObject {
     private var titleSink: AnyCancellable?
     var closeTabCallback: (() -> Void)?
     let initialWorkingDirectory: String?
+    private var daemon: DaemonConnection?
 
-    init(colorScheme: ColorScheme, workingDirectory: String? = nil) {
+    init(colorScheme: ColorScheme, workingDirectory: String? = nil, daemon: DaemonConnection? = nil, firstPaneStableID: String? = nil) {
         self.initialWorkingDirectory = workingDirectory
-        // Create first pane
+        self.daemon = daemon
         let paneHookID = UUID().uuidString
-        let state = TerminalViewState(
-            terminalConfiguration: makeLauncherConfig(tabID: hookTabID, paneID: paneHookID)
+        let state = TerminalViewState(terminalConfiguration: TerminalConfiguration())
+        let ref = DaemonPaneRef()
+        let session = InMemoryTerminalSession(
+            write: { [weak daemon, ref] data in
+                guard let paneID = ref.id else { return }
+                daemon?.sendInput(paneID: paneID, data: data)
+            },
+            resize: { [weak daemon, ref] vp in
+                guard let paneID = ref.id else {
+                    ref.storePendingResize(rows: vp.rows, cols: vp.columns)
+                    return
+                }
+                daemon?.resize(paneID: paneID, rows: vp.rows, cols: vp.columns)
+            }
         )
-        state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: workingDirectory)
+        state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: workingDirectory)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
         let first = PaneEntry(hookPaneID: paneHookID, viewState: state, initialCWD: workingDirectory)
         self.panes = [first]
         self.paneLayouts = [first.id: PaneLayout()]
         self.focusedPaneID = first.id
         bindTitleSink()
-        state.onClose = { [weak self, weak first] _ in
-            guard let self, let first else { return }
-            self.removePane(id: first.id)
+        let firstID = first.id
+        state.onClose = { [weak self, ref] _ in
+            guard let self else { return }
+            if let paneID = ref.id { self.daemon?.closePTY(paneID: paneID) }
+            self.removePane(id: firstID)
+        }
+        if let daemon {
+            let stableID = firstPaneStableID ?? first.id.uuidString
+            daemon.spawnOrAttach(
+                stableID: stableID,
+                cwd: workingDirectory ?? NSHomeDirectory(),
+                env: ["ZDOTDIR": "\(NSHomeDirectory())/\(Srota.dir)"],
+                session: session, into: ref
+            )
         }
     }
 
@@ -256,39 +261,83 @@ final class TerminalTab: Identifiable, ObservableObject {
 
     private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirectory: String? = nil) {
         let paneHookID = UUID().uuidString
-        let state = TerminalViewState(
-            terminalConfiguration: makeLauncherConfig(tabID: hookTabID, paneID: paneHookID)
+        let state = TerminalViewState(terminalConfiguration: TerminalConfiguration())
+        let ref = DaemonPaneRef()
+        let session = InMemoryTerminalSession(
+            write: { [weak daemon, ref] data in
+                guard let paneID = ref.id else { return }
+                daemon?.sendInput(paneID: paneID, data: data)
+            },
+            resize: { [weak daemon, ref] vp in
+                guard let paneID = ref.id else {
+                    ref.storePendingResize(rows: vp.rows, cols: vp.columns)
+                    return
+                }
+                daemon?.resize(paneID: paneID, rows: vp.rows, cols: vp.columns)
+            }
         )
-        state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: workingDirectory)
+        state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: workingDirectory)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
         let entry = PaneEntry(hookPaneID: paneHookID, viewState: state, initialCWD: workingDirectory)
-        state.onClose = { [weak self, weak entry] _ in
-            guard let self, let entry else { return }
-            self.removePane(id: entry.id)
+        let entryID = entry.id
+        state.onClose = { [weak self, ref] _ in
+            guard let self else { return }
+            if let paneID = ref.id { self.daemon?.closePTY(paneID: paneID) }
+            self.removePane(id: entryID)
         }
         paneLayouts[entry.id] = layout
         panes.append(entry)
         focusedPaneID = entry.id
+        if let daemon {
+            daemon.spawnOrAttach(
+                stableID: entry.id.uuidString,
+                cwd: workingDirectory ?? NSHomeDirectory(),
+                env: ["ZDOTDIR": "\(NSHomeDirectory())/\(Srota.dir)"],
+                session: session, into: ref
+            )
+        }
     }
 
     func restorePane(record: PaneRecord, colorScheme: ColorScheme) {
         let cwd = record.initialCWD.isEmpty ? nil : record.initialCWD
         let paneHookID = UUID().uuidString
-        let state = TerminalViewState(
-            terminalConfiguration: makeLauncherConfig(tabID: hookTabID, paneID: paneHookID)
+        let state = TerminalViewState(terminalConfiguration: TerminalConfiguration())
+        let ref = DaemonPaneRef()
+        let session = InMemoryTerminalSession(
+            write: { [weak daemon, ref] data in
+                guard let paneID = ref.id else { return }
+                daemon?.sendInput(paneID: paneID, data: data)
+            },
+            resize: { [weak daemon, ref] vp in
+                guard let paneID = ref.id else {
+                    ref.storePendingResize(rows: vp.rows, cols: vp.columns)
+                    return
+                }
+                daemon?.resize(paneID: paneID, rows: vp.rows, cols: vp.columns)
+            }
         )
-        state.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: cwd)
+        state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: cwd)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
         let entry = PaneEntry(hookPaneID: paneHookID, viewState: state, initialCWD: cwd)
-        state.onClose = { [weak self, weak entry] _ in
-            guard let self, let entry else { return }
-            self.removePane(id: entry.id)
+        let entryID = entry.id
+        state.onClose = { [weak self, ref] _ in
+            guard let self else { return }
+            if let paneID = ref.id { self.daemon?.closePTY(paneID: paneID) }
+            self.removePane(id: entryID)
         }
         paneLayouts[entry.id] = PaneLayout(
             x: CGFloat(record.lx), y: CGFloat(record.ly),
             w: CGFloat(record.lw), h: CGFloat(record.lh))
         panes.append(entry)
         focusedPaneID = entry.id
+        if let daemon {
+            daemon.spawnOrAttach(
+                stableID: record.id,
+                cwd: cwd ?? NSHomeDirectory(),
+                env: ["ZDOTDIR": "\(NSHomeDirectory())/\(Srota.dir)"],
+                session: session, into: ref
+            )
+        }
     }
 
     func swapLayouts(_ a: UUID, _ b: UUID) {
@@ -393,6 +442,7 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var name: String
     @Published var isPinned: Bool = false
     @Published var directory: String = ""
+    var daemon: DaemonConnection? = nil
     var lastAccessed: Date = Date()
     var isActive: Bool { isPinned || lastAccessed > Date(timeIntervalSinceNow: -172800) }
     @Published var tabs: [TerminalTab] = [] {
@@ -426,7 +476,7 @@ final class Workspace: Identifiable, ObservableObject {
     func addTab(colorScheme: ColorScheme, workingDirectory: String? = nil) {
         lastColorScheme = colorScheme
         let cwd = workingDirectory ?? (directory.isEmpty ? nil : directory)
-        let tab = TerminalTab(colorScheme: colorScheme, workingDirectory: cwd)
+        let tab = TerminalTab(colorScheme: colorScheme, workingDirectory: cwd, daemon: daemon)
         tab.closeTabCallback = { [weak self, weak tab] in
             guard let self, let tab else { return }
             self.closeTab(id: tab.id)
@@ -435,10 +485,10 @@ final class Workspace: Identifiable, ObservableObject {
         selectedTabID = tab.id
     }
 
-    func addRestoredTab(record: TabRecord, colorScheme: ColorScheme) {
+    func addRestoredTab(record: TabRecord, colorScheme: ColorScheme, firstPaneStableID: String? = nil) {
         lastColorScheme = colorScheme
         let cwd = record.initialCWD.isEmpty ? nil : record.initialCWD
-        let tab = TerminalTab(colorScheme: colorScheme, workingDirectory: cwd)
+        let tab = TerminalTab(colorScheme: colorScheme, workingDirectory: cwd, daemon: daemon, firstPaneStableID: firstPaneStableID)
         tab.closeTabCallback = { [weak self, weak tab] in
             guard let self, let tab else { return }
             self.closeTab(id: tab.id)
@@ -473,6 +523,7 @@ final class WorkspaceFolder: Identifiable, ObservableObject {
 
 @MainActor
 final class TerminalManager: ObservableObject {
+    var daemon: DaemonConnection? = nil
     @Published var workspaces: [Workspace] = []   // unfiled
     @Published var folders: [WorkspaceFolder] = [] {
         didSet { rebindFolderSinks() }
@@ -503,6 +554,7 @@ final class TerminalManager: ObservableObject {
         let wsName = name ?? "Workspace \(allWorkspaces.count + 1)"
         let ws = Workspace(name: wsName)
         ws.directory = workingDirectory ?? ""
+        ws.daemon = daemon
         ws.addTab(colorScheme: colorScheme, workingDirectory: workingDirectory)
         if let folderID, let folder = folders.first(where: { $0.id == folderID }) {
             folder.workspaces.append(ws)
@@ -625,6 +677,7 @@ struct ContentView: View {
     @StateObject private var manager = TerminalManager()
     @Environment(\.colorScheme) private var colorScheme
     @Environment(AppSettings.self) private var settings
+    @Environment(DaemonConnection.self) private var daemon
     @Environment(WorkspaceDB.self) private var db
     @Environment(FeatureAgentFocus.self) private var agentFocus
     @Environment(KeyboardShortcutManager.self) private var shortcuts
@@ -1228,6 +1281,7 @@ struct ContentView: View {
     }
 
     private func restoreSessionsFromDB(colorScheme: ColorScheme) {
+        manager.daemon = daemon
         let saved = db.loadWorkspaceSessions()
         guard !saved.isEmpty else { return }
         for session in saved {
@@ -1236,6 +1290,7 @@ struct ContentView: View {
                 : manager.folder(named: session.folderName, tag: session.folderTag)
             let wsID = UUID(uuidString: session.id) ?? UUID()
             let ws = Workspace(id: wsID, name: session.name)
+            ws.daemon = daemon
             ws.isPinned = session.isPinned
             ws.directory = session.directory
             ws.lastAccessed = Date(timeIntervalSince1970: TimeInterval(session.lastAccessed))
@@ -1245,10 +1300,11 @@ struct ContentView: View {
                 ws.addTab(colorScheme: colorScheme, workingDirectory: cwd)
             } else {
                 for tabRecord in tabs.sorted(by: { $0.position < $1.position }) {
-                    ws.addRestoredTab(record: tabRecord, colorScheme: colorScheme)
+                    let sortedPanes = db.loadPanes(tabID: tabRecord.id)
+                        .sorted(by: { $0.position < $1.position })
+                    ws.addRestoredTab(record: tabRecord, colorScheme: colorScheme,
+                                      firstPaneStableID: sortedPanes.first?.id)
                     if let tab = ws.tabs.last {
-                        let panes = db.loadPanes(tabID: tabRecord.id)
-                        let sortedPanes = panes.sorted(by: { $0.position < $1.position })
                         if let firstRecord = sortedPanes.first, !tab.panes.isEmpty {
                             tab.paneLayouts[tab.panes[0].id] = PaneLayout(
                                 x: CGFloat(firstRecord.lx), y: CGFloat(firstRecord.ly),
