@@ -880,13 +880,23 @@ struct ContentView: View {
                 }
             }
             .transition(.opacity.combined(with: .scale(scale: 0.97)))
-        }
-        if shortcuts.showWorkspaceSwitcher {
-            WorkspaceSwitcherOverlay(
-                allWorkspaces: manager.allWorkspaces.map { ws in
-                    let folder = manager.folders.first(where: { $0.workspaces.contains(where: { $0.id == ws.id }) })?.name
-                    return SwitcherWorkspace(
-                        id: ws.id, name: ws.name, folder: folder,
+                }
+                if shortcuts.showWorkspaceSwitcher {
+                    let dismissWorkspaceSwitcher = {
+                        withAnimation(.easeInOut(duration: 0.15)) { shortcuts.showWorkspaceSwitcher = false }
+                        if let state = manager.selectedWorkspace?.selectedTab?.focusedViewState {
+                            DispatchQueue.main.async { focusTerminalView(for: state) }
+                        }
+                    }
+                    let folderNamesByWorkspaceID = Dictionary(
+                        uniqueKeysWithValues: manager.folders.flatMap { folder in
+                            folder.workspaces.map { ($0.id, folder.name) }
+                        }
+                    )
+                    WorkspaceSwitcherOverlay(
+                        allWorkspaces: manager.allWorkspaces.map { ws in
+                            return SwitcherWorkspace(
+                        id: ws.id, name: ws.name, folder: folderNamesByWorkspaceID[ws.id],
                         tabs: ws.tabs.map { tab in
                             SwitcherTab(
                                 id: tab.id,
@@ -904,24 +914,29 @@ struct ContentView: View {
                         isSelected: ws.id == manager.selectedWorkspaceID,
                         isPinned: ws.isPinned,
                         isActive: ws.isActive
+                            )
+                        },
+                        onSelectWorkspace: { id in
+                            manager.selectWorkspace(id: id)
+                            dismissWorkspaceSwitcher()
+                        },
+                        onSelectTab: { wsID, tabID in
+                            manager.selectWorkspace(id: wsID)
+                            manager.allWorkspaces.first(where: { $0.id == wsID })?.selectedTabID = tabID
+                            dismissWorkspaceSwitcher()
+                        },
+                        onSelectPane: { wsID, tabID, paneID in
+                            manager.selectWorkspace(id: wsID)
+                            if let ws = manager.allWorkspaces.first(where: { $0.id == wsID }) {
+                                ws.selectedTabID = tabID
+                                ws.tabs.first(where: { $0.id == tabID })?.focusedPaneID = paneID
+                            }
+                            dismissWorkspaceSwitcher()
+                        },
+                        onDismiss: dismissWorkspaceSwitcher
                     )
-                },
-                    onSelectWorkspace: { id in manager.selectWorkspace(id: id) },
-                onSelectTab: { wsID, tabID in
-                        manager.selectWorkspace(id: wsID)
-                    manager.allWorkspaces.first(where: { $0.id == wsID })?.selectedTabID = tabID
-                },
-                onSelectPane: { wsID, tabID, paneID in
-                        manager.selectWorkspace(id: wsID)
-                    if let ws = manager.allWorkspaces.first(where: { $0.id == wsID }) {
-                        ws.selectedTabID = tabID
-                        ws.tabs.first(where: { $0.id == tabID })?.focusedPaneID = paneID
-                    }
-                },
-                onDismiss: { withAnimation(.easeInOut(duration: 0.15)) { shortcuts.showWorkspaceSwitcher = false } }
-            )
-            .transition(.opacity.combined(with: .scale(scale: 0.97)))
-        }
+                    .transition(.opacity.combined(with: .scale(scale: 0.97)))
+                }
         } // end ZStack
         } // end VStack
         .alert("Worktree Error", isPresented: .init(
@@ -1465,7 +1480,6 @@ private struct WorkspaceRow: View {
                 .frame(width: 3)
 
             HStack(spacing: 9) {
-                if indented { Spacer().frame(width: 14) }
                 Image(systemName: "square.stack")
                     .font(.system(size: 10))
                     .foregroundStyle(isSelected ? Color.accentOrange : Color.labelSecondary)
@@ -1520,7 +1534,7 @@ private struct WorkspaceRow: View {
             .padding(.vertical, 9)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isSelected ? Color.rowSelected : isHovered ? Color.rowHover : Color.clear)
+        .background(isSelected ? Color.rowSelected : isHovered ? Color.rowHover : indented ? Color.white.opacity(0.025) : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture { if !isRenaming { onSelect() } }
         .onHover { isHovered = $0 }
@@ -1590,7 +1604,7 @@ private struct WorkspaceRunsList: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, indented ? 48 : 34)
+                .padding(.leading, 34)
                 .padding(.trailing, 10)
                 .padding(.bottom, 8)
             }

@@ -57,6 +57,7 @@ final class KeyboardShortcutManager {
 
     private var prefixCombo: KeyCombo? = KeyCombo("ctrl+b")
     private var monitor: Any?
+    private var chordResetTask: Task<Void, Never>?
 
     func start() {
         guard monitor == nil else { return }
@@ -68,6 +69,9 @@ final class KeyboardShortcutManager {
 
     func stop() {
         if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+        chordResetTask?.cancel()
+        chordResetTask = nil
+        awaitingChord = false
     }
 
     private func handle(_ event: NSEvent) -> Bool {
@@ -81,6 +85,8 @@ final class KeyboardShortcutManager {
         guard let combo = prefixCombo else { return false }
 
         if awaitingChord {
+            chordResetTask?.cancel()
+            chordResetTask = nil
             awaitingChord = false
             if event.keyCode == 53 { return true } // ESC cancels chord
             let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
@@ -90,8 +96,10 @@ final class KeyboardShortcutManager {
 
         if combo.matches(event) {
             awaitingChord = true
-            Task { @MainActor [weak self] in
+            chordResetTask?.cancel()
+            chordResetTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .seconds(30))
+                guard !Task.isCancelled else { return }
                 self?.awaitingChord = false
             }
             return true
@@ -228,14 +236,12 @@ struct WorkspaceSwitcherOverlay: View {
     let onSelectPane: (UUID, UUID, UUID) -> Void
     let onDismiss: () -> Void
 
-    private enum NavLevel {
-        case workspaces
-        case tabs(wsIdx: Int)
-        case panes(wsIdx: Int, tabIdx: Int)
-    }
+    private enum Panel { case workspaces, tabs, panes }
 
-    @State private var level: NavLevel = .workspaces
-    @State private var highlighted: Int = 0
+    @State private var highlighted: Int = 0    // workspace index
+    @State private var tabHighlighted: Int = 0  // tab index within selected workspace
+    @State private var paneHighlighted: Int = 0 // pane index within highlighted tab
+    @State private var panel: Panel = .workspaces
     @State private var showAll = false
     private let accent = Color(red: 1.0, green: 0.45, blue: 0.15)
 
@@ -245,261 +251,342 @@ struct WorkspaceSwitcherOverlay: View {
         return filtered.isEmpty ? allWorkspaces : filtered
     }
 
-    var body: some View {
-        ZStack {
-            Color.black.opacity(0.001)
-                .ignoresSafeArea()
-                .onTapGesture { onDismiss() }
+    private var selectedWorkspace: SwitcherWorkspace? {
+        workspaces.indices.contains(highlighted) ? workspaces[highlighted] : nil
+    }
 
-            VStack(alignment: .leading, spacing: 0) {
-                HStack {
-                    breadcrumb
-                    Spacer()
-                    Button(showAll ? "Active" : "All") { showAll.toggle(); level = .workspaces; highlighted = 0 }
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(showAll ? Color.white.opacity(0.6) : accent.opacity(0.7))
-                        .buttonStyle(.plain)
+    private var selectedTab: SwitcherTab? {
+        guard let ws = selectedWorkspace, ws.tabs.indices.contains(tabHighlighted) else { return nil }
+        return ws.tabs[tabHighlighted]
+    }
+
+    // MARK: - Keyboard actions
+
+    private func navUp() {
+        switch panel {
+        case .workspaces:
+            let c = max(workspaces.count, 1)
+            highlighted = (highlighted - 1 + c) % c
+            tabHighlighted = 0; paneHighlighted = 0
+        case .tabs:
+            let c = max(selectedWorkspace?.tabs.count ?? 1, 1)
+            tabHighlighted = (tabHighlighted - 1 + c) % c
+            paneHighlighted = 0
+        case .panes:
+            let c = max(selectedTab?.panes.count ?? 1, 1)
+            paneHighlighted = (paneHighlighted - 1 + c) % c
+        }
+    }
+
+    private func navDown() {
+        switch panel {
+        case .workspaces:
+            let c = max(workspaces.count, 1)
+            highlighted = (highlighted + 1) % c
+            tabHighlighted = 0; paneHighlighted = 0
+        case .tabs:
+            let c = max(selectedWorkspace?.tabs.count ?? 1, 1)
+            tabHighlighted = (tabHighlighted + 1) % c
+            paneHighlighted = 0
+        case .panes:
+            let c = max(selectedTab?.panes.count ?? 1, 1)
+            paneHighlighted = (paneHighlighted + 1) % c
+        }
+    }
+
+    private func navRight() {
+        switch panel {
+        case .workspaces:
+            if selectedWorkspace?.tabs.isEmpty == false { panel = .tabs; tabHighlighted = 0 }
+        case .tabs:
+            if (selectedTab?.panes.count ?? 0) > 1 { panel = .panes; paneHighlighted = 0 }
+        case .panes:
+            break
+        }
+    }
+
+    private func navLeft() {
+        switch panel {
+        case .workspaces: onDismiss()
+        case .tabs: panel = .workspaces
+        case .panes: panel = .tabs
+        }
+    }
+
+    private func navEnter() {
+        guard let ws = selectedWorkspace else { return }
+        switch panel {
+        case .workspaces:
+            onSelectWorkspace(ws.id)
+        case .tabs:
+            guard ws.tabs.indices.contains(tabHighlighted) else { return }
+            onSelectTab(ws.id, ws.tabs[tabHighlighted].id)
+        case .panes:
+            guard let tab = selectedTab, tab.panes.indices.contains(paneHighlighted) else { return }
+            onSelectPane(ws.id, tab.id, tab.panes[paneHighlighted].id)
+        }
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                Color.black.opacity(0.001)
+                    .ignoresSafeArea()
+                    .onTapGesture { onDismiss() }
+
+                HStack(spacing: 0) {
+                    workspaceList
+                    Rectangle().fill(Color.white.opacity(0.07)).frame(width: 1)
+                    tabsPanel
                 }
-                .padding(.bottom, 8)
-                Divider().opacity(0.15).padding(.bottom, 8)
-                VStack(alignment: .leading, spacing: 3) { rows }
-            }
-            .padding(16)
-            .frame(minWidth: 420, maxWidth: 540)
-            .background(.ultraThinMaterial)
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(accent.opacity(0.2)))
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-            .shadow(color: .black.opacity(0.65), radius: 32, y: 10)
-            .overlay(
-                WorkspaceSwitcherKeyCapture(
-                    count: currentCount,
-                    onUp: { highlighted = (highlighted - 1 + max(currentCount, 1)) % max(currentCount, 1) },
-                    onDown: { highlighted = (highlighted + 1) % max(currentCount, 1) },
-                    onLeft: drillOut,
-                    onRight: drillIn,
-                    onEnter: selectCurrent,
-                    onNumber: { n in
-                        let idx = n - 1
-                        guard idx < currentCount else { return }
-                        highlighted = idx
-                        selectCurrent()
-                    },
-                    onDismiss: onDismiss
+                .frame(width: geo.size.width * 0.7, height: geo.size.height * 0.7)
+                .background(.ultraThinMaterial)
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(accent.opacity(0.2)))
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .shadow(color: .black.opacity(0.65), radius: 32, y: 10)
+                .overlay(
+                    WorkspaceSwitcherKeyCapture(
+                        count: workspaces.count,
+                        onUp: navUp,
+                        onDown: navDown,
+                        onLeft: navLeft,
+                        onRight: navRight,
+                        onEnter: navEnter,
+                        onNumber: { n in
+                            let idx = n - 1
+                            guard idx < workspaces.count else { return }
+                            highlighted = idx; panel = .workspaces
+                            tabHighlighted = 0; paneHighlighted = 0
+                            onSelectWorkspace(workspaces[idx].id)
+                        },
+                        onDismiss: onDismiss
+                    )
+                    .frame(width: 0, height: 0)
                 )
-                .frame(width: 0, height: 0)
-            )
+            }
         }
         .onAppear { highlighted = workspaces.firstIndex(where: { $0.isSelected }) ?? 0 }
     }
 
-    @ViewBuilder private var breadcrumb: some View {
-        switch level {
-        case .workspaces:
-            Text("Workspaces")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(Color.white.opacity(0.3))
-        case .tabs(let wi):
-            HStack(spacing: 5) {
-                Image(systemName: "chevron.left").font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(accent.opacity(0.7))
-                Text(workspaces[wi].name)
+    // MARK: - Left panel: workspace list
+
+    @ViewBuilder private var workspaceList: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Workspaces")
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(Color.white.opacity(0.5))
-                Text("/ tabs").font(.system(size: 10)).foregroundStyle(Color.white.opacity(0.25))
+                    .foregroundStyle(panel == .workspaces ? accent.opacity(0.8) : Color.white.opacity(0.3))
+                Spacer()
+                Button(showAll ? "Active" : "All") { showAll.toggle(); highlighted = 0; panel = .workspaces }
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(showAll ? Color.white.opacity(0.6) : accent.opacity(0.7))
+                    .buttonStyle(.plain)
             }
-        case .panes(let wi, let ti):
-            HStack(spacing: 5) {
-                Image(systemName: "chevron.left").font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(accent.opacity(0.7))
-                Text(workspaces[wi].name).font(.system(size: 10))
-                    .foregroundStyle(Color.white.opacity(0.35))
-                Text("/").font(.system(size: 10)).foregroundStyle(Color.white.opacity(0.2))
-                Text(workspaces[wi].tabs[ti].title)
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(Color.white.opacity(0.5))
-                Text("/ panes").font(.system(size: 10)).foregroundStyle(Color.white.opacity(0.25))
+            .padding(.horizontal, 14).padding(.vertical, 12)
+
+            Divider().opacity(0.1)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    let groups = groupedWorkspaces()
+                    ForEach(groups.indices, id: \.self) { gi in
+                        let (folderName, items) = groups[gi]
+                        if gi > 0 { Divider().opacity(0.08).padding(.vertical, 4) }
+                        if let name = folderName {
+                            HStack(spacing: 5) {
+                                Image(systemName: "folder").font(.system(size: 9))
+                                    .foregroundStyle(Color.white.opacity(0.25))
+                                Text(name).font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(Color.white.opacity(0.3))
+                            }
+                            .padding(.horizontal, 12).padding(.bottom, 2)
+                        }
+                        ForEach(items, id: \.0) { (i, ws) in wsRow(i: i, ws: ws) }
+                    }
+                }
+                .padding(.vertical, 8).padding(.horizontal, 4)
             }
         }
+        .frame(minWidth: 0, maxWidth: .infinity)
     }
 
-    @ViewBuilder private var rows: some View {
-        switch level {
-        case .workspaces:
-            ForEach(Array(workspaces.enumerated()), id: \.offset) { i, ws in wsRow(i: i, ws: ws) }
-        case .tabs(let wi):
-            ForEach(Array(workspaces[wi].tabs.enumerated()), id: \.offset) { i, tab in
-                tabRow(i: i, tab: tab, canDrillIn: tab.panes.count > 1)
-            }
-        case .panes(let wi, let ti):
-            ForEach(Array(workspaces[wi].tabs[ti].panes.enumerated()), id: \.offset) { i, pane in
-                paneRow(i: i, pane: pane)
-            }
-        }
-    }
+    // MARK: - Right panel: tabs + panes
 
-    private func wsRow(i: Int, ws: SwitcherWorkspace) -> some View {
-        let tabCount = ws.tabs.count
-        let paneCount = ws.tabs.reduce(0) { $0 + $1.panes.count }
-        return HStack(alignment: .center, spacing: 12) {
-            Text(i < 9 ? "\(i + 1)" : "·")
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundStyle(i == highlighted ? accent : accent.opacity(0.5))
-                .frame(width: 18, alignment: .trailing)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(ws.name)
-                    .font(.system(size: 14, weight: i == highlighted ? .semibold : .regular))
-                    .foregroundStyle(Color.white)
-                HStack(spacing: 8) {
-                    if let folder = ws.folder {
-                        HStack(spacing: 4) {
-                            Image(systemName: "folder").font(.system(size: 9))
-                                .foregroundStyle(Color.white.opacity(0.3))
-                            Text(folder).font(.system(size: 11))
-                                .foregroundStyle(Color.white.opacity(0.35))
+    @ViewBuilder private var tabsPanel: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 4) {
+                if let ws = selectedWorkspace {
+                    Text(ws.name)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(panel == .workspaces ? Color.white.opacity(0.3) : Color.white.opacity(0.5))
+                        .lineLimit(1)
+                    if panel == .tabs || panel == .panes {
+                        Image(systemName: "chevron.right").font(.system(size: 8))
+                            .foregroundStyle(Color.white.opacity(0.2))
+                        Text("tabs").font(.system(size: 10))
+                            .foregroundStyle(panel == .tabs ? accent.opacity(0.8) : Color.white.opacity(0.3))
+                    }
+                    if panel == .panes, let tab = selectedTab {
+                        Image(systemName: "chevron.right").font(.system(size: 8))
+                            .foregroundStyle(Color.white.opacity(0.2))
+                        Text(tab.title).font(.system(size: 10))
+                            .foregroundStyle(accent.opacity(0.8))
+                            .lineLimit(1)
+                    }
+                } else {
+                    Text("Tabs")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color.white.opacity(0.3))
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 14).padding(.vertical, 12)
+
+            Divider().opacity(0.1)
+
+            if let ws = selectedWorkspace, !ws.tabs.isEmpty {
+                ScrollView {
+                    VStack(spacing: 8) {
+                        ForEach(Array(ws.tabs.enumerated()), id: \.offset) { i, tab in
+                            tabCard(tab: tab, tabIdx: i, wsID: ws.id)
                         }
                     }
-                    Text("\(tabCount) tab\(tabCount == 1 ? "" : "s") · \(paneCount) pane\(paneCount == 1 ? "" : "s")")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Color.white.opacity(0.25))
+                    .padding(12)
                 }
-            }
-            Spacer()
-            HStack(spacing: 6) {
-                if ws.isPinned {
-                    Image(systemName: "pin.fill")
-                        .font(.system(size: 9))
-                        .foregroundStyle(accent.opacity(0.6))
-                }
-                if ws.isSelected { Circle().fill(accent).frame(width: 6, height: 6) }
-                if i == highlighted {
-                    Image(systemName: "chevron.right").font(.system(size: 10))
-                        .foregroundStyle(Color.white.opacity(0.25))
-                }
+            } else {
+                Spacer()
+                Text("No tabs")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.white.opacity(0.2))
+                    .frame(maxWidth: .infinity)
+                Spacer()
             }
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(i == highlighted ? accent.opacity(0.15) : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .onTapGesture { highlighted = i; selectCurrent() }
+        .frame(minWidth: 0, maxWidth: .infinity)
     }
 
-    private func tabRow(i: Int, tab: SwitcherTab, canDrillIn: Bool) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            Text(i < 9 ? "\(i + 1)" : "·")
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundStyle(i == highlighted ? accent : accent.opacity(0.5))
-                .frame(width: 18, alignment: .trailing)
-            VStack(alignment: .leading, spacing: 2) {
+    private func tabCard(tab: SwitcherTab, tabIdx: Int, wsID: UUID) -> some View {
+        let isTabFocused = (panel == .tabs || panel == .panes) && tabIdx == tabHighlighted
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: tab.isSelected ? "terminal.fill" : "terminal")
+                    .font(.system(size: 10))
+                    .foregroundStyle(isTabFocused ? accent : tab.isSelected ? accent.opacity(0.6) : Color.white.opacity(0.35))
                 Text(tab.title)
-                    .font(.system(size: 13, weight: i == highlighted ? .semibold : .regular))
-                    .foregroundStyle(Color.white)
+                    .font(.system(size: 12, weight: isTabFocused ? .semibold : .regular))
+                    .foregroundStyle(isTabFocused ? Color.white : Color.white.opacity(0.65))
+                    .lineLimit(1)
+                Spacer()
                 if let cwd = tab.cwd, !cwd.isEmpty {
                     Text(cwd.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(Color.white.opacity(0.3))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Color.white.opacity(0.2))
                         .lineLimit(1).truncationMode(.head)
+                        .frame(maxWidth: 160, alignment: .trailing)
                 }
             }
-            Spacer()
-            HStack(spacing: 6) {
-                if tab.isSelected { Circle().fill(accent).frame(width: 6, height: 6) }
-                if canDrillIn {
-                    Text("\(tab.panes.count)p").font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(Color.white.opacity(0.25))
-                    if i == highlighted {
-                        Image(systemName: "chevron.right").font(.system(size: 10))
-                            .foregroundStyle(Color.white.opacity(0.25))
+            if tab.panes.count > 1 {
+                VStack(spacing: 3) {
+                    ForEach(Array(tab.panes.enumerated()), id: \.offset) { j, pane in
+                        paneChip(pane: pane, index: j, tabIdx: tabIdx, wsID: wsID, tabID: tab.id)
                     }
                 }
+                .padding(.leading, 4)
+            }
+        }
+        .padding(10)
+        .background(isTabFocused ? accent.opacity(0.12) : Color.white.opacity(0.04))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(
+            isTabFocused ? accent.opacity(0.3) : Color.white.opacity(0.06)
+        ))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            tabHighlighted = tabIdx; panel = .tabs
+            onSelectTab(wsID, tab.id)
+        }
+    }
+
+    private func paneChip(pane: SwitcherPane, index: Int, tabIdx: Int, wsID: UUID, tabID: UUID) -> some View {
+        let isPaneFocused = panel == .panes && tabIdx == tabHighlighted && index == paneHighlighted
+        let label = pane.name.flatMap { $0.isEmpty ? nil : $0 }
+            ?? pane.cwd.map { $0.replacingOccurrences(of: NSHomeDirectory(), with: "~") }
+            ?? "pane \(index + 1)"
+        return HStack {
+            Text(label)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(isPaneFocused ? Color.white : Color.white.opacity(0.4))
+                .lineLimit(1).truncationMode(.head)
+            Spacer()
+        }
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(isPaneFocused ? accent.opacity(0.15) : Color.white.opacity(0.04))
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(
+            isPaneFocused ? accent.opacity(0.3) : Color.white.opacity(0.08)
+        ))
+        .contentShape(Rectangle())
+        .onTapGesture { onSelectPane(wsID, tabID, pane.id) }
+    }
+
+    // MARK: - Workspace row
+
+    private func wsRow(i: Int, ws: SwitcherWorkspace) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            Text(i < 9 ? "\(i + 1)" : "·")
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(i == highlighted ? accent : accent.opacity(0.4))
+                .frame(width: 16, alignment: .trailing)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(ws.name)
+                    .font(.system(size: 13, weight: i == highlighted ? .semibold : .regular))
+                    .foregroundStyle(i == highlighted ? Color.white : Color.white.opacity(0.7))
+                    .lineLimit(1)
+                Text("\(ws.tabs.count) tab\(ws.tabs.count == 1 ? "" : "s")")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.white.opacity(0.25))
+            }
+            Spacer()
+            HStack(spacing: 5) {
+                if ws.isPinned {
+                    Image(systemName: "pin.fill").font(.system(size: 8))
+                        .foregroundStyle(accent.opacity(0.6))
+                }
+                if ws.isSelected { Circle().fill(accent).frame(width: 5, height: 5) }
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 7)
         .background(i == highlighted ? accent.opacity(0.15) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6))
-        .onTapGesture { highlighted = i; selectCurrent() }
+        .contentShape(Rectangle())
+        .onHover { if $0 { highlighted = i; panel = .workspaces; tabHighlighted = 0; paneHighlighted = 0 } }
+        .onTapGesture { onSelectWorkspace(ws.id) }
     }
 
-    private func paneRow(i: Int, pane: SwitcherPane) -> some View {
-        let hasName = pane.name.map { !$0.isEmpty } ?? false
-        return HStack(alignment: .center, spacing: 12) {
-            Text(i < 9 ? "\(i + 1)" : "·")
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundStyle(i == highlighted ? accent : accent.opacity(0.5))
-                .frame(width: 18, alignment: .trailing)
-            VStack(alignment: .leading, spacing: 2) {
-                if hasName {
-                    Text(pane.name!)
-                        .font(.system(size: 13, weight: i == highlighted ? .semibold : .regular))
-                        .foregroundStyle(Color.white)
+    // MARK: - Grouping
+
+    private func groupedWorkspaces() -> [(String?, [(Int, SwitcherWorkspace)])] {
+        var result: [(String?, [(Int, SwitcherWorkspace)])] = []
+        var indexMap: [String: Int] = [:]
+        var noFolderIdx: Int? = nil
+        for (i, ws) in workspaces.enumerated() {
+            if let folder = ws.folder {
+                if let ri = indexMap[folder] {
+                    result[ri].1.append((i, ws))
+                } else {
+                    indexMap[folder] = result.count
+                    result.append((folder, [(i, ws)]))
                 }
-                if let cwd = pane.cwd, !cwd.isEmpty {
-                    Text(cwd.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
-                        .font(.system(size: hasName ? 11 : 13, design: .monospaced))
-                        .fontWeight(!hasName && i == highlighted ? .semibold : .regular)
-                        .foregroundStyle(hasName ? Color.white.opacity(0.3) : Color.white)
-                        .lineLimit(1).truncationMode(.head)
-                } else if !hasName {
-                    Text("pane \(i + 1)")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Color.white.opacity(0.5))
+            } else {
+                if let ri = noFolderIdx {
+                    result[ri].1.append((i, ws))
+                } else {
+                    noFolderIdx = result.count
+                    result.append((nil, [(i, ws)]))
                 }
             }
-            Spacer()
         }
-        .padding(.horizontal, 12).padding(.vertical, hasName ? 7 : 8)
-        .background(i == highlighted ? accent.opacity(0.15) : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .onTapGesture { highlighted = i; selectCurrent() }
-    }
-
-    private var currentCount: Int {
-        switch level {
-        case .workspaces: return workspaces.count
-        case .tabs(let wi): return workspaces.indices.contains(wi) ? workspaces[wi].tabs.count : 0
-        case .panes(let wi, let ti):
-            guard workspaces.indices.contains(wi), workspaces[wi].tabs.indices.contains(ti) else { return 0 }
-            return workspaces[wi].tabs[ti].panes.count
-        }
-    }
-
-    private func drillIn() {
-        switch level {
-        case .workspaces:
-            guard workspaces.indices.contains(highlighted), !workspaces[highlighted].tabs.isEmpty else { return }
-            let wi = highlighted
-            level = .tabs(wsIdx: wi)
-            highlighted = workspaces[wi].tabs.firstIndex(where: { $0.isSelected }) ?? 0
-        case .tabs(let wi):
-            guard workspaces[wi].tabs.indices.contains(highlighted),
-                  workspaces[wi].tabs[highlighted].panes.count > 1 else { return }
-            let ti = highlighted
-            level = .panes(wsIdx: wi, tabIdx: ti)
-            highlighted = 0
-        case .panes: break
-        }
-    }
-
-    private func drillOut() {
-        switch level {
-        case .workspaces: onDismiss()
-        case .tabs(let wi): level = .workspaces; highlighted = wi
-        case .panes(let wi, let ti): level = .tabs(wsIdx: wi); highlighted = ti
-        }
-    }
-
-    private func selectCurrent() {
-        switch level {
-        case .workspaces:
-            guard workspaces.indices.contains(highlighted) else { return }
-            onSelectWorkspace(workspaces[highlighted].id); onDismiss()
-        case .tabs(let wi):
-            guard workspaces[wi].tabs.indices.contains(highlighted) else { return }
-            onSelectTab(workspaces[wi].id, workspaces[wi].tabs[highlighted].id); onDismiss()
-        case .panes(let wi, let ti):
-            let panes = workspaces[wi].tabs[ti].panes
-            guard panes.indices.contains(highlighted) else { return }
-            onSelectPane(workspaces[wi].id, workspaces[wi].tabs[ti].id, panes[highlighted].id); onDismiss()
-        }
+        return result
     }
 }
 
