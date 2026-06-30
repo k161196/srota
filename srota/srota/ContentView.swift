@@ -2406,9 +2406,16 @@ private struct TerminalContentView: View {
         DispatchQueue.main.async {
             guard let window = NSApp.keyWindow, let root = window.contentView else { return }
             if let tv = Self.findTerminalView(for: state, in: root) {
+                Self.configureTerminalView(tv)
                 window.makeFirstResponder(tv)
             }
         }
+    }
+
+    private static func configureTerminalView(_ view: NSView) {
+        // ponytail: Ghostty's AppKit layer is transparent; make it opaque so cleared cells don't show stale glyphs.
+        view.layer?.isOpaque = true
+        view.layer?.backgroundColor = NSColor.black.cgColor
     }
 
     private static func findTerminalView(for state: TerminalViewState, in view: NSView) -> NSView? {

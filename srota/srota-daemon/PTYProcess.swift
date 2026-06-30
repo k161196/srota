@@ -42,7 +42,7 @@ final class PTYProcess {
         mergedEnv["SROTA_SOCKET_PATH"] = ProcessInfo.processInfo.environment["SROTA_SOCKET_PATH"]
             ?? "\(NSHomeDirectory())/\(srotaDir)/daemon.sock"
         if mergedEnv["TERM"] == nil { mergedEnv["TERM"] = "xterm-256color" }
-        if mergedEnv["TERM_PROGRAM"] == nil { mergedEnv["TERM_PROGRAM"] = "srota" }
+        if mergedEnv["TERM_PROGRAM"] == nil { mergedEnv["TERM_PROGRAM"] = "ghostty" }
 
         let shell = cmd.isEmpty ? [ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"] : cmd
         let argv = shell.map { strdup($0) } + [nil]
@@ -59,7 +59,11 @@ final class PTYProcess {
             }
         }
 
-        let childPID = forkpty(&newMasterFD, nil, nil, nil)
+        // ponytail: default 80×24 so shell starts in a valid terminal before Ghostty sends the real size
+        var ws = winsize()
+        ws.ws_col = 80
+        ws.ws_row = 24
+        let childPID = forkpty(&newMasterFD, nil, nil, &ws)
         if childPID < 0 {
             throw NSError(domain: "PTY", code: Int(errno), userInfo: [NSLocalizedDescriptionKey: "forkpty failed"])
         }
