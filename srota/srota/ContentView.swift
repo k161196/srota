@@ -640,6 +640,9 @@ struct ContentView: View {
     @State private var agentEventTask: Task<Void, Never>? = nil
     @State private var worktreeError: String? = nil
     @State private var workspaceSwitcherModel: SwitcherModel? = nil
+    @State private var sidebarKeyboardFocus = false
+    @State private var sidebarHighlightedWorkspaceID: UUID? = nil
+    @State private var sidebarReturnFocusState: TerminalViewState? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -676,25 +679,32 @@ struct ContentView: View {
         )
         ZStack {
         HStack(spacing: 0) {
-            SidebarView(
-                manager: manager,
-                onAdd: {
-                    let fid = manager.selectedWorkspaceID.flatMap { manager.folderID(containingWorkspace: $0) }
-                    manager.addWorkspace(colorScheme: colorScheme, inFolder: fid)
-                    saveLayout()
-                }
-            )
+                SidebarView(
+                    manager: manager,
+                    keyboardFocusedWorkspaceID: sidebarKeyboardFocus ? sidebarHighlightedWorkspaceID : nil,
+                    onAdd: {
+                        clearSidebarKeyboardFocus()
+                        let fid = manager.selectedWorkspaceID.flatMap { manager.folderID(containingWorkspace: $0) }
+                        manager.addWorkspace(colorScheme: colorScheme, inFolder: fid)
+                        saveLayout()
+                    },
+                    onSelectWorkspace: { id in
+                        clearSidebarKeyboardFocus()
+                        manager.selectWorkspace(id: id)
+                    }
+                )
             .frame(width: sidebarVisible ? sidebarWidth : 0)
             .clipped()
             .allowsHitTesting(sidebarVisible)
 
             SidebarDivider(sidebarVisible: sidebarVisible, width: $sidebarWidth)
 
-            VStack(spacing: 0) {
-                if let ws = manager.selectedWorkspace {
-                    TabBarView(workspace: ws, colorScheme: colorScheme, sidebarVisible: $sidebarVisible,
-                               onMutation: { saveLayout() })
-                } else {
+                VStack(spacing: 0) {
+                    if let ws = manager.selectedWorkspace {
+                        TabBarView(workspace: ws, colorScheme: colorScheme, sidebarVisible: $sidebarVisible,
+                                   onUserInteraction: { clearSidebarKeyboardFocus() },
+                                   onMutation: { saveLayout() })
+                    } else {
                     HStack {
                         Button(action: { sidebarVisible.toggle() }) {
                             Image(systemName: "sidebar.left")
@@ -723,6 +733,7 @@ struct ContentView: View {
                     ForEach(manager.allWorkspaces) { ws in
                         WorkspaceContent(workspace: ws,
                                          selectedWorkspaceID: manager.selectedWorkspaceID,
+                                         onPaneActivated: { clearSidebarKeyboardFocus() },
                                          onPaneResizeFinished: saveLayout)
                     }
                 }
@@ -730,6 +741,10 @@ struct ContentView: View {
             }
         }
         .animation(.spring(duration: 0.22, bounce: 0.0), value: sidebarVisible)
+        .onChange(of: sidebarVisible) { _, visible in
+            guard !visible else { return }
+            clearSidebarKeyboardFocus(restorePane: true)
+        }
         .onAppear {
             if !restoredSessions {
                 restoredSessions = true
@@ -820,14 +835,15 @@ struct ContentView: View {
                 registerShortcutActions()
                 shortcuts.start()
             }
-            .onChange(of: shortcuts.showWorkspaceSwitcher) { _, isShowing in
-                workspaceSwitcherModel = isShowing ? makeWorkspaceSwitcherModel() : nil
-            }
-            .onDisappear {
-                agentEventTask?.cancel()
-                agentEventTask = nil
-                shortcuts.stop()
-            }
+        .onChange(of: shortcuts.showWorkspaceSwitcher) { _, isShowing in
+            workspaceSwitcherModel = isShowing ? makeWorkspaceSwitcherModel() : nil
+        }
+        .onDisappear {
+            agentEventTask?.cancel()
+            agentEventTask = nil
+            shortcuts.plainKeyHandler = nil
+            shortcuts.stop()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             saveLayout()
         }
@@ -1052,13 +1068,123 @@ struct ContentView: View {
         }
         shortcuts.actions["%"] = { manager.selectedWorkspace?.selectedTab?.splitRight(colorScheme: .dark); saveLayout() }
         shortcuts.actions["\""] = { manager.selectedWorkspace?.selectedTab?.splitBottom(colorScheme: .dark); saveLayout() }
-        shortcuts.actions["h"] = { manager.selectedWorkspace?.selectedTab?.focusPane(direction: .left) }
-        shortcuts.actions["j"] = { manager.selectedWorkspace?.selectedTab?.focusPane(direction: .down) }
-        shortcuts.actions["k"] = { manager.selectedWorkspace?.selectedTab?.focusPane(direction: .up) }
-        shortcuts.actions["l"] = { manager.selectedWorkspace?.selectedTab?.focusPane(direction: .right) }
+        shortcuts.actions["h"] = {
+            if sidebarKeyboardFocus { return }
+            guard manager.selectedWorkspace?.selectedTab?.focusPane(direction: .left) != true else { return }
+            enterSidebarKeyboardFocus()
+        }
+        shortcuts.actions["j"] = {
+            guard !sidebarKeyboardFocus else {
+                moveSidebarKeyboardHighlight(step: 1)
+                return
+            }
+            manager.selectedWorkspace?.selectedTab?.focusPane(direction: .down)
+        }
+        shortcuts.actions["k"] = {
+            guard !sidebarKeyboardFocus else {
+                moveSidebarKeyboardHighlight(step: -1)
+                return
+            }
+            manager.selectedWorkspace?.selectedTab?.focusPane(direction: .up)
+        }
+        shortcuts.actions["l"] = {
+            guard !sidebarKeyboardFocus else {
+                activateSidebarSelection()
+                return
+            }
+            manager.selectedWorkspace?.selectedTab?.focusPane(direction: .right)
+        }
         shortcuts.actions["g"] = {
             shortcuts.lazygitCWD = manager.selectedWorkspace?.selectedTab?.statusPath
             withAnimation(.easeInOut(duration: 0.15)) { shortcuts.showLazygit = true }
+        }
+        shortcuts.plainKeyHandler = { event in
+            handleSidebarPlainKey(event)
+        }
+    }
+
+    private var sidebarWorkspaceIDs: [UUID] {
+        manager.allWorkspaces.map(\.id)
+    }
+
+    private func enterSidebarKeyboardFocus() {
+        guard sidebarVisible else { return }
+        let workspaceIDs = sidebarWorkspaceIDs
+        guard !workspaceIDs.isEmpty else { return }
+        sidebarReturnFocusState = manager.selectedWorkspace?.selectedTab?.focusedViewState
+        sidebarHighlightedWorkspaceID = manager.selectedWorkspaceID ?? workspaceIDs.first
+        sidebarKeyboardFocus = true
+    }
+
+    private func moveSidebarKeyboardHighlight(step: Int) {
+        let workspaceIDs = sidebarWorkspaceIDs
+        guard !workspaceIDs.isEmpty else { return }
+        let currentID = sidebarHighlightedWorkspaceID ?? manager.selectedWorkspaceID ?? workspaceIDs[0]
+        let currentIndex = workspaceIDs.firstIndex(of: currentID) ?? 0
+        let nextIndex = min(max(currentIndex + step, 0), workspaceIDs.count - 1)
+        sidebarHighlightedWorkspaceID = workspaceIDs[nextIndex]
+    }
+
+    private func activateSidebarSelection() {
+        let workspaceIDs = sidebarWorkspaceIDs
+        guard let workspaceID = sidebarHighlightedWorkspaceID ?? manager.selectedWorkspaceID ?? workspaceIDs.first else { return }
+        sidebarKeyboardFocus = false
+        sidebarHighlightedWorkspaceID = nil
+        sidebarReturnFocusState = nil
+        manager.selectWorkspace(id: workspaceID)
+        DispatchQueue.main.async {
+            guard let state = manager.selectedWorkspace?.selectedTab?.focusedViewState else { return }
+            focusTerminalView(for: state)
+        }
+    }
+
+    private func clearSidebarKeyboardFocus(restorePane: Bool = false) {
+        let state = restorePane ? sidebarReturnFocusState : nil
+        sidebarKeyboardFocus = false
+        sidebarHighlightedWorkspaceID = nil
+        sidebarReturnFocusState = nil
+        guard restorePane, let state else { return }
+        DispatchQueue.main.async {
+            focusTerminalView(for: state)
+        }
+    }
+
+    private func handleSidebarPlainKey(_ event: NSEvent) -> Bool {
+        guard sidebarKeyboardFocus else { return false }
+        let modifiers = event.modifierFlags.intersection([.control, .command, .option, .shift])
+        guard modifiers.isEmpty else { return false }
+        switch event.keyCode {
+        case 36, 76, 124:
+            activateSidebarSelection()
+            return true
+        case 123:
+            return true
+        case 53:
+            clearSidebarKeyboardFocus(restorePane: true)
+            return true
+        case 125:
+            moveSidebarKeyboardHighlight(step: 1)
+            return true
+        case 126:
+            moveSidebarKeyboardHighlight(step: -1)
+            return true
+        default:
+            break
+        }
+        switch event.charactersIgnoringModifiers?.lowercased() ?? "" {
+        case "j":
+            moveSidebarKeyboardHighlight(step: 1)
+            return true
+        case "k":
+            moveSidebarKeyboardHighlight(step: -1)
+            return true
+        case "l":
+            activateSidebarSelection()
+            return true
+        case "h":
+            return true
+        default:
+            return false
         }
     }
 
@@ -1237,7 +1363,9 @@ private struct StatusBadge: View {
 
 private struct SidebarView: View {
     @ObservedObject var manager: TerminalManager
+    let keyboardFocusedWorkspaceID: UUID?
     let onAdd: () -> Void
+    let onSelectWorkspace: (UUID) -> Void
     @State private var newFolderID: UUID? = nil
     @State private var isDragTargetUnfiled = false
 
@@ -1294,16 +1422,19 @@ private struct SidebarView: View {
 WorkspaceSidebarItem(
                             workspace: ws,
                             manager: manager,
-                            isSelected: manager.selectedWorkspaceID == ws.id,
-onSelect: { manager.selectWorkspace(id: ws.id) },
+                    isSelected: manager.selectedWorkspaceID == ws.id,
+                    isKeyboardFocused: keyboardFocusedWorkspaceID == ws.id,
+                    onSelect: { onSelectWorkspace(ws.id) },
                             onClose:  { manager.closeWorkspace(id: ws.id) }
                         )
                     }
                     ForEach(manager.folders) { folder in
                         FolderRow(
                             folder: folder,
-                            manager: manager,
-                            startRenaming: newFolderID == folder.id,
+                    manager: manager,
+                    keyboardFocusedWorkspaceID: keyboardFocusedWorkspaceID,
+                    onSelectWorkspace: onSelectWorkspace,
+                    startRenaming: newFolderID == folder.id,
                             onRenameHandled: { newFolderID = nil }
                         )
                     }
@@ -1320,6 +1451,8 @@ onSelect: { manager.selectWorkspace(id: ws.id) },
 private struct FolderRow: View {
     @ObservedObject var folder: WorkspaceFolder
     @ObservedObject var manager: TerminalManager
+    let keyboardFocusedWorkspaceID: UUID?
+    let onSelectWorkspace: (UUID) -> Void
     let startRenaming: Bool
     let onRenameHandled: () -> Void
 
@@ -1416,8 +1549,9 @@ private struct FolderRow: View {
                     WorkspaceSidebarItem(
                         workspace: ws,
                         manager: manager,
-                        isSelected: manager.selectedWorkspaceID == ws.id,
-                        onSelect: { manager.selectWorkspace(id: ws.id) },
+                    isSelected: manager.selectedWorkspaceID == ws.id,
+                    isKeyboardFocused: keyboardFocusedWorkspaceID == ws.id,
+                    onSelect: { onSelectWorkspace(ws.id) },
                         onClose:  { manager.closeWorkspace(id: ws.id) },
                         indented: true
                     )
@@ -1455,6 +1589,7 @@ private struct WorkspaceRow: View {
     @ObservedObject var workspace: Workspace
     @ObservedObject var manager: TerminalManager
     let isSelected: Bool
+    let isKeyboardFocused: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
     var indented: Bool = false
@@ -1557,7 +1692,12 @@ private struct WorkspaceRow: View {
             .padding(.vertical, 9)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isSelected ? Color.rowSelected : isHovered ? Color.rowHover : indented ? Color.white.opacity(0.025) : Color.clear)
+        .background(isSelected ? Color.rowSelected : isKeyboardFocused ? Color.accentOrange.opacity(0.12) : isHovered ? Color.rowHover : indented ? Color.white.opacity(0.025) : Color.clear)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(isKeyboardFocused ? Color.accentOrange.opacity(0.55) : Color.clear, lineWidth: 1)
+                .padding(.horizontal, 4)
+        )
         .contentShape(Rectangle())
         .onTapGesture { if !isRenaming { onSelect() } }
         .onHover { isHovered = $0 }
@@ -1639,6 +1779,7 @@ private struct WorkspaceSidebarItem: View {
     @ObservedObject var workspace: Workspace
     @ObservedObject var manager: TerminalManager
     let isSelected: Bool
+    let isKeyboardFocused: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
     var indented: Bool = false
@@ -1651,12 +1792,13 @@ private struct WorkspaceSidebarItem: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            WorkspaceRow(
-                workspace: workspace,
-                manager: manager,
-                isSelected: isSelected,
-                onSelect: onSelect,
-                onClose: onClose,
+        WorkspaceRow(
+            workspace: workspace,
+            manager: manager,
+            isSelected: isSelected,
+            isKeyboardFocused: isKeyboardFocused,
+            onSelect: onSelect,
+            onClose: onClose,
                 indented: indented,
                 isExpanded: hasRuns ? isExpanded : nil,
                 onToggleExpand: hasRuns ? { isExpanded.toggle() } : nil
@@ -1675,11 +1817,15 @@ private struct TabBarView: View {
     @ObservedObject var workspace: Workspace
     let colorScheme: ColorScheme
     @Binding var sidebarVisible: Bool
+    var onUserInteraction: () -> Void = {}
     var onMutation: () -> Void = {}
 
     var body: some View {
         HStack(spacing: 0) {
-            Button(action: { sidebarVisible.toggle() }) {
+            Button(action: {
+                onUserInteraction()
+                sidebarVisible.toggle()
+            }) {
                 Image(systemName: "sidebar.left")
                     .font(.system(size: 13))
                     .foregroundStyle(sidebarVisible ? Color.labelPrimary : Color.labelMuted)
@@ -1694,12 +1840,19 @@ private struct TabBarView: View {
                         TabChip(
                             tab: tab,
                             isActive: workspace.selectedTabID == tab.id,
-                            onSelect: { workspace.selectedTabID = tab.id },
+                        onSelect: {
+                            onUserInteraction()
+                            workspace.selectedTabID = tab.id
+                        },
                             onClose:  { workspace.closeTab(id: tab.id) }
                         )
                     }
 
-                    Button(action: { workspace.addTab(colorScheme: colorScheme, workingDirectory: workspace.currentWorkingDirectory); onMutation() }) {
+                Button(action: {
+                    onUserInteraction()
+                    workspace.addTab(colorScheme: colorScheme, workingDirectory: workspace.currentWorkingDirectory)
+                    onMutation()
+                }) {
                         Image(systemName: "plus")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(Color.labelMuted)
@@ -1738,12 +1891,13 @@ private struct TabBarView: View {
 private struct WorkspaceContent: View {
     @ObservedObject var workspace: Workspace
     let selectedWorkspaceID: UUID?
+    let onPaneActivated: () -> Void
     let onPaneResizeFinished: () -> Void
 
     var body: some View {
         ForEach(workspace.tabs) { tab in
             let isSelected = workspace.id == selectedWorkspaceID && tab.id == workspace.selectedTabID
-            TerminalContentView(tab: tab, isSelected: isSelected, onPaneResizeFinished: onPaneResizeFinished)
+        TerminalContentView(tab: tab, isSelected: isSelected, onPaneActivated: onPaneActivated, onPaneResizeFinished: onPaneResizeFinished)
                 .opacity(isSelected ? 1 : 0)
         }
     }
@@ -2019,6 +2173,7 @@ private struct PaneResizeOverlay: NSViewRepresentable {
 private struct TerminalContentView: View {
     @ObservedObject var tab: TerminalTab
     var isSelected: Bool = false
+    let onPaneActivated: () -> Void
     let onPaneResizeFinished: () -> Void
     @State private var isDragging  = false
     @State private var dragSource: UUID? = nil
@@ -2038,9 +2193,10 @@ private struct TerminalContentView: View {
                             sz: sz,
                             focused: tab.focusedPaneID == entry.id
                         )
-                        .simultaneousGesture(TapGesture().onEnded {
-                            tab.focusedPaneID = entry.id
-                        })
+            .simultaneousGesture(TapGesture().onEnded {
+                onPaneActivated()
+                tab.focusedPaneID = entry.id
+            })
                         .onAppear {
                             if tab.focusedPaneID == entry.id {
                                 requestKeyboardFocus(for: entry.viewState)

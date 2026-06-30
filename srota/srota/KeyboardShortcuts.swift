@@ -54,6 +54,7 @@ final class KeyboardShortcutManager {
     var showLazygit = false
     var lazygitCWD: String? = nil
     var actions: [String: () -> Void] = [:]
+    var plainKeyHandler: ((NSEvent) -> Bool)? = nil
 
     private var prefixCombo: KeyCombo? = KeyCombo("ctrl+b")
     private var monitor: Any?
@@ -83,8 +84,6 @@ final class KeyboardShortcutManager {
             return false
         }
 
-        guard let combo = prefixCombo else { return false }
-
         if awaitingChord {
             chordResetTask?.cancel()
             chordResetTask = nil
@@ -95,6 +94,8 @@ final class KeyboardShortcutManager {
             return false
         }
 
+        if plainKeyHandler?(event) == true { return true }
+        guard let combo = prefixCombo else { return false }
         if combo.matches(event) {
             awaitingChord = true
             chordResetTask?.cancel()
@@ -114,9 +115,10 @@ final class KeyboardShortcutManager {
 extension TerminalTab {
     enum FocusDirection { case left, right, up, down }
 
-    func focusPane(direction: FocusDirection) {
+    @discardableResult
+    func focusPane(direction: FocusDirection) -> Bool {
         let currentID = focusedPaneID
-        guard let cl = paneLayouts[currentID] else { return }
+        guard let cl = paneLayouts[currentID] else { return false }
         var bestID:   UUID?    = nil
         var bestDist: CGFloat  = .infinity
 
@@ -140,7 +142,9 @@ extension TerminalTab {
             if dist < bestDist { bestDist = dist; bestID = entry.id }
         }
 
-        if let bestID { focusedPaneID = bestID }
+        guard let bestID else { return false }
+        focusedPaneID = bestID
+        return true
     }
 }
 
