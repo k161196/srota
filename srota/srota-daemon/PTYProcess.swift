@@ -2,6 +2,29 @@ import Darwin
 import Foundation
 
 // ponytail: forkpty deprecated macOS 14+ but still works — upgrade to posix_openpt if needed
+func ptyEnvironment(
+    parent: [String: String] = ProcessInfo.processInfo.environment,
+    overrides env: [String: String],
+    stableID: String,
+    srotaDir: String
+) -> [String: String] {
+    var mergedEnv = parent
+    for (k, v) in env {
+        mergedEnv[k] = v
+    }
+    mergedEnv["SROTA_PANE_ID"] = stableID
+    mergedEnv["SROTA_SOCKET_PATH"] = parent["SROTA_SOCKET_PATH"]
+        ?? "\(NSHomeDirectory())/\(srotaDir)/daemon.sock"
+    let ghosttyTerminfo = "/Applications/Ghostty.app/Contents/Resources/terminfo"
+    let hasGhosttyTerminfo = FileManager.default.fileExists(atPath: "\(ghosttyTerminfo)/78/xterm-ghostty")
+    if env["TERMINFO"] == nil, hasGhosttyTerminfo { mergedEnv["TERMINFO"] = ghosttyTerminfo }
+    if env["TERM"] == nil { mergedEnv["TERM"] = hasGhosttyTerminfo ? "xterm-ghostty" : "xterm-256color" }
+    if env["TERM_PROGRAM"] == nil { mergedEnv["TERM_PROGRAM"] = "ghostty" }
+    if env["COLORTERM"] == nil { mergedEnv["COLORTERM"] = "truecolor" }
+    if mergedEnv["LANG"] == nil && mergedEnv["LC_CTYPE"] == nil { mergedEnv["LC_CTYPE"] = "en_US.UTF-8" }
+    return mergedEnv
+}
+
 final class PTYProcess {
     let paneID: String
     let stableID: String
@@ -22,27 +45,19 @@ final class PTYProcess {
         return PTYInfo(paneID: paneID, stableID: stableID, pid: pid, cwd: initialCWD, exitCode: exitCode)
     }
 
-    init(paneID: String, stableID: String, cmd: [String], cwd: String, env: [String: String]) throws {
+    init(paneID: String, stableID: String, cmd: [String], cwd: String, env: [String: String], cols: UInt16? = nil, rows: UInt16? = nil) throws {
         self.paneID = paneID
         self.stableID = stableID
         self.initialCWD = cwd
-        try spawn(cmd: cmd, cwd: cwd, env: env)
+        try spawn(cmd: cmd, cwd: cwd, env: env, cols: cols, rows: rows)
     }
 
     // MARK: - Spawn
 
-    private func spawn(cmd: [String], cwd: String, env: [String: String]) throws {
+    private func spawn(cmd: [String], cwd: String, env: [String: String], cols: UInt16? = nil, rows: UInt16? = nil) throws {
         var newMasterFD: Int32 = -1
 
-        var mergedEnv = ProcessInfo.processInfo.environment
-        for (k, v) in env {
-            mergedEnv[k] = v
-        }
-        mergedEnv["SROTA_PANE_ID"] = stableID
-        mergedEnv["SROTA_SOCKET_PATH"] = ProcessInfo.processInfo.environment["SROTA_SOCKET_PATH"]
-            ?? "\(NSHomeDirectory())/\(srotaDir)/daemon.sock"
-        if mergedEnv["TERM"] == nil { mergedEnv["TERM"] = "xterm-256color" }
-        if mergedEnv["TERM_PROGRAM"] == nil { mergedEnv["TERM_PROGRAM"] = "ghostty" }
+        let mergedEnv = ptyEnvironment(overrides: env, stableID: stableID, srotaDir: srotaDir)
 
         let shell = cmd.isEmpty ? [ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"] : cmd
         let argv = shell.map { strdup($0) } + [nil]
@@ -59,10 +74,9 @@ final class PTYProcess {
             }
         }
 
-        // ponytail: default 80×24 so shell starts in a valid terminal before Ghostty sends the real size
         var ws = winsize()
-        ws.ws_col = 80
-        ws.ws_row = 24
+        ws.ws_col = cols ?? 80
+        ws.ws_row = rows ?? 24
         let childPID = forkpty(&newMasterFD, nil, nil, &ws)
         if childPID < 0 {
             throw NSError(domain: "PTY", code: Int(errno), userInfo: [NSLocalizedDescriptionKey: "forkpty failed"])
@@ -132,6 +146,7 @@ final class PTYProcess {
             client.send(.ringBuffer(paneID: paneID, data: chunk.base64EncodedString()))
             offset = end
         }
+        client.send(.ringBufferDone(paneID: paneID))
     }
 
     func removeSubscriber(_ client: ClientSession) {

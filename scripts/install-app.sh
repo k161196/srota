@@ -52,3 +52,9 @@ rm -rf "$INSTALL_PATH"
 /usr/bin/ditto "$BUILT_APP_PATH" "$INSTALL_PATH"
 
 echo "Installed: $INSTALL_PATH"
+
+DAEMON_LABEL="com.kiran.srota.daemon"
+DOMAIN="gui/$(id -u)"
+echo "Restarting daemon ($DAEMON_LABEL)..."
+launchctl kickstart -k "$DOMAIN/$DAEMON_LABEL" 2>/dev/null || true
+echo "Done."

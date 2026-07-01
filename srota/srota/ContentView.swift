@@ -166,7 +166,7 @@ final class TerminalTab: Identifiable, ObservableObject {
         let ref = DaemonPaneRef()
         let session = InMemoryTerminalSession(
             write: { [weak daemon, ref] data in
-                guard let paneID = ref.id else { return }
+                guard let paneID = ref.id, !ref.isReplayingBuffer else { return }
                 daemon?.sendInput(paneID: paneID, data: data)
             },
             resize: { [weak daemon, ref] vp in
@@ -292,7 +292,7 @@ private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirect
         let ref = DaemonPaneRef()
         let session = InMemoryTerminalSession(
             write: { [weak daemon, ref] data in
-                guard let paneID = ref.id else { return }
+                guard let paneID = ref.id, !ref.isReplayingBuffer else { return }
                 daemon?.sendInput(paneID: paneID, data: data)
             },
             resize: { [weak daemon, ref] vp in
@@ -333,7 +333,7 @@ session: session, into: ref
         let ref = DaemonPaneRef()
         let session = InMemoryTerminalSession(
             write: { [weak daemon, ref] data in
-                guard let paneID = ref.id else { return }
+                guard let paneID = ref.id, !ref.isReplayingBuffer else { return }
                 daemon?.sendInput(paneID: paneID, data: data)
             },
             resize: { [weak daemon, ref] vp in

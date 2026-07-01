@@ -14,6 +14,7 @@ func installDaemonLaunchAgent() {
     let socketPath = "\(home)/\(Srota.dir)/daemon.sock"
     let logPath    = "\(home)/\(Srota.dir)/daemon.log"
     let plistPath  = "\(home)/Library/LaunchAgents/\(daemonLabel).plist"
+    let binaryStamp = ((try? FileManager.default.attributesOfItem(atPath: binaryPath)[.modificationDate] as? Date) ?? .distantPast).timeIntervalSince1970
 
     let plist = """
 <?xml version="1.0" encoding="UTF-8"?>
@@ -32,6 +33,8 @@ func installDaemonLaunchAgent() {
         <string>\(socketPath)</string>
         <key>SROTA_DIR</key>
         <string>\(Srota.dir)</string>
+        <key>SROTA_DAEMON_BINARY_STAMP</key>
+        <string>\(binaryStamp)</string>
     </dict>
     <key>KeepAlive</key>
     <true/>

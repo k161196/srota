@@ -8,6 +8,8 @@ struct CreateParams: Decodable {
     let cwd: String
     let stableID: String // SROTA_PANE_ID — app-side UUID, stable across daemon restarts
     let env: [String: String]
+    let rows: UInt16?
+    let cols: UInt16?
 }
 
 enum DaemonRequest: Decodable {
@@ -68,6 +70,7 @@ struct PTYInfo: Encodable {
 enum DaemonResponse: Encodable {
     case created(paneID: String, requestID: String?)
     case ringBuffer(paneID: String, data: String)
+    case ringBufferDone(paneID: String)
     case live(paneID: String, data: String)
     case listed([PTYInfo], requestID: String?)
     case dead(paneID: String, exitCode: Int32)
@@ -95,6 +98,9 @@ enum DaemonResponse: Encodable {
             try c.encode("ring_buffer", forKey: .type)
             try c.encode(id, forKey: .paneID)
             try c.encode(d, forKey: .data)
+        case .ringBufferDone(let id):
+            try c.encode("ring_buffer_done", forKey: .type)
+            try c.encode(id, forKey: .paneID)
         case .live(let id, let d):
             try c.encode("live", forKey: .type)
             try c.encode(id, forKey: .paneID)

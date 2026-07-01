@@ -8,8 +8,15 @@ final class DaemonPaneRef: @unchecked Sendable {
     private let lock = NSLock()
     nonisolated(unsafe) private var _id: String?
     nonisolated(unsafe) private var _pendingResize: (rows: UInt16, cols: UInt16)?
+    nonisolated(unsafe) private var _isReplayingBuffer = false
 
     nonisolated var id: String? { lock.withLock { _id } }
+
+    /// True while ring buffer is being replayed — suppresses terminal auto-responses from reaching PTY.
+    nonisolated var isReplayingBuffer: Bool {
+        get { lock.withLock { _isReplayingBuffer } }
+        set { lock.withLock { _isReplayingBuffer = newValue } }
+    }
 
     /// Atomically sets the active pane ID and returns any resize buffered before attach.
     nonisolated func setID(_ newID: String) -> (rows: UInt16, cols: UInt16)? {
@@ -26,6 +33,10 @@ final class DaemonPaneRef: @unchecked Sendable {
 
     nonisolated func storePendingResize(rows: UInt16, cols: UInt16) {
         lock.withLock { _pendingResize = (rows, cols) }
+    }
+
+    nonisolated func peekPendingResize() -> (rows: UInt16, cols: UInt16)? {
+        lock.withLock { _pendingResize }
     }
 }
 
@@ -200,7 +211,24 @@ final class DaemonConnection {
             let cont = stateLock.withLock { pendingCreates.removeValue(forKey: requestID) }
             cont?.resume(returning: paneID)
 
-        case "ring_buffer", "live":
+        case "ring_buffer":
+            guard let paneID = json["paneID"] as? String,
+                  let encoded = json["data"] as? String,
+                  let data = Data(base64Encoded: encoded) else { return }
+            let (session, ref) = stateLock.withLock {
+                (sessionsByPaneID[paneID], stableIDByPaneID[paneID].flatMap { managedSessions[$0] }?.ref)
+            }
+            ref?.isReplayingBuffer = true
+            DispatchQueue.main.async { session?.receive(data) }
+
+        case "ring_buffer_done":
+            guard let paneID = json["paneID"] as? String else { return }
+            let ref = stateLock.withLock {
+                stableIDByPaneID[paneID].flatMap { managedSessions[$0] }?.ref
+            }
+            DispatchQueue.main.async { ref?.isReplayingBuffer = false }
+
+        case "live":
             guard let paneID = json["paneID"] as? String,
                   let encoded = json["data"] as? String,
                   let data = Data(base64Encoded: encoded) else { return }
@@ -269,20 +297,23 @@ final class DaemonConnection {
 
     // MARK: - Public API
 
-    func createPTY(cmd: [String], cwd: String, stableID: String, env: [String: String]) async throws -> String {
+    func createPTY(cmd: [String], cwd: String, stableID: String, env: [String: String], rows: UInt16? = nil, cols: UInt16? = nil) async throws -> String {
         let requestID = UUID().uuidString
         return try await withCheckedThrowingContinuation { cont in
             ioQueue.async { [self] in
                 stateLock.withLock { pendingCreates[requestID] = cont }
                 do {
-                    try send([
+                    var msg: [String: Any] = [
                         "type": "create",
                         "requestID": requestID,
                         "cmd": cmd,
                         "cwd": cwd,
                         "stableID": stableID,
                         "env": env,
-                    ])
+                    ]
+                    if let rows { msg["rows"] = rows }
+                    if let cols { msg["cols"] = cols }
+                    try send(msg)
                 } catch {
                     let pending = stateLock.withLock { pendingCreates.removeValue(forKey: requestID) }
                     pending?.resume(throwing: error)
@@ -440,7 +471,8 @@ final class DaemonConnection {
         }
 
         // BUG-1 fix: split the guard so a PTY created during the async gap doesn't get orphaned
-        guard let paneID = try? await createPTY(cmd: [], cwd: managed.cwd, stableID: stableID, env: managed.env) else { return }
+        let initialSize = managed.ref.peekPendingResize()
+        guard let paneID = try? await createPTY(cmd: [], cwd: managed.cwd, stableID: stableID, env: managed.env, rows: initialSize?.rows, cols: initialSize?.cols) else { return }
         guard let rebound = bind(paneID: paneID, stableID: stableID) else {
             // Pane was closed while createPTY was in-flight — kill the orphaned daemon process
             killPane(paneID: paneID)
