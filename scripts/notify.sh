@@ -115,9 +115,12 @@ case "$AGENT" in
   *) LABEL="$AGENT" ;;
 esac
 
-if [[ "$PARSED" != "PermissionRequest" ]]; then
-  exit 0
-fi
+case "$PARSED" in
+  Start)             TITLE="$LABEL working";       BODY="Prompt submitted" ;;
+  Stop)               TITLE="$LABEL done";          BODY="Task completed" ;;
+  PermissionRequest)  TITLE="$LABEL needs approval"; BODY="Waiting for response" ;;
+  *) exit 0 ;;
+esac
 
 NOTIFY_KEY="$AGENT|${SROTA_TAB_ID:-}|${SROTA_PANE_ID:-}|${SROTA_TAB_CWD:-$PWD}|$PARSED"
 NOTIFY_STATE_DIR="$HOME/.srota"
@@ -153,4 +156,4 @@ then
   exit 0
 fi
 
-osascript -e "display notification \"Waiting for response\" with title \"$LABEL needs approval\""
+osascript -e "display notification \"$BODY\" with title \"$TITLE\""

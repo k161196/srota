@@ -181,7 +181,7 @@ final class TerminalTab: Identifiable, ObservableObject {
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
         let stableID = firstPaneStableID ?? UUID().uuidString
         let first = PaneEntry(
-            hookPaneID: paneHookID,
+            hookPaneID: stableID,
             daemonStableID: stableID,
             viewState: state,
             initialCWD: workingDirectory
@@ -194,7 +194,7 @@ final class TerminalTab: Identifiable, ObservableObject {
         state.onClose = { [weak self, ref] _ in
             guard let self else { return }
             self.daemon?.closeSession(stableID: stableID, paneID: ref.id)
-            self.removePane(id: firstID)
+            self.removePane(id: firstID, closeDaemon: false)
         }
         if autoStart, let daemon {
             daemon.spawnOrAttach(
@@ -265,9 +265,11 @@ final class TerminalTab: Identifiable, ObservableObject {
         paneNames[id] = name
     }
 
-    func removePane(id: UUID) {
+    func removePane(id: UUID, closeDaemon: Bool = true) {
         let wasFocused  = focusedPaneID == id
-        let hookID      = panes.first(where: { $0.id == id })?.hookPaneID
+        let pane = panes.first { $0.id == id }
+        if closeDaemon, let pane { daemon?.closeSession(stableID: pane.daemonStableID) }
+        let hookID      = pane?.hookPaneID
         expandNeighbor(of: id)
         panes.removeAll { $0.id == id }
         paneLayouts.removeValue(forKey: id)
@@ -287,7 +289,6 @@ daemon?.closeSession(stableID: pane.daemonStableID)
 }
 
 private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirectory: String? = nil) {
-        let paneHookID = UUID().uuidString
         let state = TerminalViewState(terminalConfiguration: TerminalConfiguration())
         let ref = DaemonPaneRef()
         let session = InMemoryTerminalSession(
@@ -306,12 +307,12 @@ private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirect
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: workingDirectory)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
 let stableID = UUID().uuidString
-let entry = PaneEntry(hookPaneID: paneHookID, daemonStableID: stableID, viewState: state, initialCWD: workingDirectory)
+let entry = PaneEntry(hookPaneID: stableID, daemonStableID: stableID, viewState: state, initialCWD: workingDirectory)
 let entryID = entry.id
 state.onClose = { [weak self, ref] _ in
 guard let self else { return }
 self.daemon?.closeSession(stableID: stableID, paneID: ref.id)
-self.removePane(id: entryID)
+self.removePane(id: entryID, closeDaemon: false)
 }
         paneLayouts[entry.id] = layout
         panes.append(entry)
@@ -328,7 +329,6 @@ session: session, into: ref
 
     func restorePane(record: PaneRecord, colorScheme: ColorScheme) {
         let cwd = record.initialCWD.isEmpty ? nil : record.initialCWD
-        let paneHookID = UUID().uuidString
         let state = TerminalViewState(terminalConfiguration: TerminalConfiguration())
         let ref = DaemonPaneRef()
         let session = InMemoryTerminalSession(
@@ -346,12 +346,12 @@ session: session, into: ref
         )
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: cwd)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
- let entry = PaneEntry(hookPaneID: paneHookID, daemonStableID: record.id, viewState: state, initialCWD: cwd)
+ let entry = PaneEntry(hookPaneID: record.id, daemonStableID: record.id, viewState: state, initialCWD: cwd)
  let entryID = entry.id
  state.onClose = { [weak self, ref] _ in
  guard let self else { return }
  self.daemon?.closeSession(stableID: record.id, paneID: ref.id)
- self.removePane(id: entryID)
+ self.removePane(id: entryID, closeDaemon: false)
  }
         paneLayouts[entry.id] = PaneLayout(
             x: CGFloat(record.lx), y: CGFloat(record.ly),

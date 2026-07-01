@@ -180,10 +180,21 @@ final class PTYProcess {
         readSource?.cancel()
     }
 
-    func terminate() {
-        guard pid > 0 else { return }
-        _ = Darwin.kill(pid, SIGTERM)
+    var exists: Bool {
+        guard pid > 0 else { return false }
+        if Darwin.kill(pid, 0) == 0 { return true }
+        return errno != ESRCH
+    }
+
+    @discardableResult
+    func terminate() -> Bool {
+        guard pid > 0 else { return false }
+        guard Darwin.kill(pid, SIGTERM) == 0 else {
+            if errno == ESRCH { readSource?.cancel() }
+            return errno != ESRCH
+        }
         readSource?.cancel()
+        return true
     }
 }
 

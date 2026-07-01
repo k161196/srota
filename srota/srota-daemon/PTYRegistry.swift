@@ -66,6 +66,7 @@ final class PTYRegistry {
             withProcess(paneID: paneID)?.resize(rows: rows, cols: cols)
 
         case .list(let requestID):
+            pruneMissingProcesses()
             lock.lock()
             let infos = processes.values.map(\.info)
             lock.unlock()
@@ -73,7 +74,9 @@ final class PTYRegistry {
 
         case .close(let paneID):
             let proc = withProcess(paneID: paneID)
-            proc?.terminate()
+            if proc?.terminate() == false {
+                removeProcess(paneID: paneID, pid: proc?.pid)
+            }
             client.send(.ok)
         }
     }
@@ -98,5 +101,24 @@ final class PTYRegistry {
         let proc = processes[paneID]
         lock.unlock()
         return proc
+    }
+
+    private func pruneMissingProcesses() {
+        lock.lock()
+        let missing = processes.filter { !$0.value.exists }
+        for (paneID, proc) in missing {
+            processes.removeValue(forKey: paneID)
+            pidToPaneID.removeValue(forKey: proc.pid)
+        }
+        lock.unlock()
+    }
+
+    private func removeProcess(paneID: String, pid: pid_t?) {
+        lock.lock()
+        processes.removeValue(forKey: paneID)
+        if let pid {
+            pidToPaneID.removeValue(forKey: pid)
+        }
+        lock.unlock()
     }
 }
