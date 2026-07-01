@@ -96,16 +96,6 @@ struct PaneLayout {
     var h: CGFloat = 1
 }
 
-struct AgentHookEvent: Codable {
-    var event: String
-    var cwd: String
-    var agent: String
-    var tabID: String?
-    var paneID: String?
-    var summary: String?
-    var timestamp: Double
-}
-
 @Observable
 final class PaneEntry: Identifiable {
     let id = UUID()
@@ -114,6 +104,10 @@ final class PaneEntry: Identifiable {
     let viewState: TerminalViewState
     var initialCWD: String?
     var isStarted: Bool = true
+    // True when isStarted was flipped back to false because something else claimed this pane's
+    // PTY (see DaemonConnection.spawnOrAttach's onStolen), as opposed to never having started —
+    // the overlay shows "Use Here" instead of "Start" for this case.
+    var wasStolen: Bool = false
     var startAction: (() -> Void)? = nil
     init(hookPaneID: String, daemonStableID: String, viewState: TerminalViewState, initialCWD: String? = nil, isStarted: Bool = true) {
         self.hookPaneID = hookPaneID
@@ -139,10 +133,6 @@ final class TerminalTab: Identifiable, ObservableObject {
     @Published var panes: [PaneEntry] = []
     @Published var paneLayouts: [UUID: PaneLayout] = [:]
     @Published var paneNames:   [UUID: String]     = [:]
-    @Published private var agentNotification = AgentNotificationState()
-    var agentStatus: AgentRunStatus?  { agentNotification.status }
-    var agentStatusUpdatedAt: Double  { agentNotification.updatedAt }
-    var agentSummary: String          { agentNotification.summary }
     let hookTabID = UUID().uuidString
     @Published var focusedPaneID: UUID {
         didSet {
@@ -196,39 +186,41 @@ final class TerminalTab: Identifiable, ObservableObject {
             self.daemon?.closeSession(stableID: stableID, paneID: ref.id)
             self.removePane(id: firstID, closeDaemon: false)
         }
-        if autoStart, let daemon {
-            daemon.spawnOrAttach(
-                stableID: stableID,
-                cwd: workingDirectory ?? NSHomeDirectory(),
-                env: ["ZDOTDIR": "\(NSHomeDirectory())/\(Srota.dir)"],
-                session: session, into: ref
-            )
-        } else if !autoStart {
+        if autoStart {
+            attachWithReclaim(entry: first, stableID: stableID, cwd: workingDirectory,
+                               env: ["ZDOTDIR": "\(NSHomeDirectory())/\(Srota.dir)"], session: session, ref: ref)
+        } else {
             first.isStarted = false
             first.startAction = { [weak self] in
-                self?.daemon?.spawnOrAttach(
-                    stableID: stableID,
-                    cwd: workingDirectory ?? NSHomeDirectory(),
-                    env: ["ZDOTDIR": "\(NSHomeDirectory())/\(Srota.dir)"],
-                    session: session, into: ref
-                )
+                self?.attachWithReclaim(entry: first, stableID: stableID, cwd: workingDirectory,
+                                         env: ["ZDOTDIR": "\(NSHomeDirectory())/\(Srota.dir)"], session: session, ref: ref)
             }
         }
+    }
+
+    // A PTY has exactly one live owner at a time. If some other viewer (another pane, or the
+    // Agents tab) later steals this stableID, entry flips back to the "Start"-style overlay with
+    // a reclaim action wired to attach again — see DaemonConnection.spawnOrAttach's onStolen.
+    private func attachWithReclaim(entry: PaneEntry, stableID: String, cwd: String?, env: [String: String],
+                                    session: InMemoryTerminalSession, ref: DaemonPaneRef) {
+        entry.wasStolen = false
+        daemon?.spawnOrAttach(
+            stableID: stableID, cwd: cwd ?? NSHomeDirectory(), env: env, session: session, into: ref,
+            onStolen: { [weak self, weak entry] in
+                guard let self, let entry else { return }
+                entry.isStarted = false
+                entry.wasStolen = true
+                entry.startAction = { [weak self] in
+                    self?.attachWithReclaim(entry: entry, stableID: stableID, cwd: cwd, env: env, session: session, ref: ref)
+                }
+            }
+        )
     }
 
     var displayName: String {
         if !customName.isEmpty { return customName }
         if let name = paneNames[focusedPaneID], !name.isEmpty { return name }
         return titleFromCWD
-    }
-
-    func applyAgentStatus(_ status: AgentRunStatus, summary: String?, at timestamp: Double, paneHookID: String?) -> Bool {
-        if let paneHookID, !panes.contains(where: { $0.hookPaneID == paneHookID }) {
-            return false
-        }
-        agentNotification.apply(status: status, summary: summary, timestamp: timestamp,
-                                ownerPaneID: paneHookID ?? panes[0].hookPaneID)
-        return true
     }
 
     var statusPath: String? {
@@ -269,12 +261,10 @@ final class TerminalTab: Identifiable, ObservableObject {
         let wasFocused  = focusedPaneID == id
         let pane = panes.first { $0.id == id }
         if closeDaemon, let pane { daemon?.closeSession(stableID: pane.daemonStableID) }
-        let hookID      = pane?.hookPaneID
         expandNeighbor(of: id)
         panes.removeAll { $0.id == id }
         paneLayouts.removeValue(forKey: id)
 paneNames.removeValue(forKey: id)
-if let hookID { agentNotification.clearIfOwned(byPaneID: hookID) }
 if panes.isEmpty {
 closeTabCallback?()
 } else if wasFocused {
@@ -317,14 +307,8 @@ self.removePane(id: entryID, closeDaemon: false)
         paneLayouts[entry.id] = layout
         panes.append(entry)
         focusedPaneID = entry.id
-        if let daemon {
-daemon.spawnOrAttach(
-stableID: stableID,
-cwd: workingDirectory ?? NSHomeDirectory(),
-env: ["ZDOTDIR": "\(NSHomeDirectory())/\(Srota.dir)"],
-session: session, into: ref
-)
-        }
+        attachWithReclaim(entry: entry, stableID: stableID, cwd: workingDirectory,
+                           env: ["ZDOTDIR": "\(NSHomeDirectory())/\(Srota.dir)"], session: session, ref: ref)
     }
 
     func restorePane(record: PaneRecord, colorScheme: ColorScheme) {
@@ -360,12 +344,8 @@ session: session, into: ref
         focusedPaneID = entry.id
         entry.isStarted = false
         entry.startAction = { [weak self] in
-            self?.daemon?.spawnOrAttach(
-                stableID: record.id,
-                cwd: cwd ?? NSHomeDirectory(),
-                env: ["ZDOTDIR": "\(NSHomeDirectory())/\(Srota.dir)"],
-                session: session, into: ref
-            )
+            self?.attachWithReclaim(entry: entry, stableID: record.id, cwd: cwd,
+                                     env: ["ZDOTDIR": "\(NSHomeDirectory())/\(Srota.dir)"], session: session, ref: ref)
         }
     }
 
@@ -495,7 +475,12 @@ final class Workspace: Identifiable, ObservableObject {
     var selectedTab: TerminalTab? { tabs.first { $0.id == selectedTabID } }
 
     var displayStatus: AgentRunStatus? {
-        tabs.max(by: { $0.agentStatusUpdatedAt < $1.agentStatusUpdatedAt })?.agentStatus
+        guard let daemon else { return nil }
+        return tabs
+            .flatMap(\.panes)
+            .compactMap { daemon.agentStatesByStableID[$0.daemonStableID] }
+            .max { $0.updatedAt < $1.updatedAt }?
+            .status
     }
 
     var currentWorkingDirectory: String? {
@@ -725,7 +710,6 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var showPrompts = false
     @State private var agentToLaunch: AgentItem? = nil
-    @State private var agentEventTask: Task<Void, Never>? = nil
     @State private var worktreeError: String? = nil
     @State private var workspaceSwitcherModel: SwitcherModel? = nil
     @State private var sidebarKeyboardFocus = false
@@ -779,7 +763,12 @@ struct ContentView: View {
                     onSelectWorkspace: { id in
                         clearSidebarKeyboardFocus()
                         manager.selectWorkspace(id: id)
-                    }
+                    },
+                    onSelectAgentTab: { workspaceID, tabID, paneID in
+                        clearSidebarKeyboardFocus()
+                        focusAgentPane(workspaceID: workspaceID, tabID: tabID, paneID: paneID)
+                    },
+                    onShowAllAgents: { managementTab = .agents }
                 )
             .frame(width: sidebarVisible ? sidebarWidth : 0)
             .clipped()
@@ -935,17 +924,14 @@ struct ContentView: View {
                 }
             }
         }
-            .onAppear {
-                startAgentEventMonitor()
-                registerShortcutActions()
-                shortcuts.start()
-            }
+        .onAppear {
+            registerShortcutActions()
+            shortcuts.start()
+        }
         .onChange(of: shortcuts.showWorkspaceSwitcher) { _, isShowing in
             workspaceSwitcherModel = isShowing ? makeWorkspaceSwitcherModel() : nil
         }
         .onDisappear {
-            agentEventTask?.cancel()
-            agentEventTask = nil
             shortcuts.plainKeyHandler = nil
             shortcuts.stop()
         }
@@ -1254,6 +1240,16 @@ struct ContentView: View {
         }
     }
 
+    private func focusAgentPane(workspaceID: UUID, tabID: UUID, paneID: UUID) {
+        guard let ws = manager.allWorkspaces.first(where: { $0.id == workspaceID }) else { return }
+        manager.selectWorkspace(id: workspaceID)
+        ws.selectedTabID = tabID
+        if let tab = ws.tabs.first(where: { $0.id == tabID }), tab.panes.contains(where: { $0.id == paneID }) {
+            tab.focusedPaneID = paneID
+        }
+        managementTab = .workspaces
+    }
+
     private func handleSidebarPlainKey(_ event: NSEvent) -> Bool {
         guard sidebarKeyboardFocus else { return false }
         let modifiers = event.modifierFlags.intersection([.control, .command, .option, .shift])
@@ -1382,51 +1378,6 @@ struct ContentView: View {
             manager.selectedWorkspaceID = manager.allWorkspaces.first?.id
         }
     }
-    private func startAgentEventMonitor() {
-        guard agentEventTask == nil else { return }
-        agentEventTask = Task {
-            let url = URL(fileURLWithPath: NSHomeDirectory() + "/\(Srota.dir)/agent-events.jsonl")
-            let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-            var processedCount = existing.split(separator: "\n", omittingEmptySubsequences: true).count
-            while !Task.isCancelled {
-                if let text = try? String(contentsOf: url, encoding: .utf8) {
-                    let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
-                    if lines.count > processedCount {
-                        for line in lines[processedCount...] {
-                            guard let data = line.data(using: .utf8),
-                                  let event = try? JSONDecoder().decode(AgentHookEvent.self, from: data) else { continue }
-                            applyAgentHookEvent(event)
-                        }
-                        processedCount = lines.count
-                    }
-                }
-                try? await Task.sleep(nanoseconds: 250_000_000)
-            }
-        }
-    }
-
-private func applyAgentHookEvent(_ event: AgentHookEvent) {
- guard event.tabID != nil || event.paneID != nil else { return }
- guard let status = AgentRunStatus(event: event.event) else { return }
- guard let tab = bestMatchingTab(for: event) else { return }
- guard tab.applyAgentStatus(status, summary: event.summary, at: event.timestamp, paneHookID: event.paneID) else { return }
-}
-
-private func bestMatchingTab(for event: AgentHookEvent) -> TerminalTab? {
- let tabs = manager.allWorkspaces.flatMap(\.tabs)
- let snapshots = tabs.map { tab in
-     AgentNotificationTabSnapshot(
-         tabID: tab.hookTabID,
-         cwd: tab.statusPath,
-         paneIDs: Set(tab.panes.map(\.hookPaneID))
-     )
- }
- guard let index = AgentNotificationRouter.bestMatchingTabIndex(
-     for: AgentNotificationEvent(tabID: event.tabID, paneID: event.paneID, cwd: event.cwd),
-     in: snapshots
- ) else { return nil }
- return tabs[index]
-    }
 }
 
 // MARK: - Sidebar
@@ -1437,23 +1388,25 @@ private extension Color {
     static let rowHover       = Color(red: 1, green: 1, blue: 1).opacity(0.035)
     static let accentRail     = Color(red: 1.0, green: 0.45, blue: 0.15)
     static let dotRunning     = Color(red: 0.24, green: 0.84, blue: 0.55)
-    static let dotWaiting     = Color(red: 0.96, green: 0.74, blue: 0.24)
-    static let dotCompleted   = Color(red: 0.24, green: 0.84, blue: 0.55)
+    static let dotIdle        = Color(red: 0.24, green: 0.84, blue: 0.55)
+    static let dotBlocked     = Color(red: 0.94, green: 0.31, blue: 0.31)
+    static let dotDone        = Color(red: 0.31, green: 0.55, blue: 0.94)
     static let labelSecondary = Color(red: 0.92, green: 0.92, blue: 0.93).opacity(0.45)
     static let sectionHeader  = Color(red: 0.92, green: 0.92, blue: 0.93).opacity(0.28)
 }
 
-private extension AgentRunStatus {
+extension AgentRunStatus {
     var color: Color {
         switch self {
         case .working: return .accentOrange
-        case .waitingForResponse: return .dotWaiting
-        case .completed: return .dotCompleted
+        case .idle: return .dotIdle
+        case .blocked: return .dotBlocked
+        case .done: return .dotDone
         }
     }
 }
 
-private struct StatusBadge: View {
+struct AgentStatusBadge: View {
     let status: AgentRunStatus
 
     var body: some View {
@@ -1469,11 +1422,80 @@ private struct StatusBadge: View {
     }
 }
 
+// MARK: - Agents list (shared by sidebar widget and the Agents tab)
+
+// One row per pane (not per tab) — a split tab with two panes each running
+// its own agent shows up as two separate agents here.
+struct RunningAgent: Identifiable {
+    let workspaceID: UUID
+    let tabID: UUID
+    let paneID: UUID
+    let stableID: String
+    let title: String
+    let status: AgentRunStatus
+    let agentName: String
+    let updatedAt: Double
+    var id: String { stableID }
+}
+
+func collectRunningAgents(_ manager: TerminalManager) -> [RunningAgent] {
+    let states = manager.daemon?.agentStatesByStableID ?? [:]
+    return manager.allWorkspaces
+        .flatMap { ws in
+            ws.tabs.flatMap { tab in
+                tab.panes.compactMap { pane -> RunningAgent? in
+                    guard let state = states[pane.daemonStableID],
+                          let status = state.status else { return nil }
+                    return RunningAgent(
+                        workspaceID: ws.id, tabID: tab.id, paneID: pane.id, stableID: pane.daemonStableID,
+                        title: tab.displayName, status: status, agentName: state.agent, updatedAt: state.updatedAt
+                    )
+                }
+            }
+        }
+        .sorted { $0.updatedAt > $1.updatedAt }
+}
+
+struct AgentRow: View {
+    let agent: RunningAgent
+    let onSelect: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(agent.status.color)
+                    .frame(width: 7, height: 7)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(agent.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.labelPrimary)
+                        .lineLimit(1)
+                    Text("\(agent.status.label.lowercased()) · \(agent.agentName)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(agent.status.color)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(isHovered ? Color.rowHover : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
+}
+
 private struct SidebarView: View {
     @ObservedObject var manager: TerminalManager
     let keyboardFocusedWorkspaceID: UUID?
     let onAdd: () -> Void
     let onSelectWorkspace: (UUID) -> Void
+    let onSelectAgentTab: (UUID, UUID, UUID) -> Void
+    let onShowAllAgents: () -> Void
     @State private var newFolderID: UUID? = nil
     @State private var isDragTargetUnfiled = false
 
@@ -1549,10 +1571,53 @@ WorkspaceSidebarItem(
                 }
             }
 
+            AgentsSidebarSection(manager: manager, onSelect: onSelectAgentTab, onShowAll: onShowAllAgents)
+
             Spacer(minLength: 0)
         }
         .frame(maxHeight: .infinity)
         .background(Color.sidebarBg)
+    }
+}
+
+private struct AgentsSidebarSection: View {
+    @ObservedObject var manager: TerminalManager
+    let onSelect: (UUID, UUID, UUID) -> Void
+    let onShowAll: () -> Void
+
+    private static let cap = 5
+
+    var body: some View {
+        let agents = collectRunningAgents(manager)
+        if !agents.isEmpty {
+            VStack(spacing: 0) {
+                Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1)
+                    .padding(.vertical, 6)
+
+                HStack {
+                    Text("AGENTS")
+                        .font(.system(size: 11, weight: .medium))
+                        .tracking(0.8)
+                        .foregroundStyle(Color.sectionHeader)
+                    Spacer()
+                    Button("All", action: onShowAll)
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.sectionHeader)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 4)
+
+                VStack(spacing: 0) {
+                    ForEach(agents.prefix(Self.cap)) { agent in
+                        AgentRow(agent: agent) {
+                            onSelect(agent.workspaceID, agent.tabID, agent.paneID)
+                        }
+                    }
+                }
+                .padding(.horizontal, 8)
+            }
+        }
     }
 }
 
@@ -1841,48 +1906,6 @@ private struct WorkspaceRow: View {
     }
 }
 
-private struct WorkspaceRunsList: View {
-    @ObservedObject var workspace: Workspace
-    let indented: Bool
-
-    var runTabs: [TerminalTab] {
-        workspace.tabs
-            .filter { $0.agentStatus != nil }
-            .sorted { $0.agentStatusUpdatedAt > $1.agentStatusUpdatedAt }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ForEach(runTabs) { tab in
-                HStack(spacing: 8) {
-                    Image(systemName: "terminal")
-                        .font(.system(size: 9))
-                        .foregroundStyle(Color.labelSecondary)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(tab.displayName)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(Color.labelSecondary)
-                            .lineLimit(1)
-                        if let status = tab.agentStatus {
-                            StatusBadge(status: status)
-                        }
-                        if !tab.agentSummary.isEmpty {
-                            Text(tab.agentSummary)
-                                .font(.system(size: 10))
-                                .foregroundStyle(Color.sectionHeader)
-                                .lineLimit(2)
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, 34)
-                .padding(.trailing, 10)
-                .padding(.bottom, 8)
-            }
-        }
-    }
-}
-
 private struct WorkspaceSidebarItem: View {
     @ObservedObject var workspace: Workspace
     @ObservedObject var manager: TerminalManager
@@ -1892,14 +1915,7 @@ private struct WorkspaceSidebarItem: View {
     let onClose: () -> Void
     var indented: Bool = false
 
-    @State private var isExpanded = true
-
-    var hasRuns: Bool {
-        workspace.tabs.contains { $0.agentStatus != nil }
-    }
-
     var body: some View {
-        VStack(spacing: 0) {
         WorkspaceRow(
             workspace: workspace,
             manager: manager,
@@ -1907,15 +1923,10 @@ private struct WorkspaceSidebarItem: View {
             isKeyboardFocused: isKeyboardFocused,
             onSelect: onSelect,
             onClose: onClose,
-                indented: indented,
-                isExpanded: hasRuns ? isExpanded : nil,
-                onToggleExpand: hasRuns ? { isExpanded.toggle() } : nil
-            )
-            if hasRuns && isExpanded {
-                WorkspaceRunsList(workspace: workspace, indented: indented)
-                    .background(isSelected ? Color.rowSelected : Color.clear)
-            }
-        }
+            indented: indented,
+            isExpanded: nil,
+            onToggleExpand: nil
+        )
     }
 }
 
@@ -2038,15 +2049,10 @@ private struct TabChip: View {
  .onExitCommand { isRenaming = false }
  .onAppear { DispatchQueue.main.async { fieldFocused = true } }
  } else {
- VStack(alignment: .leading, spacing: 1) {
  Text(tab.displayName)
  .font(.system(size: 12, weight: isActive ? .medium : .regular))
  .foregroundStyle(isActive ? Color.labelPrimary : Color.labelMuted)
  .lineLimit(1)
- if let status = tab.agentStatus {
- StatusBadge(status: status)
- }
- }
  }
 
  Spacer(minLength: 0)
@@ -2060,7 +2066,7 @@ private struct TabChip: View {
  .opacity(isHovered || isActive ? 1 : 0)
  }
  .padding(.horizontal, 10)
- .frame(height: tab.agentStatus == nil ? 28 : 36)
+ .frame(height: 28)
         .background(
             RoundedRectangle(cornerRadius: 5)
                 .fill(isActive ? Color.tabActiveBg : (isHovered ? Color.tabHoverBg : Color.clear))
@@ -2278,8 +2284,9 @@ private struct PaneResizeOverlay: NSViewRepresentable {
 // Primary is always ZStack child 0. Named coordinate space "panes" lets drag gestures
 // report absolute positions — no manual offset math needed.
 
-private struct PaneStartOverlay: View {
+struct PaneStartOverlay: View {
     let cwd: String?
+    var label: String = "Start"
     let onStart: () -> Void
 
     var body: some View {
@@ -2296,7 +2303,7 @@ private struct PaneStartOverlay: View {
                         .lineLimit(1)
                 }
                 Button(action: onStart) {
-                    Text("Start")
+                    Text(label)
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(Color.labelPrimary)
                         .padding(.horizontal, 20)
@@ -2313,6 +2320,7 @@ private struct PaneStartOverlay: View {
 }
 
 private struct TerminalContentView: View {
+    @Environment(DaemonConnection.self) private var daemon
     @ObservedObject var tab: TerminalTab
     var isSelected: Bool = false
     let onPaneActivated: () -> Void
@@ -2393,9 +2401,15 @@ private struct TerminalContentView: View {
                 .padding(.top, 30)
                 .opacity(isSource ? 0.45 : 1)
             if !entry.isStarted {
-                PaneStartOverlay(cwd: entry.initialCWD) {
+                PaneStartOverlay(cwd: entry.initialCWD, label: entry.wasStolen ? "Use Here" : "Start") {
                     entry.startAction?()
                     entry.isStarted = true
+                    // The pane's SwiftUI frame doesn't change just because it becomes visible
+                    // again, so the terminal never re-measures and the daemon gets whatever
+                    // rows/cols were buffered from the original (possibly stale) layout pass.
+                    // Nudging the fractional layout forces a real frame change, same as manually
+                    // dragging the pane divider does to "fix" this.
+                    nudgeLayout(for: id)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                         requestKeyboardFocus(for: entry.viewState)
                     }
@@ -2424,6 +2438,7 @@ private struct TerminalContentView: View {
                 customName: tab.paneNames[id] ?? "",
                 focused: focused,
                 showClose: true,
+                status: daemon.agentStatesByStableID[entry.daemonStableID]?.status,
                 onClose: onClose,
                 onRename: { tab.rename(id: id, to: $0) },
                 onDragChanged: { loc in
@@ -2457,6 +2472,16 @@ private struct TerminalContentView: View {
         )
         .frame(width: sz.width * l.w, height: sz.height * l.h)
         .offset(x: sz.width * l.x, y: sz.height * l.y)
+    }
+
+    private func nudgeLayout(for id: UUID) {
+        guard let current = tab.paneLayouts[id] else { return }
+        var nudged = current
+        nudged.w *= 0.999
+        tab.paneLayouts[id] = nudged
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+            tab.paneLayouts[id] = current
+        }
     }
 
     private func paneAt(_ p: CGPoint, in sz: CGSize) -> UUID? {
@@ -2543,6 +2568,7 @@ private struct ReactivePaneHeader: View {
     let customName: String
     let focused: Bool
     let showClose: Bool
+    let status: AgentRunStatus?
     let onClose: () -> Void
     let onRename: (String) -> Void
     let onDragChanged: (CGPoint) -> Void
@@ -2554,6 +2580,7 @@ private struct ReactivePaneHeader: View {
             title: title,
             focused: focused,
             showClose: showClose,
+            status: status,
             onClose: onClose,
             onRename: onRename,
             onDragChanged: onDragChanged,
@@ -2566,6 +2593,7 @@ private struct PaneHeader: View {
     let title: String
     let focused: Bool
     let showClose: Bool
+    let status: AgentRunStatus?
     let onClose: () -> Void
     let onRename: (String) -> Void
     let onDragChanged: (CGPoint) -> Void
@@ -2597,6 +2625,10 @@ private struct PaneHeader: View {
                         .font(.system(size: 12, weight: focused ? .medium : .regular))
                         .foregroundStyle(focused ? Color.labelPrimary : Color.labelMuted)
                         .lineLimit(1)
+                }
+
+                if let status {
+                    AgentStatusBadge(status: status)
                 }
 
                 Spacer(minLength: 0)

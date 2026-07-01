@@ -11,6 +11,6 @@ swiftc -parse-as-library \
 
 swiftc -parse-as-library \
   "$ROOT/srota/srota/AgentNotificationRouting.swift" \
-  "$ROOT/scripts/test-agent-notification-routing.swift" \
+  "$ROOT/scripts/test-agent-notification-state.swift" \
   -o /tmp/srota-routing-test
 /tmp/srota-routing-test

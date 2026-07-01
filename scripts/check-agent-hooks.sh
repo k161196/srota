@@ -25,18 +25,40 @@ done
 
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 CODEX_HOOKS="$HOME/.codex/hooks.json"
-REQUIRED_EVENTS=("SessionStart" "Stop" "UserPromptSubmit" "PermissionRequest")
 
 claude_installed() { command -v claude >/dev/null 2>&1; }
 codex_installed() { command -v codex >/dev/null 2>&1; }
 
+# Codex keeps its original flat event list (its own dispatch scheme, untouched here).
+# Claude gets real hook_event_name/matcher pairs: Notification+permission_prompt and
+# PreToolUse+AskUserQuestion both surface as "blocked"; SessionEnd surfaces "done".
+# PostToolUse+AskUserQuestion clears "blocked" back to "working" once the question is answered.
+REQUIRED_JS='
+const required = agentId === "claude"
+  ? [
+      { event: "SessionStart" },
+      { event: "UserPromptSubmit" },
+      { event: "Stop" },
+      { event: "SessionEnd" },
+      { event: "Notification", matcher: "permission_prompt" },
+      { event: "PreToolUse", matcher: "AskUserQuestion" },
+      { event: "PostToolUse", matcher: "AskUserQuestion" },
+    ]
+  : [
+      { event: "SessionStart" },
+      { event: "Stop" },
+      { event: "UserPromptSubmit" },
+      { event: "PermissionRequest" },
+    ];
+'
+
 hooks_ready() {
   local config_path="$1"
   local agent_id="$2"
-  node - "$config_path" "$NOTIFY_SCRIPT" "$agent_id" <<'JS' >/dev/null
+  node - "$config_path" "$NOTIFY_SCRIPT" "$agent_id" <<JS >/dev/null
 const fs = require('fs');
 const [,, configPath, notifyScript, agentId] = process.argv;
-const required = ['SessionStart', 'Stop', 'UserPromptSubmit', 'PermissionRequest'];
+$REQUIRED_JS
 
 let data = {};
 try {
@@ -46,15 +68,20 @@ try {
 }
 
 const hooks = data.hooks ?? {};
-const command = `[ -x "${notifyScript}" ] && SORA_AGENT_ID=${agentId} "${notifyScript}" || true`;
-const wanted = JSON.stringify({ hooks: [{ type: 'command', command }] });
+const command = \`[ -x "\${notifyScript}" ] && SORA_AGENT_ID=\${agentId} "\${notifyScript}" || true\`;
 
-function isSrotaHook(entry) {
-  return JSON.stringify(entry) === wanted;
+function wantedFor(matcher) {
+  const entry = { hooks: [{ type: 'command', command }] };
+  if (matcher) entry.matcher = matcher;
+  return JSON.stringify(entry);
 }
 
-const ok = required.every((event) =>
-  Array.isArray(hooks[event]) && hooks[event].some(isSrotaHook)
+function isSrotaHook(entry, matcher) {
+  return JSON.stringify(entry) === wantedFor(matcher);
+}
+
+const ok = required.every(({ event, matcher }) =>
+  Array.isArray(hooks[event]) && hooks[event].some((e) => isSrotaHook(e, matcher))
 );
 
 process.exit(ok ? 0 : 1);
@@ -64,11 +91,11 @@ JS
 configure_hooks() {
   local config_path="$1"
   local agent_id="$2"
-  node - "$config_path" "$NOTIFY_SCRIPT" "$agent_id" <<'JS'
+  node - "$config_path" "$NOTIFY_SCRIPT" "$agent_id" <<JS
 const fs = require('fs');
 const path = require('path');
 const [,, configPath, notifyScript, agentId] = process.argv;
-const required = ['SessionStart', 'Stop', 'UserPromptSubmit', 'PermissionRequest'];
+$REQUIRED_JS
 
 let data = { hooks: {} };
 try {
@@ -77,11 +104,17 @@ try {
 
 data.hooks ??= {};
 
-const command = `[ -x "${notifyScript}" ] && SORA_AGENT_ID=${agentId} "${notifyScript}" || true`;
-const wanted = JSON.stringify({ hooks: [{ type: 'command', command }] });
+const command = \`[ -x "\${notifyScript}" ] && SORA_AGENT_ID=\${agentId} "\${notifyScript}" || true\`;
 
-for (const event of required) {
+function wantedFor(matcher) {
+  const entry = { hooks: [{ type: 'command', command }] };
+  if (matcher) entry.matcher = matcher;
+  return JSON.stringify(entry);
+}
+
+for (const { event, matcher } of required) {
   const arr = Array.isArray(data.hooks[event]) ? data.hooks[event] : [];
+  const wanted = wantedFor(matcher);
   const kept = [];
   let found = false;
 
@@ -98,7 +131,7 @@ for (const event of required) {
   }
 
   if (!found) {
-    kept.push({ hooks: [{ type: 'command', command }] });
+    kept.push(JSON.parse(wanted));
   }
 
   data.hooks[event] = kept;

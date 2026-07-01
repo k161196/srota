@@ -37,6 +37,7 @@ extension Notification.Name {
 
 enum ManagementTab: String, CaseIterable {
     case workspaces    = "Workspaces"
+    case agents        = "Agents"
     case organizations = "Organizations"
     case projects      = "Projects"
     case features      = "Features"
@@ -46,6 +47,7 @@ enum ManagementTab: String, CaseIterable {
     var icon: String {
         switch self {
         case .workspaces:    return "terminal"
+        case .agents:        return "bolt.fill"
         case .organizations: return "building.2"
         case .projects:      return "folder"
         case .features:      return "sparkles"
@@ -210,6 +212,7 @@ struct ManagementPanel: View {
             if tab != .features && tab != .issues {
                 switch tab {
                 case .workspaces:    EmptyView()  // handled by ContentView
+                case .agents:        AgentsPanel()
                 case .organizations: OrganizationsPanel()
                 case .projects:      ProjectsPanel()
                 case .features:      EmptyView()
@@ -218,6 +221,257 @@ struct ManagementPanel: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Agents panel (split view: daemon-tracked agents on the left, an attached live terminal on the right)
+
+private struct DaemonAgentRow: Identifiable {
+    let stableID: String
+    let cwd: String
+    let title: String
+    let status: AgentRunStatus?
+    let agentName: String
+    let updatedAt: Double
+    var id: String { stableID }
+}
+
+// A PTY has exactly one live owner at a time (see DaemonConnection.spawnOrAttach). Attaching from
+// the Agents tab never jumps to Workspaces — it either attaches directly (nothing else owns this
+// PTY) or, if a workspace pane already owns it, shows a "Use Here" button to claim it explicitly,
+// mirroring the same button an unstarted pane shows. Claiming here flips the workspace pane back
+// to its own "Use Here" overlay via the onStolen callback, and vice versa.
+private struct AgentsPanel: View {
+    @EnvironmentObject var manager: TerminalManager
+    @Environment(DaemonConnection.self) private var daemon
+    @Environment(\.colorScheme) private var colorScheme
+
+    @State private var allPanes: [PTYInfo] = []
+    @State private var showAllProcesses = false
+    @State private var selectedStableID: String?
+    @State private var attachment: AgentAttachment?
+
+    private var rows: [DaemonAgentRow] {
+        let states = daemon.agentStatesByStableID
+        let openTitles = Dictionary(uniqueKeysWithValues: manager.allWorkspaces.flatMap { ws in
+            ws.tabs.flatMap { tab in tab.panes.map { ($0.daemonStableID, tab.displayName) } }
+        })
+        return allPanes
+            .filter { $0.exitCode == nil }
+            .compactMap { pane -> DaemonAgentRow? in
+                let state = states[pane.stableID]
+                guard showAllProcesses || state?.status != nil else { return nil }
+                let fallbackTitle = pane.cwd.isEmpty ? "Terminal" : URL(fileURLWithPath: pane.cwd).lastPathComponent
+                return DaemonAgentRow(
+                    stableID: pane.stableID, cwd: pane.cwd,
+                    title: openTitles[pane.stableID] ?? fallbackTitle,
+                    status: state?.status, agentName: state?.agent ?? "", updatedAt: state?.updatedAt ?? 0
+                )
+            }
+            .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    private var claimedElsewhereStableIDs: Set<String> {
+        Set(manager.allWorkspaces.flatMap { ws in
+            ws.tabs.flatMap { tab in tab.panes.filter(\.isStarted).map(\.daemonStableID) }
+        })
+    }
+
+    private var selectedRow: DaemonAgentRow? { rows.first { $0.stableID == selectedStableID } }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                header
+                Rectangle().fill(Color.mgBorder).frame(height: 1)
+                if rows.isEmpty {
+                    Spacer()
+                    Text(showAllProcesses ? "No terminals running" : "No agents running")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.mgMuted)
+                    Spacer()
+                } else {
+                    ScrollView {
+                        VStack(spacing: 2) {
+                            ForEach(rows) { row in
+                                DaemonAgentRowView(row: row, isSelected: row.stableID == selectedStableID) {
+                                    selectedStableID = row.stableID
+                                    attachment = nil
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.top, 8)
+                    }
+                }
+            }
+            .frame(width: 280)
+
+            Rectangle().fill(Color.mgBorder).frame(width: 1)
+
+            detail
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .onAppear { refresh() }
+        .onChange(of: daemon.agentStatesByStableID.count) { _, _ in refresh() }
+        .onChange(of: rows.map(\.stableID)) { _, ids in
+            guard selectedStableID == nil || !ids.contains(selectedStableID!) else { return }
+            selectedStableID = rows.first?.stableID
+            attachment = nil
+        }
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        if let row = selectedRow {
+            if let attachment, attachment.stableID == row.stableID {
+                TerminalSurfaceView(context: attachment.viewState)
+            } else if claimedElsewhereStableIDs.contains(row.stableID) {
+                PaneStartOverlay(cwd: row.cwd, label: "Use Here") { attach(row) }
+            } else {
+                Color.clear.onAppear { attach(row) }
+            }
+        } else {
+            VStack {
+                Spacer()
+                Text("Select an agent")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.mgMuted)
+                Spacer()
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Text("Agents")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.mgLabel)
+            Text("\(rows.count)")
+                .font(.system(size: 11).monospacedDigit())
+                .foregroundStyle(Color.mgMuted)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.mgSurface)
+                .clipShape(Capsule())
+            Spacer()
+            Button { refresh() } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.mgMuted)
+            }
+            .buttonStyle(.plain)
+            .help("Refresh from daemon")
+            Menu {
+                Toggle("Show all terminals", isOn: $showAllProcesses)
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.mgMuted)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
+    private func refresh() {
+        Task {
+            if let panes = try? await daemon.list() { allPanes = panes }
+        }
+    }
+
+    private func attach(_ row: DaemonAgentRow) {
+        let token = UUID()
+        let attachmentBinding = $attachment
+        attachment = AgentAttachment(stableID: row.stableID, cwd: row.cwd, colorScheme: colorScheme, daemon: daemon, token: token) {
+            // Only clear if `attachment` is still THIS instance — re-selecting a previously-viewed
+            // agent steals from its own stale claim, and that old callback fires async afterward;
+            // without this check it would wipe out the brand-new attachment it just raced against.
+            if attachmentBinding.wrappedValue?.token == token {
+                attachmentBinding.wrappedValue = nil
+            }
+        }
+    }
+}
+
+// Mirrors TerminalTab's own pane-attach pattern exactly — this is just another consumer of
+// spawnOrAttach, not a separate "secondary" mechanism. Note: switching the Agents-tab selection
+// away doesn't currently release this claim (no explicit detach primitive exists yet), so the
+// underlying PTY keeps streaming to this now-unviewed session until something else steals it —
+// harmless (no corruption), just an unclaimed background listener.
+private final class AgentAttachment {
+    let stableID: String
+    let token: UUID
+    let viewState: TerminalViewState
+
+    init(stableID: String, cwd: String, colorScheme: ColorScheme, daemon: DaemonConnection, token: UUID, onStolen: @escaping () -> Void) {
+        self.stableID = stableID
+        self.token = token
+        let state = TerminalViewState(terminalConfiguration: TerminalConfiguration())
+        let ref = DaemonPaneRef()
+        let session = InMemoryTerminalSession(
+            write: { [weak daemon, ref] data in
+                guard let paneID = ref.id, !ref.isReplayingBuffer else { return }
+                daemon?.sendInput(paneID: paneID, data: data)
+            },
+            resize: { [weak daemon, ref] vp in
+                guard let paneID = ref.id else {
+                    ref.storePendingResize(rows: vp.rows, cols: vp.columns)
+                    return
+                }
+                daemon?.resize(paneID: paneID, rows: vp.rows, cols: vp.columns)
+            }
+        )
+        state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: cwd.isEmpty ? nil : cwd)
+        state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
+        viewState = state
+        daemon.spawnOrAttach(
+            stableID: stableID, cwd: cwd.isEmpty ? NSHomeDirectory() : cwd, env: [:],
+            session: session, into: ref, onStolen: onStolen
+        )
+    }
+}
+
+private struct DaemonAgentRowView: View {
+    let row: DaemonAgentRow
+    let isSelected: Bool
+    let onSelect: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(row.status?.color ?? Color.mgMuted.opacity(0.4))
+                    .frame(width: 7, height: 7)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.mgLabel)
+                        .lineLimit(1)
+                    if let status = row.status {
+                        Text("\(status.label.lowercased()) · \(row.agentName)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(status.color)
+                            .lineLimit(1)
+                    } else {
+                        Text("no agent")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.mgMuted)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(isSelected ? Color.mgAccent.opacity(0.14) : (isHovered ? Color.mgRowHover : Color.clear))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
     }
 }
 
@@ -1962,7 +2216,7 @@ private struct RepoDetailView: View {
                     p.arguments = ["-C", mainPath, "worktree", "add", "-b", branch, path, baseBranch]
                 }
             } else {
-                p.arguments = ["clone", "--branch", branch, "--single-branch", repoURL, path]
+                p.arguments = ["clone", "--branch", branch, repoURL, path]
             }
             do { try p.run() } catch {
                 await MainActor.run { cloningBranch = nil; checkoutError = error.localizedDescription }

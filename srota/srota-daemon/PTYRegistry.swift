@@ -72,6 +72,11 @@ final class PTYRegistry {
             lock.unlock()
             client.send(.listed(infos, requestID: requestID))
 
+        case .agentEvent(let event):
+            guard let proc = process(stableID: event.stableID),
+                  let status = proc.applyAgentEvent(event) else { return }
+            broadcast(.agentStatus(status))
+
         case .close(let paneID):
             let proc = withProcess(paneID: paneID)
             if proc?.terminate() == false {
@@ -101,6 +106,22 @@ final class PTYRegistry {
         let proc = processes[paneID]
         lock.unlock()
         return proc
+    }
+
+    private func process(stableID: String) -> PTYProcess? {
+        lock.lock()
+        let proc = processes.values.first { $0.stableID == stableID }
+        lock.unlock()
+        return proc
+    }
+
+    private func broadcast(_ response: DaemonResponse) {
+        lock.lock()
+        let snapshot = Array(clients.values)
+        lock.unlock()
+        for client in snapshot {
+            client.send(response)
+        }
     }
 
     private func pruneMissingProcesses() {

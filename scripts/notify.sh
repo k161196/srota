@@ -16,6 +16,7 @@ PARSED="$(
 python3 - "$INPUT" "$PWD" "$AGENT" <<'PY'
 import json
 import os
+import socket
 import sys
 import time
 
@@ -45,7 +46,18 @@ if not event:
 if event == "UserPromptSubmit":
     event = "Start"
 
-if event not in {"SessionStart", "Start", "Stop", "PermissionRequest"}:
+# Notification(permission_prompt) and PreToolUse(AskUserQuestion) are the only
+# variants of these two hooks Srota registers (see check-agent-hooks.sh), so
+# either one reaching here always means "blocked".
+if event in {"Notification", "PreToolUse"}:
+    event = "PermissionRequest"
+
+# PostToolUse(AskUserQuestion) is the only PostToolUse hook registered, so it
+# always means the question was just answered — back to "working".
+if event == "PostToolUse":
+    event = "Start"
+
+if event not in {"SessionStart", "Start", "Stop", "SessionEnd", "PermissionRequest"}:
     sys.exit(0)
 
 def extract_summary(payload):
@@ -86,22 +98,22 @@ tab_id = os.environ.get("SROTA_TAB_ID")
 pane_id = os.environ.get("SROTA_PANE_ID")
 summary = extract_summary(payload)
 
-log_dir = os.path.expanduser("~/.srota")
-os.makedirs(log_dir, exist_ok=True)
-
-with open(os.path.join(log_dir, "agent-events.jsonl"), "a", encoding="utf-8") as f:
-    f.write(json.dumps({
-        "event": event,
-        "cwd": cwd,
-        "agent": agent,
-        "tabID": tab_id,
-        "paneID": pane_id,
-        "summary": summary,
-        "timestamp": time.time(),
-    }) + "\n")
-
-with open(os.path.join(log_dir, "last-agent-hook.json"), "w", encoding="utf-8") as f:
-    json.dump(payload, f, indent=2)
+if pane_id:
+    try:
+        sock_path = os.environ.get("SROTA_SOCKET_PATH") or os.path.expanduser("~/.srota/daemon.sock")
+        msg = json.dumps({
+            "type": "agent_event",
+            "stableID": pane_id,
+            "event": event,
+            "agent": agent,
+            "summary": summary,
+            "timestamp": time.time(),
+        }).encode("utf-8") + b"\n"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.connect(sock_path)
+            sock.sendall(msg)
+    except Exception:
+        pass
 
 print(event)
 PY
@@ -116,8 +128,9 @@ case "$AGENT" in
 esac
 
 case "$PARSED" in
-  Start)             TITLE="$LABEL working";       BODY="Prompt submitted" ;;
-  Stop)               TITLE="$LABEL done";          BODY="Task completed" ;;
+  Start)              exit 0 ;;  # status still logged above; no notification banner for prompt submission
+  Stop)               TITLE="$LABEL idle";          BODY="Waiting for your next prompt" ;;
+  SessionEnd)         TITLE="$LABEL done";          BODY="Session ended" ;;
   PermissionRequest)  TITLE="$LABEL needs approval"; BODY="Waiting for response" ;;
   *) exit 0 ;;
 esac

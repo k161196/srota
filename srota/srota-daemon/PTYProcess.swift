@@ -15,6 +15,13 @@ func ptyEnvironment(
     mergedEnv["SROTA_PANE_ID"] = stableID
     mergedEnv["SROTA_SOCKET_PATH"] = parent["SROTA_SOCKET_PATH"]
         ?? "\(NSHomeDirectory())/\(srotaDir)/daemon.sock"
+    let existingPath = mergedEnv["PATH"] ?? ""
+    let pathParts = [
+        "\(NSHomeDirectory())/.local/bin",
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+    ] + existingPath.split(separator: ":").map(String.init)
+    mergedEnv["PATH"] = pathParts.joined(separator: ":")
     let ghosttyTerminfo = "/Applications/Ghostty.app/Contents/Resources/terminfo"
     let hasGhosttyTerminfo = FileManager.default.fileExists(atPath: "\(ghosttyTerminfo)/78/xterm-ghostty")
     if env["TERMINFO"] == nil, hasGhosttyTerminfo { mergedEnv["TERMINFO"] = ghosttyTerminfo }
@@ -38,11 +45,25 @@ final class PTYProcess {
     private var subscribers: [ClientSession] = []
     private let lock = NSLock()
     private var readSource: DispatchSourceRead?
+    private var agentStatus: String?
+    private var agentName: String?
+    private var agentSummary: String?
+    private var agentUpdatedAt: Double?
 
     var info: PTYInfo {
         lock.lock()
         defer { lock.unlock() }
-        return PTYInfo(paneID: paneID, stableID: stableID, pid: pid, cwd: initialCWD, exitCode: exitCode)
+        return PTYInfo(
+            paneID: paneID,
+            stableID: stableID,
+            pid: pid,
+            cwd: initialCWD,
+            exitCode: exitCode,
+            agentStatus: agentStatus,
+            agent: agentName,
+            agentSummary: agentSummary,
+            agentUpdatedAt: agentUpdatedAt
+        )
     }
 
     init(paneID: String, stableID: String, cmd: [String], cwd: String, env: [String: String], cols: UInt16? = nil, rows: UInt16? = nil) throws {
@@ -155,6 +176,26 @@ final class PTYProcess {
         lock.unlock()
     }
 
+    func applyAgentEvent(_ event: AgentEventParams) -> AgentStatusPayload? {
+        guard let status = Self.status(for: event.event) else { return nil }
+        let timestamp = event.timestamp ?? Date().timeIntervalSince1970
+        lock.lock()
+        defer { lock.unlock() }
+        if let current = agentUpdatedAt, timestamp < current { return nil }
+        agentStatus = status
+        agentName = event.agent ?? "agent"
+        agentSummary = event.summary ?? ""
+        agentUpdatedAt = timestamp
+        return AgentStatusPayload(
+            paneID: paneID,
+            stableID: stableID,
+            status: agentStatus,
+            agent: agentName,
+            summary: agentSummary,
+            updatedAt: agentUpdatedAt
+        )
+    }
+
     func write(_ data: Data) {
         _ = writeAll(fd: masterFD, data: data)
     }
@@ -195,6 +236,21 @@ final class PTYProcess {
         }
         readSource?.cancel()
         return true
+    }
+
+    private static func status(for event: String) -> String? {
+        switch event {
+        case "Start", "SessionStart":
+            return "working"
+        case "PermissionRequest":
+            return "blocked"
+        case "Stop":
+            return "idle"
+        case "SessionEnd":
+            return "done"
+        default:
+            return nil
+        }
     }
 }
 

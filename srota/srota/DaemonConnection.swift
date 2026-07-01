@@ -46,6 +46,10 @@ struct PTYInfo {
     let pid: Int32
     let cwd: String
     let exitCode: Int32?
+    let agentStatus: AgentRunStatus?
+    let agent: String
+    let agentSummary: String
+    let agentUpdatedAt: Double?
 
     init?(json: [String: Any]) {
         guard let paneID = json["paneID"] as? String,
@@ -55,6 +59,10 @@ struct PTYInfo {
         self.pid = (json["pid"] as? Int).map(Int32.init) ?? -1
         self.cwd = json["cwd"] as? String ?? ""
         self.exitCode = (json["exitCode"] as? Int).map(Int32.init)
+        self.agentStatus = (json["agentStatus"] as? String).flatMap(AgentRunStatus.init(rawValue:))
+        self.agent = json["agent"] as? String ?? ""
+        self.agentSummary = json["agentSummary"] as? String ?? ""
+        self.agentUpdatedAt = json["agentUpdatedAt"] as? Double
     }
 }
 
@@ -64,6 +72,10 @@ private final class ManagedSession {
     let env: [String: String]
     let session: InMemoryTerminalSession
     let ref: DaemonPaneRef
+    // A PTY has exactly one live owner at a time (kernel window size, ring-buffer replay, and
+    // write-echo suppression all assume a single consumer). Called when a later spawnOrAttach for
+    // the same stableID takes over, so the displaced owner can show a "Use Here" reclaim button.
+    let onStolen: (() -> Void)?
     var paneID: String?
     var isClosing = false
 
@@ -72,19 +84,22 @@ private final class ManagedSession {
         cwd: String,
         env: [String: String],
         session: InMemoryTerminalSession,
-        ref: DaemonPaneRef
+        ref: DaemonPaneRef,
+        onStolen: (() -> Void)?
     ) {
         self.stableID = stableID
         self.cwd = cwd
         self.env = env
         self.session = session
         self.ref = ref
+        self.onStolen = onStolen
     }
 }
 
 @Observable
 final class DaemonConnection {
     private(set) var isConnected = false
+    private(set) var agentStatesByStableID: [String: AgentNotificationState] = [:]
 
     @ObservationIgnored private var fd: Int32 = -1
     @ObservationIgnored private var readBuffer = Data()
@@ -239,7 +254,11 @@ final class DaemonConnection {
             guard let requestID = json["requestID"] as? String else { return }
             let panes = (json["panes"] as? [[String: Any]] ?? []).compactMap(PTYInfo.init)
             let cont = stateLock.withLock { pendingLists.removeValue(forKey: requestID) }
-            cont?.resume(returning: panes)
+            let states = agentStates(from: panes)
+            DispatchQueue.main.async {
+                self.agentStatesByStableID = states
+                cont?.resume(returning: panes)
+            }
 
         case "dead":
             guard let paneID = json["paneID"] as? String else { return }
@@ -247,6 +266,17 @@ final class DaemonConnection {
             let session = stateLock.withLock { detachPaneLocked(paneID: paneID) }
             DispatchQueue.main.async {
                 session?.finish(exitCode: UInt32(bitPattern: code), runtimeMilliseconds: 0)
+            }
+
+        case "agent_status":
+            guard let stableID = json["stableID"] as? String else { return }
+            let state = agentState(from: json)
+            DispatchQueue.main.async {
+                if let state {
+                    self.agentStatesByStableID[stableID] = state
+                } else {
+                    self.agentStatesByStableID.removeValue(forKey: stableID)
+                }
             }
 
         case "error":
@@ -263,6 +293,34 @@ final class DaemonConnection {
         default:
             break
         }
+    }
+
+    private func agentStates(from panes: [PTYInfo]) -> [String: AgentNotificationState] {
+        Dictionary(uniqueKeysWithValues: panes.compactMap { pane in
+            guard let state = agentState(from: pane) else { return nil }
+            return (pane.stableID, state)
+        })
+    }
+
+    private func agentState(from pane: PTYInfo) -> AgentNotificationState? {
+        guard let status = pane.agentStatus, let updatedAt = pane.agentUpdatedAt else { return nil }
+        var state = AgentNotificationState()
+        state.apply(status: status, agent: pane.agent, summary: pane.agentSummary, timestamp: updatedAt)
+        return state
+    }
+
+    private func agentState(from json: [String: Any]) -> AgentNotificationState? {
+        guard let rawStatus = json["status"] as? String,
+              let status = AgentRunStatus(rawValue: rawStatus),
+              let updatedAt = json["updatedAt"] as? Double else { return nil }
+        var state = AgentNotificationState()
+        state.apply(
+            status: status,
+            agent: json["agent"] as? String ?? "",
+            summary: json["summary"] as? String ?? "",
+            timestamp: updatedAt
+        )
+        return state
     }
 
     private func handleDisconnect() {
@@ -287,7 +345,10 @@ final class DaemonConnection {
         }
         readSource = nil
         readBuffer.removeAll(keepingCapacity: false)
-        DispatchQueue.main.async { self.isConnected = false }
+        DispatchQueue.main.async {
+            self.isConnected = false
+            self.agentStatesByStableID.removeAll()
+        }
 
         let disconnectError = err("daemon disconnected")
         pending.0.forEach { $0.resume(throwing: disconnectError) }
@@ -358,23 +419,32 @@ final class DaemonConnection {
     }
 
     /// Registers a terminal session and either attaches immediately or restores it after reconnect.
+    /// A PTY has exactly one live owner at a time — calling this for a stableID that's already
+    /// claimed elsewhere (e.g. a workspace pane, or an Agents-tab viewer) steals it: the previous
+    /// owner's `onStolen` fires so it can show a reclaim ("Use Here") affordance instead of silently
+    /// going stale.
     func spawnOrAttach(
         stableID: String,
         cwd: String,
         env: [String: String],
         session: InMemoryTerminalSession,
-        into ref: DaemonPaneRef
+        into ref: DaemonPaneRef,
+        onStolen: (() -> Void)? = nil
     ) {
-        stateLock.withLock {
+        let stolen = stateLock.withLock { () -> (() -> Void)? in
             // BUG-2 fix: clean up stale paneID mappings before replacing the managed session
-            if let existing = managedSessions[stableID], let oldPaneID = existing.paneID {
+            let existing = managedSessions[stableID]
+            if let oldPaneID = existing?.paneID {
                 sessionsByPaneID.removeValue(forKey: oldPaneID)
                 stableIDByPaneID.removeValue(forKey: oldPaneID)
             }
+            existing?.ref.clearID()
             managedSessions[stableID] = ManagedSession(
-                stableID: stableID, cwd: cwd, env: env, session: session, ref: ref
+                stableID: stableID, cwd: cwd, env: env, session: session, ref: ref, onStolen: onStolen
             )
+            return existing?.onStolen
         }
+        if let stolen { DispatchQueue.main.async(execute: stolen) }
 
         if isConnectedSnapshot() {
             Task { [weak self] in await self?.restoreManagedSession(stableID: stableID) }
@@ -456,8 +526,11 @@ final class DaemonConnection {
             }
 
             if let rebound = bind(paneID: match.paneID, stableID: stableID) {
-                attach(paneID: match.paneID, session: rebound.session)
+                // Resize before attaching: the PTY may still be sized from whoever last owned it
+                // (or from creation). Attaching first would replay the ring buffer at that stale
+                // size, rendering garbled until something happens to trigger a resize later.
                 applyPendingResize(for: rebound, paneID: match.paneID)
+                attach(paneID: match.paneID, session: rebound.session)
             }
             return
         }
@@ -479,8 +552,8 @@ final class DaemonConnection {
             stateLock.withLock { managedSessions.removeValue(forKey: stableID) }
             return
         }
-        attach(paneID: paneID, session: rebound.session)
         applyPendingResize(for: rebound, paneID: paneID)
+        attach(paneID: paneID, session: rebound.session)
     }
 
     private func beginRestore(stableID: String) -> Bool {

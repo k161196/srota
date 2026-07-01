@@ -12,6 +12,14 @@ struct CreateParams: Decodable {
     let cols: UInt16?
 }
 
+struct AgentEventParams: Decodable {
+    let stableID: String
+    let event: String
+    let agent: String?
+    let summary: String?
+    let timestamp: Double?
+}
+
 enum DaemonRequest: Decodable {
     case create(CreateParams)
     case attach(paneID: String)
@@ -19,6 +27,7 @@ enum DaemonRequest: Decodable {
     case resize(paneID: String, rows: UInt16, cols: UInt16)
     case list(requestID: String?)
     case close(paneID: String)
+    case agentEvent(AgentEventParams)
 
     private enum CodingKeys: String, CodingKey {
         case type
@@ -51,6 +60,8 @@ enum DaemonRequest: Decodable {
             self = .list(requestID: try c.decodeIfPresent(String.self, forKey: .requestID))
         case "close":
             self = .close(paneID: try c.decode(String.self, forKey: .paneID))
+        case "agent_event":
+            self = .agentEvent(try AgentEventParams(from: decoder))
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "unknown type")
         }
@@ -65,6 +76,19 @@ struct PTYInfo: Encodable {
     let pid: Int32
     let cwd: String // initial CWD
     let exitCode: Int32?
+    let agentStatus: String?
+    let agent: String?
+    let agentSummary: String?
+    let agentUpdatedAt: Double?
+}
+
+struct AgentStatusPayload: Encodable {
+    let paneID: String
+    let stableID: String
+    let status: String?
+    let agent: String?
+    let summary: String?
+    let updatedAt: Double?
 }
 
 enum DaemonResponse: Encodable {
@@ -74,6 +98,7 @@ enum DaemonResponse: Encodable {
     case live(paneID: String, data: String)
     case listed([PTYInfo], requestID: String?)
     case dead(paneID: String, exitCode: Int32)
+    case agentStatus(AgentStatusPayload)
     case ok
     case error(String, requestID: String?)
 
@@ -85,6 +110,11 @@ enum DaemonResponse: Encodable {
         case panes
         case message
         case exitCode
+        case stableID
+        case status
+        case agent
+        case summary
+        case updatedAt
     }
 
     func encode(to encoder: Encoder) throws {
@@ -113,6 +143,14 @@ enum DaemonResponse: Encodable {
             try c.encode("dead", forKey: .type)
             try c.encode(id, forKey: .paneID)
             try c.encode(code, forKey: .exitCode)
+        case .agentStatus(let payload):
+            try c.encode("agent_status", forKey: .type)
+            try c.encode(payload.paneID, forKey: .paneID)
+            try c.encode(payload.stableID, forKey: .stableID)
+            try c.encodeIfPresent(payload.status, forKey: .status)
+            try c.encodeIfPresent(payload.agent, forKey: .agent)
+            try c.encodeIfPresent(payload.summary, forKey: .summary)
+            try c.encodeIfPresent(payload.updatedAt, forKey: .updatedAt)
         case .ok:
             try c.encode("ok", forKey: .type)
         case .error(let m, let requestID):
