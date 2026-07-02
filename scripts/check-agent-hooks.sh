@@ -29,11 +29,12 @@ CODEX_HOOKS="$HOME/.codex/hooks.json"
 claude_installed() { command -v claude >/dev/null 2>&1; }
 codex_installed() { command -v codex >/dev/null 2>&1; }
 
-# Codex keeps its original flat event list (its own dispatch scheme, untouched here).
-# Claude gets real hook_event_name/matcher pairs: Notification+permission_prompt and
-# PreToolUse+AskUserQuestion both surface as "blocked"; SessionEnd surfaces "done".
-# PostToolUse+AskUserQuestion clears "blocked" back to "working" once the question is answered.
-REQUIRED_JS='
+hooks_ready() {
+  local config_path="$1"
+  local agent_id="$2"
+  node - "$config_path" "$NOTIFY_SCRIPT" "$agent_id" <<'JS' >/dev/null
+const fs = require('fs');
+const [,, configPath, notifyScript, agentId] = process.argv;
 const required = agentId === "claude"
   ? [
       { event: "SessionStart" },
@@ -50,15 +51,6 @@ const required = agentId === "claude"
       { event: "UserPromptSubmit" },
       { event: "PermissionRequest" },
     ];
-'
-
-hooks_ready() {
-  local config_path="$1"
-  local agent_id="$2"
-  node - "$config_path" "$NOTIFY_SCRIPT" "$agent_id" <<JS >/dev/null
-const fs = require('fs');
-const [,, configPath, notifyScript, agentId] = process.argv;
-$REQUIRED_JS
 
 let data = {};
 try {
@@ -68,7 +60,7 @@ try {
 }
 
 const hooks = data.hooks ?? {};
-const command = \`[ -x "\${notifyScript}" ] && SORA_AGENT_ID=\${agentId} "\${notifyScript}" || true\`;
+const command = `[ -x "${notifyScript}" ] && SORA_AGENT_ID=${agentId} "${notifyScript}" || true`;
 
 function wantedFor(matcher) {
   const entry = { hooks: [{ type: 'command', command }] };
@@ -77,11 +69,20 @@ function wantedFor(matcher) {
 }
 
 function isSrotaHook(entry, matcher) {
-  return JSON.stringify(entry) === wantedFor(matcher);
+  if (!entry || typeof entry !== 'object') return false;
+  if ((entry.matcher ?? undefined) !== (matcher ?? undefined)) return false;
+  if (!Array.isArray(entry.hooks)) return false;
+  return entry.hooks.some((hook) => {
+    if (!hook || hook.type !== 'command' || typeof hook.command !== 'string') return false;
+    return (
+      hook.command === command ||
+      (hook.command.includes(`SORA_AGENT_ID=${agentId}`) && hook.command.includes('notify.sh'))
+    );
+  });
 }
 
 const ok = required.every(({ event, matcher }) =>
-  Array.isArray(hooks[event]) && hooks[event].some((e) => isSrotaHook(e, matcher))
+  Array.isArray(hooks[event]) && hooks[event].some((entry) => isSrotaHook(entry, matcher))
 );
 
 process.exit(ok ? 0 : 1);
@@ -91,11 +92,26 @@ JS
 configure_hooks() {
   local config_path="$1"
   local agent_id="$2"
-  node - "$config_path" "$NOTIFY_SCRIPT" "$agent_id" <<JS
+  node - "$config_path" "$NOTIFY_SCRIPT" "$agent_id" <<'JS'
 const fs = require('fs');
 const path = require('path');
 const [,, configPath, notifyScript, agentId] = process.argv;
-$REQUIRED_JS
+const required = agentId === "claude"
+  ? [
+      { event: "SessionStart" },
+      { event: "UserPromptSubmit" },
+      { event: "Stop" },
+      { event: "SessionEnd" },
+      { event: "Notification", matcher: "permission_prompt" },
+      { event: "PreToolUse", matcher: "AskUserQuestion" },
+      { event: "PostToolUse", matcher: "AskUserQuestion" },
+    ]
+  : [
+      { event: "SessionStart" },
+      { event: "Stop" },
+      { event: "UserPromptSubmit" },
+      { event: "PermissionRequest" },
+    ];
 
 let data = { hooks: {} };
 try {
@@ -103,8 +119,7 @@ try {
 } catch {}
 
 data.hooks ??= {};
-
-const command = \`[ -x "\${notifyScript}" ] && SORA_AGENT_ID=\${agentId} "\${notifyScript}" || true\`;
+const command = `[ -x "${notifyScript}" ] && SORA_AGENT_ID=${agentId} "${notifyScript}" || true`;
 
 function wantedFor(matcher) {
   const entry = { hooks: [{ type: 'command', command }] };
@@ -150,32 +165,39 @@ EXIT=0
 if claude_installed; then
   if hooks_ready "$CLAUDE_SETTINGS" claude; then
     CLAUDE_STATUS="configured"
-  elif [[ $CONFIGURE -eq 1 ]] && [[ "$(configure_hooks "$CLAUDE_SETTINGS" claude 2>&1)" == "ok" ]]; then
-    CLAUDE_STATUS="configured"
-  elif [[ $CONFIGURE -eq 1 ]]; then
-    CLAUDE_STATUS="configure_failed"
-    EXIT=1
   else
-    CLAUDE_STATUS="missing"
-    EXIT=1
+    if [[ $CONFIGURE -eq 1 ]]; then
+      if configure_hooks "$CLAUDE_SETTINGS" claude >/dev/null; then
+        CLAUDE_STATUS="configured"
+      else
+        CLAUDE_STATUS="configure_failed"
+        EXIT=1
+      fi
+    else
+      CLAUDE_STATUS="missing"
+      EXIT=1
+    fi
   fi
 fi
 
 if codex_installed; then
   if hooks_ready "$CODEX_HOOKS" codex; then
     CODEX_STATUS="configured"
-  elif [[ $CONFIGURE -eq 1 ]] && [[ "$(configure_hooks "$CODEX_HOOKS" codex 2>&1)" == "ok" ]]; then
-    CODEX_STATUS="configured"
-  elif [[ $CONFIGURE -eq 1 ]]; then
-    CODEX_STATUS="configure_failed"
-    EXIT=1
   else
-    CODEX_STATUS="missing"
-    EXIT=1
+    if [[ $CONFIGURE -eq 1 ]]; then
+      if configure_hooks "$CODEX_HOOKS" codex >/dev/null; then
+        CODEX_STATUS="configured"
+      else
+        CODEX_STATUS="configure_failed"
+        EXIT=1
+      fi
+    else
+      CODEX_STATUS="missing"
+      EXIT=1
+    fi
   fi
 fi
 
 printf '{"claude":"%s","codex":"%s","notifyScript":"%s"}\n' \
   "$CLAUDE_STATUS" "$CODEX_STATUS" "$NOTIFY_SCRIPT"
-
 exit $EXIT

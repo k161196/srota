@@ -1043,7 +1043,8 @@ struct ContentView: View {
         // sheet preset wins; fall back to agent's saved presetID so it applies even if user didn't touch the picker
         let resolvedPreset = preset ?? presetsStore.presets.first { $0.id == agent.presetID }
         let base = resolvedPreset?.commands.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-                         .joined(separator: " ") ?? "claude"
+                         .joined(separator: " ")
+            ?? (agent.name.localizedCaseInsensitiveContains("codex") ? "codex" : "claude")
         // Write system prompt to file — send() treats \n as Enter, so inlining a multiline prompt breaks the command
         let hex = String(UUID().uuidString.filter { $0.isHexDigit }.prefix(6).lowercased())
         let launchersDir = NSHomeDirectory() + "/\(Srota.dir)/launchers"

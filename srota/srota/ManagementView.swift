@@ -260,7 +260,7 @@ private struct AgentsPanel: View {
             .filter { $0.exitCode == nil }
             .compactMap { pane -> DaemonAgentRow? in
                 let state = states[pane.stableID]
-                guard showAllProcesses || state?.status != nil else { return nil }
+                guard showAllProcesses || (state?.status != nil && state?.status != .done) else { return nil }
                 let fallbackTitle = pane.cwd.isEmpty ? "Terminal" : URL(fileURLWithPath: pane.cwd).lastPathComponent
                 return DaemonAgentRow(
                     stableID: pane.stableID, cwd: pane.cwd,

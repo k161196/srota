@@ -36,6 +36,7 @@ reapTimer.setEventHandler {
             registry.reapExited(pid: pid, exitCode: exitCode)
         }
     }
+    registry.pollAgentChildren()
 }
 reapTimer.resume()
 

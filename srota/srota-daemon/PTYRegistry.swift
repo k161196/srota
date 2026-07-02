@@ -86,6 +86,20 @@ final class PTYRegistry {
         }
     }
 
+    // MARK: - Agent child polling (fallback for when hooks never fire — see PTYProcess.pollAgentChild)
+
+    func pollAgentChildren() {
+        lock.lock()
+        let procs = Array(processes.values)
+        lock.unlock()
+
+        for proc in procs {
+            if let payload = proc.pollAgentChild() {
+                broadcast(.agentStatus(payload))
+            }
+        }
+    }
+
     // MARK: - Child reaping
 
     func reapExited(pid: pid_t, exitCode: Int32) {

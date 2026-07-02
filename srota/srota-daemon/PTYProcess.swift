@@ -49,6 +49,8 @@ final class PTYProcess {
     private var agentName: String?
     private var agentSummary: String?
     private var agentUpdatedAt: Double?
+    private var polledAgentChildPID: pid_t?
+    private var polledAgentChildName: String?
 
     var info: PTYInfo {
         lock.lock()
@@ -194,6 +196,58 @@ final class PTYProcess {
             summary: agentSummary,
             updatedAt: agentUpdatedAt
         )
+    }
+
+    // Fallback for when the CLI's own hooks never fire (killed, crashed) — watches the shell's
+    // direct children by exec path, independent of hooks/notify.sh. Runs off the daemon's existing
+    // 1s reaper timer. Can't tell codex-work/codex-personal apart from codex (all exec into the same
+    // "codex" binary) — only detects that *an* agent is running, which is all this is used for.
+    private static let knownAgentBinaries: Set<String> = ["claude", "codex"]
+
+    func pollAgentChild() -> AgentStatusPayload? {
+        let matched = Self.listChildPIDs(of: pid).lazy.compactMap { childPID -> (pid_t, String)? in
+            guard let path = Self.execPath(of: childPID) else { return nil }
+            let name = (path as NSString).lastPathComponent
+            return Self.knownAgentBinaries.contains(name) ? (childPID, name) : nil
+        }.first
+
+        lock.lock()
+        let previousPID = polledAgentChildPID
+        let previousName = polledAgentChildName
+        lock.unlock()
+
+        if let (childPID, name) = matched {
+            guard childPID != previousPID else { return nil }
+            lock.lock()
+            polledAgentChildPID = childPID
+            polledAgentChildName = name
+            lock.unlock()
+            return applyAgentEvent(AgentEventParams(stableID: stableID, event: "SessionStart", agent: name, summary: nil, timestamp: nil))
+        } else if previousPID != nil {
+            lock.lock()
+            polledAgentChildPID = nil
+            polledAgentChildName = nil
+            lock.unlock()
+            return applyAgentEvent(AgentEventParams(stableID: stableID, event: "SessionEnd", agent: previousName, summary: nil, timestamp: nil))
+        }
+        return nil
+    }
+
+    private static func listChildPIDs(of pid: pid_t) -> [pid_t] {
+        let bufSize = proc_listchildpids(pid, nil, 0)
+        guard bufSize > 0 else { return [] }
+        var buf = [pid_t](repeating: 0, count: Int(bufSize) / MemoryLayout<pid_t>.size)
+        let n = proc_listchildpids(pid, &buf, bufSize)
+        guard n > 0 else { return [] }
+        return Array(buf.prefix(Int(n) / MemoryLayout<pid_t>.size))
+    }
+
+    // ponytail: PROC_PIDPATHINFO_MAXSIZE macro isn't importable into Swift — 4*MAXPATHLEN(1024) per proc_info.h
+    private static func execPath(of pid: pid_t) -> String? {
+        var buf = [CChar](repeating: 0, count: 4096)
+        let n = proc_pidpath(pid, &buf, UInt32(buf.count))
+        guard n > 0 else { return nil }
+        return String(cString: buf)
     }
 
     func write(_ data: Data) {
