@@ -30,7 +30,7 @@ struct srotaApp: App {
                     shortcuts.prefixKey = settings.shortcutPrefix
                     setupShellIntegration()
                     if let dir = settings.baseWorkingDirectory { db.scan(baseDir: dir) }
-                    Task { await runHookCheck() }
+                    Task { await startHookHealthLoop() }
                     Task.detached { installMCPServer() }
                     Task.detached { installDaemonLaunchAgent() }
                     Task { await daemonConnection.connectWithRetry() }
@@ -45,6 +45,20 @@ struct srotaApp: App {
                         }
                     }
                 }
+        }
+    }
+
+    // Re-checks periodically because other tools (e.g. another CLI's hook installer)
+    // can silently overwrite our entries in ~/.claude/settings.json after launch —
+    // the once-at-launch check alone would miss that drift for the rest of the session.
+    private static var hookHealthLoopStarted = false
+
+    private func startHookHealthLoop() async {
+        guard !Self.hookHealthLoopStarted else { return }
+        Self.hookHealthLoopStarted = true
+        while true {
+            await runHookCheck()
+            try? await Task.sleep(for: .seconds(3600))
         }
     }
 
