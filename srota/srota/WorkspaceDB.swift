@@ -19,6 +19,7 @@ struct WorkspaceSession: Identifiable {
     var lastAccessed: Int
     var isPinned: Bool
     var directory: String = ""
+    var folderPosition: Int = -1   // order of this workspace's folder among all folders; -1 for unfiled
 }
 
 struct TabRecord: Identifiable {
@@ -415,6 +416,7 @@ final class WorkspaceDB {
             name TEXT NOT NULL,
             folder_name TEXT NOT NULL DEFAULT '',
             folder_tag TEXT NOT NULL DEFAULT '',
+            folder_position INTEGER NOT NULL DEFAULT -1,
             position INTEGER NOT NULL DEFAULT 0,
             tmux_id TEXT,
             tmux_name TEXT,
@@ -446,6 +448,24 @@ final class WorkspaceDB {
         );
         """)
         migratePanesIfNeeded()
+        migrateFolderPositionIfNeeded()
+    }
+
+    private func migrateFolderPositionIfNeeded() {
+        // Add folder_position column if missing, backfilling from the previous
+        // alphabetical folder_name ordering so existing folder order doesn't jumble on upgrade.
+        let cols = rows("PRAGMA table_info(ws_workspaces)", bind: []) { stmt -> String in
+            col(stmt, 1)
+        }
+        guard !cols.contains("folder_position") else { return }
+        exec("ALTER TABLE ws_workspaces ADD COLUMN folder_position INTEGER NOT NULL DEFAULT -1")
+        let folderNames = rows(
+            "SELECT DISTINCT folder_name FROM ws_workspaces WHERE folder_name != '' ORDER BY folder_name",
+            bind: []
+        ) { stmt -> String in col(stmt, 0) }
+        for (i, name) in folderNames.enumerated() {
+            exec("UPDATE ws_workspaces SET folder_position = ? WHERE folder_name = ?", [String(i), name])
+        }
     }
 
     private func migratePanesIfNeeded() {
@@ -481,6 +501,7 @@ final class WorkspaceDB {
             "name": session.name,
             "folder_name": session.folderName,
             "folder_tag": session.folderTag,
+            "folder_position": String(session.folderPosition),
             "position": String(session.position),
             "last_cwd": session.lastCWD,
             "last_accessed": String(session.lastAccessed),
@@ -579,8 +600,8 @@ final class WorkspaceDB {
     func loadWorkspaceSessions() -> [WorkspaceSession] {
         let all = rows("""
         SELECT id, name, folder_name, folder_tag, position,
-               last_cwd, last_accessed, is_pinned, directory
-        FROM ws_workspaces ORDER BY folder_name, position
+               last_cwd, last_accessed, is_pinned, directory, folder_position
+        FROM ws_workspaces ORDER BY folder_position, folder_name, position
         """) { stmt in
             WorkspaceSession(
                 id: col(stmt, 0),
@@ -591,7 +612,8 @@ final class WorkspaceDB {
                 lastCWD: col(stmt, 5),
                 lastAccessed: Int(sqlite3_column_int(stmt, 6)),
                 isPinned: sqlite3_column_int(stmt, 7) != 0,
-                directory: col(stmt, 8)
+                directory: col(stmt, 8),
+                folderPosition: Int(sqlite3_column_int(stmt, 9))
             )
         }
 
@@ -609,7 +631,9 @@ final class WorkspaceDB {
         }
 
         return best.values.sorted {
-            $0.folderName < $1.folderName || ($0.folderName == $1.folderName && $0.position < $1.position)
+            $0.folderPosition != $1.folderPosition
+                ? $0.folderPosition < $1.folderPosition
+                : $0.position < $1.position
         }
     }
 

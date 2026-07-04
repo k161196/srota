@@ -563,6 +563,50 @@ final class TerminalManager: ObservableObject {
     }
     @Published var selectedWorkspaceID: UUID?
 
+    // Transient (unpersisted) drag-reorder UI state, shared across rows so exactly one
+    // row is ever "the" insertion target — a per-row @State bool let two adjacent rows
+    // disagree about who's highlighted when the array reorders mid-drag (see moveWorkspace).
+    @Published var reorderDropTargetID: UUID?
+    @Published var reorderDropEdge: VerticalEdge?
+    private var reorderDropAutoClear: DispatchWorkItem?
+
+    // ponytail: self-expiring safety net. dropUpdated fires continuously (many times/sec)
+    // while a drag is actually hovering, re-arming this before it ever fires — so in the
+    // normal case this never triggers. It only fires when dropUpdated calls stop without a
+    // matching dropExited/performDrop, which macOS does intermittently here for reasons not
+    // pinned down; upgrade path is finding and fixing that root cause if it recurs elsewhere.
+    func noteReorderDropUpdate(targetID: UUID?, edge: VerticalEdge?) {
+        reorderDropAutoClear?.cancel()
+        // dropUpdated fires on every mouse-move tick; skip the write (and its animation)
+        // when nothing actually changed so hovering the same row doesn't keep re-triggering
+        // a fade and reads as jitter instead of a settled highlight.
+        if targetID != reorderDropTargetID || edge != reorderDropEdge {
+            withAnimation(.easeOut(duration: 0.12)) {
+                reorderDropTargetID = targetID
+                reorderDropEdge = edge
+            }
+        }
+        guard targetID != nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            withAnimation(.easeOut(duration: 0.12)) {
+                self?.reorderDropTargetID = nil
+                self?.reorderDropEdge = nil
+            }
+        }
+        reorderDropAutoClear = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
+    func clearReorderDrop() {
+        reorderDropAutoClear?.cancel()
+        reorderDropAutoClear = nil
+        guard reorderDropTargetID != nil else { return }
+        withAnimation(.easeOut(duration: 0.12)) {
+            reorderDropTargetID = nil
+            reorderDropEdge = nil
+        }
+    }
+
     private var folderSinks: [AnyCancellable] = []
     private var workspaceSinks: [AnyCancellable] = []
 
@@ -657,7 +701,8 @@ if let idx = all.firstIndex(where: { $0.id == id }) {
         folders.removeAll { $0.id == id }
     }
 
-    func moveWorkspace(id wsID: UUID, toFolder folderID: UUID?) {
+    func moveWorkspace(id wsID: UUID, toFolder folderID: UUID?, before beforeID: UUID? = nil, after afterID: UUID? = nil) {
+        clearReorderDrop()
         var ws: Workspace?
         if let idx = workspaces.firstIndex(where: { $0.id == wsID }) {
             ws = workspaces.remove(at: idx)
@@ -669,10 +714,29 @@ if let idx = all.firstIndex(where: { $0.id == id }) {
             }
         }
         guard let ws else { return }
+        func insert(into list: inout [Workspace]) {
+            if let beforeID, let idx = list.firstIndex(where: { $0.id == beforeID }) {
+                list.insert(ws, at: idx)
+            } else if let afterID, let idx = list.firstIndex(where: { $0.id == afterID }) {
+                list.insert(ws, at: idx + 1)
+            } else {
+                list.append(ws)
+            }
+        }
         if let folderID, let folder = folders.first(where: { $0.id == folderID }) {
-            folder.workspaces.append(ws)
+            insert(into: &folder.workspaces)
         } else {
-            workspaces.append(ws)
+            insert(into: &workspaces)
+        }
+    }
+
+    func moveFolder(id folderID: UUID, before targetID: UUID) {
+        guard folderID != targetID, let idx = folders.firstIndex(where: { $0.id == folderID }) else { return }
+        let folder = folders.remove(at: idx)
+        if let targetIdx = folders.firstIndex(where: { $0.id == targetID }) {
+            folders.insert(folder, at: targetIdx)
+        } else {
+            folders.append(folder)
         }
     }
 }
@@ -1480,14 +1544,15 @@ struct ContentView: View {
     private func saveLayout() {
         let allFolders  = manager.folders
         let unfiledWSes = manager.workspaces
-        func save(ws: Workspace, folderName: String, folderTag: String, position: Int) {
+        func save(ws: Workspace, folderName: String, folderTag: String, position: Int, folderPosition: Int) {
             db.saveWorkspaceSession(WorkspaceSession(
                 id: ws.id.uuidString, name: ws.name,
                 folderName: folderName, folderTag: folderTag, position: position,
                 lastCWD: ws.currentWorkingDirectory ?? "",
                 lastAccessed: Int(Date().timeIntervalSince1970),
                 isPinned: ws.isPinned,
-                directory: ws.directory))
+                directory: ws.directory,
+                folderPosition: folderPosition))
             db.deleteTabs(workspaceID: ws.id.uuidString)
             for (ti, tab) in ws.tabs.enumerated() {
                 db.saveTab(TabRecord(
@@ -1508,10 +1573,10 @@ struct ContentView: View {
                 }
             }
         }
-        for (i, ws) in unfiledWSes.enumerated() { save(ws: ws, folderName: "", folderTag: "", position: i) }
-        for folder in allFolders {
+        for (i, ws) in unfiledWSes.enumerated() { save(ws: ws, folderName: "", folderTag: "", position: i, folderPosition: -1) }
+        for (fi, folder) in allFolders.enumerated() {
             for (i, ws) in folder.workspaces.enumerated() {
-                save(ws: ws, folderName: folder.name, folderTag: folder.tag, position: i)
+                save(ws: ws, folderName: folder.name, folderTag: folder.tag, position: i, folderPosition: fi)
             }
         }
     }
@@ -1724,6 +1789,7 @@ private struct SidebarView: View {
     @State private var isDragTargetUnfiled = false
     @State private var pinnedExpanded = true
     @State private var workspacesExpanded = true
+    @State private var unfiledListHeight: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1817,21 +1883,28 @@ private struct SidebarView: View {
                     .contentShape(Rectangle())
                     .onTapGesture { workspacesExpanded.toggle() }
                     .onDrop(of: [UTType.plainText], isTargeted: $isDragTargetUnfiled) { providers in
-                        dropWorkspace(providers, toFolder: nil, manager: manager)
+                        isDragTargetUnfiled = false
+                        return dropWorkspace(providers, toFolder: nil, manager: manager)
                     }
 
                     if workspacesExpanded {
                         VStack(spacing: 5) {
-                            ForEach(manager.workspaces.filter { !$0.isPinned }) { ws in
-                                WorkspaceSidebarItem(
-                                    workspace: ws,
-                                    manager: manager,
-                                    isSelected: manager.selectedWorkspaceID == ws.id,
-                                    isKeyboardFocused: keyboardFocusedWorkspaceID == ws.id,
-                                    onSelect: { onSelectWorkspace(ws.id) },
-                                    onClose:  { manager.closeWorkspace(id: ws.id) }
-                                )
+                            let unfiled = manager.workspaces.filter { !$0.isPinned }
+                            VStack(spacing: 5) {
+                                ForEach(unfiled) { ws in
+                                    WorkspaceSidebarItem(
+                                        workspace: ws,
+                                        manager: manager,
+                                        isSelected: manager.selectedWorkspaceID == ws.id,
+                                        isKeyboardFocused: keyboardFocusedWorkspaceID == ws.id,
+                                        onSelect: { onSelectWorkspace(ws.id) },
+                                        onClose:  { manager.closeWorkspace(id: ws.id) }
+                                    )
+                                }
                             }
+                            .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { unfiledListHeight = $0 }
+                            .onDrop(of: [.plainText], delegate: WorkspaceListReorderDropDelegate(
+                                workspaces: unfiled, folderID: nil, manager: manager, containerHeight: unfiledListHeight))
                             ForEach(manager.folders) { folder in
                                 FolderRow(
                                     folder: folder,
@@ -1915,6 +1988,7 @@ private struct FolderRow: View {
     @State private var isDragTarget = false
     @State private var isRenaming   = false
     @State private var editText     = ""
+    @State private var workspaceListHeight: CGFloat = 0
     @FocusState private var fieldFocused: Bool
 
     var body: some View {
@@ -1977,8 +2051,10 @@ private struct FolderRow: View {
             .contentShape(Rectangle())
             .onTapGesture { if !isRenaming { folder.isExpanded.toggle() } }
             .onHover { isHovered = $0 }
+            .onDrag { NSItemProvider(object: "folder:\(folder.id.uuidString)" as NSString) }
             .onDrop(of: [UTType.plainText], isTargeted: $isDragTarget) { providers in
-                dropWorkspace(providers, toFolder: folder.id, manager: manager)
+                isDragTarget = false
+                return dropOnFolderHeader(providers, target: folder, manager: manager)
             }
             .glassCard(
                 fill: isDragTarget ? Color.accentOrange.opacity(0.12) : isHovered ? Color.rowHover : Color.white.opacity(0.04),
@@ -1996,8 +2072,9 @@ private struct FolderRow: View {
             }
 
             if folder.isExpanded {
+                let filed = folder.workspaces.filter { !$0.isPinned }
                 VStack(spacing: 1) {
-                    ForEach(folder.workspaces.filter { !$0.isPinned }) { ws in
+                    ForEach(filed) { ws in
                         WorkspaceSidebarItem(
                             workspace: ws,
                             manager: manager,
@@ -2008,6 +2085,9 @@ private struct FolderRow: View {
                         )
                     }
                 }
+                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { workspaceListHeight = $0 }
+                .onDrop(of: [.plainText], delegate: WorkspaceListReorderDropDelegate(
+                    workspaces: filed, folderID: folder.id, manager: manager, containerHeight: workspaceListHeight))
                 .padding(.leading, 12)
                 .overlay(alignment: .leading) {
                     Rectangle().fill(Color.white.opacity(0.08)).frame(width: 1)
@@ -2034,11 +2114,95 @@ private struct FolderRow: View {
     }
 }
 
+// Drag payloads are prefixed so a drop target can tell a workspace drag from a folder drag.
+private func parseWorkspaceDragID(_ payload: String) -> UUID? {
+    guard payload.hasPrefix("ws:") else { return nil }
+    return UUID(uuidString: String(payload.dropFirst(3)))
+}
+
+private func parseFolderDragID(_ payload: String) -> UUID? {
+    guard payload.hasPrefix("folder:") else { return nil }
+    return UUID(uuidString: String(payload.dropFirst(7)))
+}
+
 private func dropWorkspace(_ providers: [NSItemProvider], toFolder folderID: UUID?, manager: TerminalManager) -> Bool {
     guard let provider = providers.first else { return false }
     provider.loadObject(ofClass: NSString.self) { obj, _ in
-        guard let str = obj as? String, let wsID = UUID(uuidString: str) else { return }
+        guard let str = obj as? String, let wsID = parseWorkspaceDragID(str) else { return }
         DispatchQueue.main.async { manager.moveWorkspace(id: wsID, toFolder: folderID) }
+    }
+    return true
+}
+
+/// Single drop delegate for an entire workspace list (the unfiled list, or one folder's),
+/// rather than one per row. A per-row onDrop is registered on that row's own NSView, and
+/// SwiftUI tears down and recreates those views when the list reorders mid-drag — which is
+/// exactly when a drop lands — so AppKit's dropExited/performDrop bookkeeping for that
+/// specific view can get lost, leaving the insertion line stuck. The list container itself
+/// is never recreated by a reorder, so a delegate owned by it survives the whole gesture.
+/// HIG pairs an insertion indicator with highlighting for list reordering:
+/// developer.apple.com/design/human-interface-guidelines/drag-and-drop
+private struct WorkspaceListReorderDropDelegate: DropDelegate {
+    let workspaces: [Workspace]
+    let folderID: UUID?
+    let manager: TerminalManager
+    let containerHeight: CGFloat
+
+    private var rowHeight: CGFloat {
+        workspaces.isEmpty ? 0 : containerHeight / CGFloat(workspaces.count)
+    }
+
+    private func target(for location: CGPoint) -> (id: UUID, edge: VerticalEdge)? {
+        guard !workspaces.isEmpty, rowHeight > 0 else { return nil }
+        let idx = min(workspaces.count - 1, max(0, Int(location.y / rowHeight)))
+        let withinRow = location.y - CGFloat(idx) * rowHeight
+        return (workspaces[idx].id, withinRow < rowHeight / 2 ? .top : .bottom)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        let t = target(for: info.location)
+        manager.noteReorderDropUpdate(targetID: t?.id, edge: t?.edge)
+        return DropProposal(operation: .move)
+    }
+
+    func dropExited(info: DropInfo) {
+        manager.clearReorderDrop()
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        let t = target(for: info.location)
+        manager.clearReorderDrop()
+        guard let provider = info.itemProviders(for: [.plainText]).first else { return false }
+        provider.loadObject(ofClass: NSString.self) { obj, _ in
+            guard let str = obj as? String, let wsID = parseWorkspaceDragID(str) else { return }
+            DispatchQueue.main.async {
+                guard let t, t.id != wsID else {
+                    manager.moveWorkspace(id: wsID, toFolder: folderID)
+                    return
+                }
+                if t.edge == .bottom {
+                    manager.moveWorkspace(id: wsID, toFolder: folderID, after: t.id)
+                } else {
+                    manager.moveWorkspace(id: wsID, toFolder: folderID, before: t.id)
+                }
+            }
+        }
+        return true
+    }
+}
+
+/// Folder header accepts both a workspace drag (files into the folder) and a folder drag (reorders folders).
+private func dropOnFolderHeader(_ providers: [NSItemProvider], target: WorkspaceFolder, manager: TerminalManager) -> Bool {
+    guard let provider = providers.first else { return false }
+    provider.loadObject(ofClass: NSString.self) { obj, _ in
+        guard let str = obj as? String else { return }
+        DispatchQueue.main.async {
+            if let folderID = parseFolderDragID(str) {
+                manager.moveFolder(id: folderID, before: target.id)
+            } else if let wsID = parseWorkspaceDragID(str) {
+                manager.moveWorkspace(id: wsID, toFolder: target.id)
+            }
+        }
     }
     return true
 }
@@ -2140,6 +2304,8 @@ private struct WorkspaceRow: View {
     @State private var editText = ""
     @FocusState private var fieldFocused: Bool
 
+    private var isDropTarget: Bool { manager.reorderDropTargetID == workspace.id }
+
     private func startRename() {
         editText = workspace.name
         isRenaming = true
@@ -2223,17 +2389,22 @@ private struct WorkspaceRow: View {
         .padding(.trailing, 8)
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isSelected ? Color.rowSelected : isKeyboardFocused ? Color.accentOrange.opacity(0.12) : isHovered ? Color.rowHover : Color.clear)
+        .background(isDropTarget ? Color.accentOrange.opacity(0.15) : isSelected ? Color.rowSelected : isKeyboardFocused ? Color.accentOrange.opacity(0.12) : isHovered ? Color.rowHover : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 5))
         .overlay(
             RoundedRectangle(cornerRadius: 5)
-                .stroke(isSelected ? Color.accentOrange.opacity(0.5) : isKeyboardFocused ? Color.accentOrange.opacity(0.55) : Color.clear, lineWidth: 1)
+                .stroke(isDropTarget ? Color.accentOrange.opacity(0.6) : isSelected ? Color.accentOrange.opacity(0.5) : isKeyboardFocused ? Color.accentOrange.opacity(0.55) : Color.clear, lineWidth: 1)
         )
+        .overlay(alignment: manager.reorderDropEdge == .bottom ? .bottom : .top) {
+            if isDropTarget {
+                Rectangle().fill(Color.accentOrange).frame(height: 2)
+            }
+        }
         .padding(.horizontal, 4)
         .contentShape(Rectangle())
         .onTapGesture { if !isRenaming { onSelect() } }
         .onHover { isHovered = $0 }
-        .onDrag { NSItemProvider(object: workspace.id.uuidString as NSString) }
+        .onDrag { NSItemProvider(object: "ws:\(workspace.id.uuidString)" as NSString) }
         .contextMenu {
             Button(workspace.isPinned ? "Unpin" : "Pin") {
                 workspace.isPinned.toggle()
