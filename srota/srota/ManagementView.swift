@@ -255,7 +255,12 @@ private struct AgentsPanel: View {
     private var rows: [DaemonAgentRow] {
         let states = daemon.agentStatesByStableID
         let openTitles = Dictionary(uniqueKeysWithValues: manager.allWorkspaces.flatMap { ws in
-            ws.tabs.flatMap { tab in tab.panes.map { ($0.daemonStableID, tab.displayName) } }
+            ws.tabs.flatMap { tab in
+                tab.panes.compactMap { pane -> (String, String)? in
+                    guard let name = tab.paneNames[pane.id], !name.isEmpty else { return nil }
+                    return (pane.daemonStableID, name)
+                }
+            }
         })
         return allPanes
             .filter { $0.exitCode == nil }
@@ -2546,6 +2551,32 @@ private struct RepoDetailView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .help("Open in workspace")
+                                Button {
+                                    NotificationCenter.default.post(
+                                        name: .srotaOpenWorkspace,
+                                        object: nil,
+                                        userInfo: [
+                                            "path":               path,
+                                            "name":               pr.headRefName,
+                                            "folderName":         repo.name,
+                                            "folderTag":          "",
+                                            "createWorktree":     false,
+                                            "projectPath":        path,
+                                            "branchRef":          pr.headRefName,
+                                            "launchAgentName":    "GitHub PR Review Agent",
+                                            "launchAgentContext": "Review PR #\(pr.number): \(pr.title) (base: \(defaultBranch))."
+                                        ]
+                                    )
+                                } label: {
+                                    Image(systemName: "sparkles")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Color.mgAccent)
+                                        .frame(width: 22, height: 22)
+                                        .background(Color.mgAccent.opacity(0.12))
+                                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                                }
+                                .buttonStyle(.plain)
+                                .help("Review with Agent")
                             } else {
                                 Button("Worktree") { checkoutPR(pr) }
                                     .buttonStyle(.plain)

@@ -131,6 +131,21 @@ The default branch clone is the git base; issue branches are worktrees created f
 
     static let jiraIssuesFirstMessage = "Hello! What would you like to do with Jira issues today?"
 
+    static let reviewPRSystemPrompt = """
+You are a GitHub PR Review Agent with full access to the `gh` CLI, running inside a worktree already checked out to the PR's branch.
+
+Review the pull request:
+- `gh pr view --json title,body,author,baseRefName,headRefName,url` for context
+- `gh pr diff` to see the changes
+- `gh pr checks` for CI status
+
+Summarize what changed, call out risks/bugs/missing tests, and report whether CI is passing. Cite file/line where relevant.
+
+Do not approve, merge, or request changes (`gh pr review`, `gh pr merge`) without the user explicitly asking you to.
+"""
+
+    static let reviewPRFirstMessage = "Review this pull request."
+
     init() { loadEnsureBuiltIns() }
 
     func load() {
@@ -196,6 +211,9 @@ The default branch clone is the git base; issue branches are worktrees created f
         } else if agent.name == "Jira Issues Agent" {
             saveSystemPrompt(Self.jiraIssuesSystemPrompt, to: agent.instructionsPath)
             if let path = agent.firstMessagePath { saveFirstMessage(Self.jiraIssuesFirstMessage, to: path) }
+        } else if agent.name == "GitHub PR Review Agent" {
+            saveSystemPrompt(Self.reviewPRSystemPrompt, to: agent.instructionsPath)
+            if let path = agent.firstMessagePath { saveFirstMessage(Self.reviewPRFirstMessage, to: path) }
         }
     }
 
@@ -208,6 +226,9 @@ The default branch clone is the git base; issue branches are worktrees created f
         }
         if !agents.contains(where: { $0.name == "Jira Issues Agent" && $0.isBuiltIn }) {
             seedJira()
+        }
+        if !agents.contains(where: { $0.name == "GitHub PR Review Agent" && $0.isBuiltIn }) {
+            seedReviewPR()
         }
     }
 
@@ -237,6 +258,23 @@ The default branch clone is the git base; issue branches are worktrees created f
         agents.insert(AgentItem(
             name: "Jira Issues Agent",
             description: "Manage Jira issues via jira CLI",
+            instructionsPath: sysPath,
+            firstMessagePath: firstPath,
+            runInTempDir: false,
+            isBuiltIn: true
+        ), at: insertIdx)
+        save()
+    }
+
+    private func seedReviewPR() {
+        let sysPath   = Self.promptsDir + "/review_pr_system.md"
+        let firstPath = Self.promptsDir + "/review_pr_first.md"
+        try? Self.reviewPRSystemPrompt.write(toFile: sysPath,   atomically: true, encoding: .utf8)
+        try? Self.reviewPRFirstMessage.write(toFile: firstPath, atomically: true, encoding: .utf8)
+        let insertIdx = agents.filter { $0.isBuiltIn }.count
+        agents.insert(AgentItem(
+            name: "GitHub PR Review Agent",
+            description: "Reviews a checked-out PR via gh CLI",
             instructionsPath: sysPath,
             firstMessagePath: firstPath,
             runInTempDir: false,

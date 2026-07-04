@@ -702,6 +702,7 @@ struct ContentView: View {
     @Environment(FeatureAgentFocus.self) private var agentFocus
     @Environment(KeyboardShortcutManager.self) private var shortcuts
     @Environment(PresetsStore.self) private var presetsStore
+    @Environment(AgentsStore.self) private var agentsStore
     @State private var sidebarVisible = true
     @State private var sidebarWidth: CGFloat = 220
     @State private var showBaseDirectoryPicker = false
@@ -858,11 +859,22 @@ struct ContentView: View {
             let folder = folderName.map { manager.folder(named: $0, tag: folderTag) }
             let folderID = folder?.id
 
+            let launchAgentName    = note.userInfo?["launchAgentName"] as? String
+            let launchAgentContext = note.userInfo?["launchAgentContext"] as? String
+            @MainActor func launchAgentIfRequested() {
+                guard let launchAgentName,
+                      let agent = agentsStore.agents.first(where: { $0.name == launchAgentName }) else { return }
+                let systemPrompt = agentsStore.systemPrompt(for: agent)
+                let firstMessage = (launchAgentContext?.isEmpty == false) ? launchAgentContext! : agentsStore.firstMessage(for: agent)
+                launchAgent(agent: agent, systemPrompt: systemPrompt, firstMessage: firstMessage, preset: nil)
+            }
+
             // if workspace with same name already exists in that folder, just select it
             let candidatePool = folder?.workspaces ?? manager.workspaces
             if let existing = candidatePool.first(where: { $0.name == wsName }) {
                 manager.selectWorkspace(id: existing.id)
                 managementTab = .workspaces
+                launchAgentIfRequested()
                 return
             }
 
@@ -901,6 +913,7 @@ struct ContentView: View {
                         managementTab = .workspaces
                         saveLayout()
                         if let baseDir = settings.baseWorkingDirectory { db.scan(baseDir: baseDir) }
+                        launchAgentIfRequested()
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                             manager.selectedWorkspace?.selectedTab?.focusedViewState.send("pwd\n")
                         }
@@ -919,6 +932,7 @@ struct ContentView: View {
                 }
                 managementTab = .workspaces
                 saveLayout()
+                launchAgentIfRequested()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                     manager.selectedWorkspace?.selectedTab?.focusedViewState.send("pwd\n")
                 }
@@ -1447,9 +1461,12 @@ func collectRunningAgents(_ manager: TerminalManager) -> [RunningAgent] {
                 tab.panes.compactMap { pane -> RunningAgent? in
                     guard let state = states[pane.daemonStableID],
                           let status = state.status else { return nil }
+                    let paneCWD = resolveCWD(pane.viewState.workingDirectory) ?? pane.initialCWD
+                    let title = tab.paneNames[pane.id].flatMap { $0.isEmpty ? nil : $0 }
+                        ?? smartTitle(for: paneCWD)
                     return RunningAgent(
                         workspaceID: ws.id, tabID: tab.id, paneID: pane.id, stableID: pane.daemonStableID,
-                        title: tab.displayName, status: status, agentName: state.agent, updatedAt: state.updatedAt
+                        title: title, status: status, agentName: state.agent, updatedAt: state.updatedAt
                     )
                 }
             }
