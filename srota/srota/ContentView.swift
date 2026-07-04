@@ -1554,6 +1554,14 @@ struct AgentRow: View {
     var body: some View {
         Button(action: onSelect) {
             HStack(spacing: 8) {
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(agent.status.color)
+                    .frame(width: 28, height: 28)
+                    .background(LinearGradient(colors: [agent.status.color.opacity(0.3), agent.status.color.opacity(0.15)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(agent.status.color.opacity(0.3), lineWidth: 1))
+
                 VStack(alignment: .leading, spacing: 2) {
                     Text(agent.title)
                         .font(.system(size: 12, weight: .medium))
@@ -1667,7 +1675,8 @@ private struct SidebarView: View {
                                     isSelected: manager.selectedWorkspaceID == ws.id,
                                     onSelect: { onSelectWorkspace(ws.id) },
                                     onClose:  { manager.closeWorkspace(id: ws.id) },
-                                    folderTag: manager.folders.first { $0.workspaces.contains { $0.id == ws.id } }?.name
+                                    folderName: manager.folders.first { $0.workspaces.contains { $0.id == ws.id } }?.name,
+                                    folderTag: manager.folders.first { $0.workspaces.contains { $0.id == ws.id } }?.tag
                                 )
                             }
                         }
@@ -1696,26 +1705,29 @@ private struct SidebarView: View {
                     }
 
                     if workspacesExpanded {
-                        ForEach(manager.workspaces.filter { !$0.isPinned }) { ws in
-WorkspaceSidebarItem(
-                                workspace: ws,
-                                manager: manager,
-                    isSelected: manager.selectedWorkspaceID == ws.id,
-                    isKeyboardFocused: keyboardFocusedWorkspaceID == ws.id,
-                    onSelect: { onSelectWorkspace(ws.id) },
-                                onClose:  { manager.closeWorkspace(id: ws.id) }
-                            )
+                        VStack(spacing: 5) {
+                            ForEach(manager.workspaces.filter { !$0.isPinned }) { ws in
+                                WorkspaceSidebarItem(
+                                    workspace: ws,
+                                    manager: manager,
+                                    isSelected: manager.selectedWorkspaceID == ws.id,
+                                    isKeyboardFocused: keyboardFocusedWorkspaceID == ws.id,
+                                    onSelect: { onSelectWorkspace(ws.id) },
+                                    onClose:  { manager.closeWorkspace(id: ws.id) }
+                                )
+                            }
+                            ForEach(manager.folders) { folder in
+                                FolderRow(
+                                    folder: folder,
+                                    manager: manager,
+                                    keyboardFocusedWorkspaceID: keyboardFocusedWorkspaceID,
+                                    onSelectWorkspace: onSelectWorkspace,
+                                    startRenaming: newFolderID == folder.id,
+                                    onRenameHandled: { newFolderID = nil }
+                                )
+                            }
                         }
-                        ForEach(manager.folders) { folder in
-                            FolderRow(
-                                folder: folder,
-                    manager: manager,
-                    keyboardFocusedWorkspaceID: keyboardFocusedWorkspaceID,
-                    onSelectWorkspace: onSelectWorkspace,
-                    startRenaming: newFolderID == folder.id,
-                                onRenameHandled: { newFolderID = nil }
-                            )
-                        }
+                        .padding(.top, 2)
                     }
                 }
             }
@@ -1846,22 +1858,19 @@ private struct FolderRow: View {
                 .padding(.vertical, 6)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                isDragTarget ? Color.accentOrange.opacity(0.12) :
-                isHovered    ? Color.rowHover : Color.clear
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 5))
-            .overlay(
-                isDragTarget ? RoundedRectangle(cornerRadius: 5)
-                    .stroke(Color.accentOrange.opacity(0.5), lineWidth: 1) : nil
-            )
-            .padding(.horizontal, 4)
             .contentShape(Rectangle())
             .onTapGesture { if !isRenaming { folder.isExpanded.toggle() } }
             .onHover { isHovered = $0 }
             .onDrop(of: [UTType.plainText], isTargeted: $isDragTarget) { providers in
                 dropWorkspace(providers, toFolder: folder.id, manager: manager)
             }
+            .glassCard(
+                fill: isDragTarget ? Color.accentOrange.opacity(0.12) : isHovered ? Color.rowHover : Color.white.opacity(0.04),
+                borderTop: isDragTarget ? Color.accentOrange.opacity(0.5) : Color.white.opacity(0.1),
+                borderBottom: isDragTarget ? Color.accentOrange.opacity(0.5) : Color.white.opacity(0.06),
+                radius: 7
+            )
+            .padding(.horizontal, 4)
             .contextMenu {
                 Button("Rename") { beginRename() }
                 Divider()
@@ -1871,17 +1880,24 @@ private struct FolderRow: View {
             }
 
             if folder.isExpanded {
-                ForEach(folder.workspaces.filter { !$0.isPinned }) { ws in
-                    WorkspaceSidebarItem(
-                        workspace: ws,
-                        manager: manager,
-                    isSelected: manager.selectedWorkspaceID == ws.id,
-                    isKeyboardFocused: keyboardFocusedWorkspaceID == ws.id,
-                    onSelect: { onSelectWorkspace(ws.id) },
-                        onClose:  { manager.closeWorkspace(id: ws.id) },
-                        indented: true
-                    )
+                VStack(spacing: 1) {
+                    ForEach(folder.workspaces.filter { !$0.isPinned }) { ws in
+                        WorkspaceSidebarItem(
+                            workspace: ws,
+                            manager: manager,
+                            isSelected: manager.selectedWorkspaceID == ws.id,
+                            isKeyboardFocused: keyboardFocusedWorkspaceID == ws.id,
+                            onSelect: { onSelectWorkspace(ws.id) },
+                            onClose:  { manager.closeWorkspace(id: ws.id) }
+                        )
+                    }
                 }
+                .padding(.leading, 12)
+                .overlay(alignment: .leading) {
+                    Rectangle().fill(Color.white.opacity(0.08)).frame(width: 1)
+                        .padding(.leading, 16)
+                }
+                .padding(.top, 2)
             }
         }
         .onAppear {
@@ -1917,10 +1933,12 @@ private struct PinnedWorkspaceCard: View {
     let isSelected: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
+    var folderName: String? = nil
     var folderTag: String? = nil
 
     @Environment(WorkspaceDB.self) private var db
     @State private var isHovered = false
+    @State private var isPulsing = false
 
     private var initial: String {
         String(workspace.name.trimmingCharacters(in: .whitespaces).first ?? "W").uppercased()
@@ -1928,14 +1946,14 @@ private struct PinnedWorkspaceCard: View {
 
     var body: some View {
         Button(action: onSelect) {
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 Text(initial)
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(Color.accentOrange)
-                    .frame(width: 30, height: 30)
-                    .background(LinearGradient(colors: [Color.accentOrange.opacity(0.35), Color.accentOrange.opacity(0.15)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
-                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Color.accentOrange.opacity(0.32), lineWidth: 1))
+                    .frame(width: 36, height: 36)
+                    .background(LinearGradient(colors: [Color.accentOrange.opacity(0.4), Color.accentOrange.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.accentOrange.opacity(0.35), lineWidth: 1))
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 5) {
@@ -1952,6 +1970,9 @@ private struct PinnedWorkspaceCard: View {
                     HStack(spacing: 4) {
                         Text("\(workspace.tabs.count) tab\(workspace.tabs.count == 1 ? "" : "s")")
                             .fixedSize()
+                        if let folderName, !folderName.isEmpty {
+                            Text("· \(folderName)")
+                        }
                         if let folderTag, !folderTag.isEmpty {
                             Text("· \(folderTag)")
                                 .truncationMode(.tail)
@@ -1971,17 +1992,28 @@ private struct PinnedWorkspaceCard: View {
                             .foregroundStyle(Color.labelSecondary)
                     }
                     .buttonStyle(.plain)
+                } else if let status = workspace.displayStatus {
+                    Circle()
+                        .fill(status.color)
+                        .frame(width: 7, height: 7)
+                        .shadow(color: status.color.opacity(isPulsing ? 0.9 : 0.4), radius: isPulsing ? 6 : 2)
+                        .onAppear {
+                            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                                isPulsing = true
+                            }
+                        }
                 }
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .glassCard(
             fill: isSelected ? Color.white.opacity(0.08) : Color.white.opacity(0.045),
             borderTop: Color.white.opacity(isSelected ? 0.22 : 0.14),
-            borderBottom: Color.white.opacity(0.07)
+            borderBottom: Color.white.opacity(0.07),
+            radius: 10
         )
         .padding(.horizontal, 8)
         .padding(.bottom, 6)
@@ -2004,7 +2036,6 @@ private struct WorkspaceRow: View {
     let isKeyboardFocused: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
-    var indented: Bool = false
     var isExpanded: Bool? = nil
     var onToggleExpand: (() -> Void)? = nil
 
@@ -2097,7 +2128,7 @@ private struct WorkspaceRow: View {
         .padding(.trailing, 8)
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isSelected ? Color.rowSelected : isKeyboardFocused ? Color.accentOrange.opacity(0.12) : isHovered ? Color.rowHover : indented ? Color.white.opacity(0.02) : Color.clear)
+        .background(isSelected ? Color.rowSelected : isKeyboardFocused ? Color.accentOrange.opacity(0.12) : isHovered ? Color.rowHover : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 5))
         .overlay(
             RoundedRectangle(cornerRadius: 5)
@@ -2146,7 +2177,6 @@ private struct WorkspaceSidebarItem: View {
     let isKeyboardFocused: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
-    var indented: Bool = false
 
     var body: some View {
         WorkspaceRow(
@@ -2156,7 +2186,6 @@ private struct WorkspaceSidebarItem: View {
             isKeyboardFocused: isKeyboardFocused,
             onSelect: onSelect,
             onClose: onClose,
-            indented: indented,
             isExpanded: nil,
             onToggleExpand: nil
         )
