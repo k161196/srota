@@ -681,7 +681,6 @@ if let idx = all.firstIndex(where: { $0.id == id }) {
 
 private extension Color {
     static let tabBarBg     = Color(red: 0.08, green: 0.08, blue: 0.09)
-    static let tabActiveBg  = Color(red: 0.17, green: 0.17, blue: 0.19)
     static let tabHoverBg   = Color(red: 0.13, green: 0.13, blue: 0.15)
     static let accentOrange = Color(red: 1.0, green: 0.45, blue: 0.15)
     static let labelPrimary = Color(red: 0.92, green: 0.92, blue: 0.93)
@@ -1468,6 +1467,20 @@ private extension Color {
     static let sectionHeader  = Color(red: 0.92, green: 0.92, blue: 0.93).opacity(0.28)
 }
 
+/// Liquid-glass card chrome: translucent fill + a top-to-bottom border gradient
+/// that fakes the light bevel a real glass surface would catch.
+extension View {
+    func glassCard(fill: Color, borderTop: Color, borderBottom: Color, radius: CGFloat = 8) -> some View {
+        self
+            .background(fill)
+            .clipShape(RoundedRectangle(cornerRadius: radius))
+            .overlay(
+                RoundedRectangle(cornerRadius: radius)
+                    .strokeBorder(LinearGradient(colors: [borderTop, borderBottom], startPoint: .top, endPoint: .bottom), lineWidth: 1)
+            )
+    }
+}
+
 extension AgentRunStatus {
     var color: Color {
         switch self {
@@ -1536,31 +1549,42 @@ struct AgentRow: View {
     let agent: RunningAgent
     let onSelect: () -> Void
     @State private var isHovered = false
+    @State private var isPulsing = false
 
     var body: some View {
         Button(action: onSelect) {
             HStack(spacing: 8) {
-                Circle()
-                    .fill(agent.status.color)
-                    .frame(width: 7, height: 7)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(agent.title)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.labelPrimary)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.labelPrimary.opacity(0.9))
                         .lineLimit(1)
                     Text("\(agent.status.label.lowercased()) · \(agent.agentName)")
-                        .font(.system(size: 11))
+                        .font(.system(size: 10))
                         .foregroundStyle(agent.status.color)
                         .lineLimit(1)
                 }
-                Spacer(minLength: 0)
+                Spacer(minLength: 4)
+                Circle()
+                    .fill(agent.status.color)
+                    .frame(width: 7, height: 7)
+                    .shadow(color: agent.status.color.opacity(isPulsing ? 0.9 : 0.4), radius: isPulsing ? 6 : 2)
+                    .onAppear {
+                        withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                            isPulsing = true
+                        }
+                    }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(isHovered ? Color.rowHover : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .glassCard(
+            fill: agent.status.color.opacity(isHovered ? 0.12 : 0.08),
+            borderTop: agent.status.color.opacity(0.38),
+            borderBottom: agent.status.color.opacity(0.22)
+        )
         .onHover { isHovered = $0 }
     }
 }
@@ -1588,8 +1612,8 @@ private struct SidebarView: View {
                             .font(.system(size: 13, weight: .regular))
                     }
                     .foregroundStyle(Color.labelSecondary)
-                    .padding(.leading, 16)
-                    .padding(.vertical, 12)
+                    .padding(.leading, 10)
+                    .padding(.vertical, 8)
                 }
                 .buttonStyle(.plain)
                 Spacer()
@@ -1600,12 +1624,16 @@ private struct SidebarView: View {
                     Image(systemName: "folder.badge.plus")
                         .font(.system(size: 12))
                         .foregroundStyle(Color.labelSecondary)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
                 }
                 .buttonStyle(.plain)
                 .help("New Folder")
             }
+            .glassCard(fill: Color.white.opacity(0.04), borderTop: Color.white.opacity(0.14), borderBottom: Color.white.opacity(0.07))
+            .padding(.horizontal, 8)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
 
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(spacing: 0) {
@@ -1626,28 +1654,23 @@ private struct SidebarView: View {
                                 .font(.system(size: 11, weight: .regular).monospacedDigit())
                                 .foregroundStyle(Color.sectionHeader.opacity(0.7))
                         }
-                        .padding(.horizontal, 16)
+                        .padding(.horizontal, 12)
                         .padding(.bottom, 5)
                         .contentShape(Rectangle())
                         .onTapGesture { pinnedExpanded.toggle() }
 
                         if pinnedExpanded {
                             ForEach(manager.pinnedWorkspaces) { ws in
-                                WorkspaceSidebarItem(
+                                PinnedWorkspaceCard(
                                     workspace: ws,
                                     manager: manager,
                                     isSelected: manager.selectedWorkspaceID == ws.id,
-                                    isKeyboardFocused: keyboardFocusedWorkspaceID == ws.id,
                                     onSelect: { onSelectWorkspace(ws.id) },
                                     onClose:  { manager.closeWorkspace(id: ws.id) },
                                     folderTag: manager.folders.first { $0.workspaces.contains { $0.id == ws.id } }?.name
                                 )
                             }
                         }
-
-                        Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 6)
                     }
 
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -1663,7 +1686,7 @@ private struct SidebarView: View {
                             .font(.system(size: 11, weight: .regular).monospacedDigit())
                             .foregroundStyle(Color.sectionHeader.opacity(0.7))
                     }
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, 12)
                     .padding(.bottom, 5)
                     .background(isDragTargetUnfiled ? Color.accentOrange.opacity(0.08) : Color.clear)
                     .contentShape(Rectangle())
@@ -1717,8 +1740,7 @@ private struct AgentsSidebarSection: View {
         let agents = collectRunningAgents(manager)
         if !agents.isEmpty {
             VStack(spacing: 0) {
-                Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1)
-                    .padding(.vertical, 6)
+                Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1)
 
                 HStack {
                     Text("AGENTS")
@@ -1728,13 +1750,17 @@ private struct AgentsSidebarSection: View {
                     Spacer()
                     Button("All", action: onShowAll)
                         .buttonStyle(.plain)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(Color.sectionHeader)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 1)
+                        .glassCard(fill: Color.white.opacity(0.05), borderTop: Color.white.opacity(0.1), borderBottom: Color.white.opacity(0.06), radius: 4)
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 4)
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+                .padding(.bottom, 6)
 
-                VStack(spacing: 0) {
+                VStack(spacing: 6) {
                     ForEach(agents.prefix(Self.cap)) { agent in
                         AgentRow(agent: agent) {
                             onSelect(agent.workspaceID, agent.tabID, agent.paneID)
@@ -1742,6 +1768,7 @@ private struct AgentsSidebarSection: View {
                     }
                 }
                 .padding(.horizontal, 8)
+                .padding(.bottom, 8)
             }
         }
     }
@@ -1766,7 +1793,6 @@ private struct FolderRow: View {
         VStack(spacing: 0) {
             // Folder header row
             HStack(spacing: 0) {
-                Rectangle().fill(Color.clear).frame(width: 3)
                 HStack(spacing: 8) {
                     Image(systemName: folder.isExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 9, weight: .medium))
@@ -1815,20 +1841,21 @@ private struct FolderRow: View {
                             .foregroundStyle(Color.sectionHeader.opacity(0.7))
                     }
                 }
-                .padding(.leading, 10)
-                .padding(.trailing, 10)
-                .padding(.vertical, 7)
+                .padding(.leading, 8)
+                .padding(.trailing, 8)
+                .padding(.vertical, 6)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 isDragTarget ? Color.accentOrange.opacity(0.12) :
                 isHovered    ? Color.rowHover : Color.clear
             )
+            .clipShape(RoundedRectangle(cornerRadius: 5))
             .overlay(
-                isDragTarget ? RoundedRectangle(cornerRadius: 4)
-                    .stroke(Color.accentOrange.opacity(0.5), lineWidth: 1)
-                    .padding(.horizontal, 4) : nil
+                isDragTarget ? RoundedRectangle(cornerRadius: 5)
+                    .stroke(Color.accentOrange.opacity(0.5), lineWidth: 1) : nil
             )
+            .padding(.horizontal, 4)
             .contentShape(Rectangle())
             .onTapGesture { if !isRenaming { folder.isExpanded.toggle() } }
             .onHover { isHovered = $0 }
@@ -1884,6 +1911,92 @@ private func dropWorkspace(_ providers: [NSItemProvider], toFolder folderID: UUI
     return true
 }
 
+private struct PinnedWorkspaceCard: View {
+    @ObservedObject var workspace: Workspace
+    @ObservedObject var manager: TerminalManager
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+    var folderTag: String? = nil
+
+    @Environment(WorkspaceDB.self) private var db
+    @State private var isHovered = false
+
+    private var initial: String {
+        String(workspace.name.trimmingCharacters(in: .whitespaces).first ?? "W").uppercased()
+    }
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 8) {
+                Text(initial)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Color.accentOrange)
+                    .frame(width: 30, height: 30)
+                    .background(LinearGradient(colors: [Color.accentOrange.opacity(0.35), Color.accentOrange.opacity(0.15)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Color.accentOrange.opacity(0.32), lineWidth: 1))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 5) {
+                        Text(workspace.name)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Color.labelPrimary)
+                            .lineLimit(1)
+                        if isSelected {
+                            Image(systemName: "bolt.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color.accentOrange)
+                        }
+                    }
+                    HStack(spacing: 4) {
+                        Text("\(workspace.tabs.count) tab\(workspace.tabs.count == 1 ? "" : "s")")
+                            .fixedSize()
+                        if let folderTag, !folderTag.isEmpty {
+                            Text("· \(folderTag)")
+                                .truncationMode(.tail)
+                        }
+                    }
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.sectionHeader)
+                    .lineLimit(1)
+                }
+
+                Spacer(minLength: 4)
+
+                if isHovered {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(Color.labelSecondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .glassCard(
+            fill: isSelected ? Color.white.opacity(0.08) : Color.white.opacity(0.045),
+            borderTop: Color.white.opacity(isSelected ? 0.22 : 0.14),
+            borderBottom: Color.white.opacity(0.07)
+        )
+        .padding(.horizontal, 8)
+        .padding(.bottom, 6)
+        .onHover { isHovered = $0 }
+        .contextMenu {
+            Button("Unpin") {
+                workspace.isPinned.toggle()
+                db.toggleWorkspacePin(id: workspace.id.uuidString)
+            }
+            Divider()
+            Button("Close Workspace", role: .destructive) { onClose() }
+        }
+    }
+}
+
 private struct WorkspaceRow: View {
     @ObservedObject var workspace: Workspace
     @ObservedObject var manager: TerminalManager
@@ -1894,7 +2007,6 @@ private struct WorkspaceRow: View {
     var indented: Bool = false
     var isExpanded: Bool? = nil
     var onToggleExpand: (() -> Void)? = nil
-    var folderTag: String? = nil
 
     @Environment(WorkspaceDB.self) private var db
     @State private var isHovered = false
@@ -1932,80 +2044,66 @@ private struct WorkspaceRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            Rectangle()
-                .fill(isSelected ? Color.accentRail : .clear)
-                .frame(width: 3)
+        HStack(spacing: 9) {
+            Image(systemName: "square.stack")
+                .font(.system(size: 10))
+                .foregroundStyle(isSelected ? Color.accentOrange : Color.labelSecondary)
 
-            HStack(spacing: 9) {
-                Image(systemName: "square.stack")
-                    .font(.system(size: 10))
-                    .foregroundStyle(isSelected ? Color.accentOrange : Color.labelSecondary)
-
-                if isRenaming {
-                    TextField("", text: $editText)
+            if isRenaming {
+                TextField("", text: $editText)
+                    .font(.system(size: 13, weight: isSelected ? .medium : .regular))
+                    .foregroundStyle(Color.labelPrimary)
+                    .textFieldStyle(.plain)
+                    .focused($fieldFocused)
+                    .onSubmit { commitRename() }
+                    .onExitCommand { isRenaming = false }
+            } else {
+                HStack(spacing: 4) {
+                    Text(workspace.name)
                         .font(.system(size: 13, weight: isSelected ? .medium : .regular))
-                        .foregroundStyle(Color.labelPrimary)
-                        .textFieldStyle(.plain)
-                        .focused($fieldFocused)
-                        .onSubmit { commitRename() }
-                        .onExitCommand { isRenaming = false }
-                } else {
-                    VStack(alignment: .leading, spacing: 1) {
-                        HStack(spacing: 4) {
-                            Text(workspace.name)
-                                .font(.system(size: 13, weight: isSelected ? .medium : .regular))
-                                .foregroundStyle(isSelected ? Color.labelPrimary : Color.labelSecondary)
-                                .lineLimit(1)
-                            if workspace.isPinned {
-                                Image(systemName: "pin.fill")
-                                    .font(.system(size: 8))
-                                    .foregroundStyle(Color.accentOrange.opacity(0.7))
-                            }
-                        }
-                        HStack(spacing: 4) {
-                            Text("\(workspace.tabs.count) tab\(workspace.tabs.count == 1 ? "" : "s")")
-                                .font(.system(size: 10))
-                                .foregroundStyle(Color.sectionHeader)
-                            if let folderTag, !folderTag.isEmpty {
-                                Text("· \(folderTag)")
-                                    .font(.system(size: 10, weight: .medium))
-                                    .foregroundStyle(Color.accentOrange.opacity(0.7))
-                                    .lineLimit(1)
-                            }
-                        }
+                        .foregroundStyle(isSelected ? Color.labelPrimary : Color.labelSecondary)
+                        .lineLimit(1)
+                    if workspace.isPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 8))
+                            .foregroundStyle(Color.accentOrange.opacity(0.7))
                     }
-                }
-
-                Spacer(minLength: 4)
-
-                if let expanded = isExpanded, let toggle = onToggleExpand {
-                    Button(action: toggle) {
-                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 8, weight: .medium))
-                            .foregroundStyle(Color.sectionHeader)
-                    }
-                    .buttonStyle(.plain)
-                } else if isHovered && !isRenaming {
-                    Button(action: onClose) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(Color.labelSecondary)
-                    }
-                    .buttonStyle(.plain)
                 }
             }
-            .padding(.leading, 12)
-            .padding(.trailing, 10)
-            .padding(.vertical, 9)
+
+            Spacer(minLength: 4)
+
+            if let expanded = isExpanded, let toggle = onToggleExpand {
+                Button(action: toggle) {
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 8, weight: .medium))
+                        .foregroundStyle(Color.sectionHeader)
+                }
+                .buttonStyle(.plain)
+            } else if isHovered && !isRenaming {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Color.labelSecondary)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Text("\(workspace.tabs.count)")
+                    .font(.system(size: 10).monospacedDigit())
+                    .foregroundStyle(Color.sectionHeader.opacity(0.7))
+            }
         }
+        .padding(.leading, 8)
+        .padding(.trailing, 8)
+        .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isSelected ? Color.rowSelected : isKeyboardFocused ? Color.accentOrange.opacity(0.12) : isHovered ? Color.rowHover : indented ? Color.white.opacity(0.025) : Color.clear)
+        .background(isSelected ? Color.rowSelected : isKeyboardFocused ? Color.accentOrange.opacity(0.12) : isHovered ? Color.rowHover : indented ? Color.white.opacity(0.02) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 5))
         .overlay(
-            RoundedRectangle(cornerRadius: 6)
+            RoundedRectangle(cornerRadius: 5)
                 .stroke(isKeyboardFocused ? Color.accentOrange.opacity(0.55) : Color.clear, lineWidth: 1)
-                .padding(.horizontal, 4)
         )
+        .padding(.horizontal, 4)
         .contentShape(Rectangle())
         .onTapGesture { if !isRenaming { onSelect() } }
         .onHover { isHovered = $0 }
@@ -2049,7 +2147,6 @@ private struct WorkspaceSidebarItem: View {
     let onSelect: () -> Void
     let onClose: () -> Void
     var indented: Bool = false
-    var folderTag: String? = nil
 
     var body: some View {
         WorkspaceRow(
@@ -2061,8 +2158,7 @@ private struct WorkspaceSidebarItem: View {
             onClose: onClose,
             indented: indented,
             isExpanded: nil,
-            onToggleExpand: nil,
-            folderTag: folderTag
+            onToggleExpand: nil
         )
     }
 }
@@ -2204,18 +2300,12 @@ private struct TabChip: View {
  }
  .padding(.horizontal, 10)
  .frame(height: 28)
-        .background(
-            RoundedRectangle(cornerRadius: 5)
-                .fill(isActive ? Color.tabActiveBg : (isHovered ? Color.tabHoverBg : Color.clear))
+        .glassCard(
+            fill: isActive ? Color.accentOrange.opacity(0.1) : (isHovered ? Color.tabHoverBg : Color.clear),
+            borderTop: isActive ? Color.accentOrange.opacity(0.45) : Color.clear,
+            borderBottom: isActive ? Color.accentOrange.opacity(0.25) : Color.clear,
+            radius: 6
         )
-        .overlay(alignment: .bottom) {
-            if isActive {
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(Color.accentOrange)
-                    .frame(height: 2)
-                    .padding(.horizontal, 6)
-            }
-        }
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .contextMenu {

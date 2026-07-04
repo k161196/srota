@@ -177,15 +177,18 @@ private struct TabButton: View {
                     .font(.system(size: 12, weight: isActive ? .medium : .regular))
             }
             .foregroundStyle(isActive ? Color.mgAccent : (hovered ? Color.mgLabel : Color.mgMuted))
-            .padding(.horizontal, 14)
-            .frame(height: 36)
-            .overlay(alignment: .bottom) {
-                if isActive {
-                    Rectangle().fill(Color.mgAccent).frame(height: 2)
-                }
-            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .glassCard(
+            fill: isActive ? Color.mgAccent.opacity(0.12) : Color.clear,
+            borderTop: isActive ? Color.mgAccent.opacity(0.4) : Color.clear,
+            borderBottom: isActive ? Color.mgAccent.opacity(0.22) : Color.clear,
+            radius: 7
+        )
+        .padding(.horizontal, 2)
         .onHover { hovered = $0 }
     }
 }
