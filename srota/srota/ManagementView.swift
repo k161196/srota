@@ -533,10 +533,10 @@ private struct EntityList<T: Identifiable & Hashable, Row: View, Form: View>: Vi
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Color.mgAccent)
                         .frame(width: 28, height: 28)
-                        .background(Color.mgAccent.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 6)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
@@ -544,7 +544,7 @@ private struct EntityList<T: Identifiable & Hashable, Row: View, Form: View>: Vi
             .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
 
             ScrollView {
-                LazyVStack(spacing: 0) {
+                LazyVStack(spacing: 6) {
                     ForEach(items) { item in
                         HStack(spacing: 0) {
                             rowContent(item)
@@ -560,11 +560,17 @@ private struct EntityList<T: Identifiable & Hashable, Row: View, Form: View>: Vi
                                 .padding(.trailing, 12)
                             }
                         }
-                        .padding(.horizontal, 20)
+                        .padding(.horizontal, 14)
                         .frame(maxWidth: .infinity, minHeight: 40)
-                        .background(hovered == item ? Color.mgRowHover : Color.mgRow)
+                        .contentShape(Rectangle())
                         .onHover { hovered = $0 ? item : nil }
-                        .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
+                        .glassCard(
+                            fill: hovered == item ? Color.mgRowHover : Color.mgRow,
+                            borderTop: Color.white.opacity(0.08),
+                            borderBottom: Color.white.opacity(0.04),
+                            radius: 7
+                        )
+                        .padding(.horizontal, 20)
                     }
                     if items.isEmpty {
                         Text("No items yet — press + to add")
@@ -714,14 +720,17 @@ private struct SelectableRow<T: Identifiable & Hashable, Content: View>: View {
         }
         .padding(.horizontal, 14)
         .frame(maxWidth: .infinity, minHeight: 40)
-        .background(isSelected ? Color.mgAccent.opacity(0.12) : hovered ? Color.mgRowHover : Color.mgRow)
-        .overlay(alignment: .leading) {
-            if isSelected { Rectangle().fill(Color.mgAccent).frame(width: 2) }
-        }
-        .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { hovered = $0 }
+        .glassCard(
+            fill: isSelected ? Color.mgAccent.opacity(0.12) : hovered ? Color.mgRowHover : Color.mgRow,
+            borderTop: isSelected ? Color.mgAccent.opacity(0.4) : Color.white.opacity(0.08),
+            borderBottom: isSelected ? Color.mgAccent.opacity(0.22) : Color.white.opacity(0.04),
+            radius: 7
+        )
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
     }
 }
 
@@ -757,8 +766,7 @@ private struct SplitPanel<T: Identifiable & Hashable, Row: View, Detail: View, F
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(Color.mgAccent)
                                 .frame(width: 28, height: 28)
-                                .background(Color.mgAccent.opacity(0.12))
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 6)
                         }
                         .buttonStyle(.plain)
                         .help("Refresh")
@@ -768,8 +776,7 @@ private struct SplitPanel<T: Identifiable & Hashable, Row: View, Detail: View, F
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(Color.mgAccent)
                             .frame(width: 28, height: 28)
-                            .background(Color.mgAccent.opacity(0.12))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 6)
                     }
                     .buttonStyle(.plain)
                 }
@@ -923,8 +930,7 @@ private struct ProjectsPanel: View {
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(Color.mgAccent)
                             .frame(width: 28, height: 28)
-                            .background(Color.mgAccent.opacity(0.12))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 6)
                     }
                     .buttonStyle(.plain)
                 }
@@ -1002,14 +1008,17 @@ private struct ProjectListRow: View {
         }
         .padding(.horizontal, 14)
         .frame(maxWidth: .infinity, minHeight: 40)
-        .background(isSelected ? Color.mgAccent.opacity(0.12) : hovered ? Color.mgRowHover : Color.mgRow)
-        .overlay(alignment: .leading) {
-            if isSelected { Rectangle().fill(Color.mgAccent).frame(width: 2) }
-        }
-        .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { hovered = $0 }
+        .glassCard(
+            fill: isSelected ? Color.mgAccent.opacity(0.12) : hovered ? Color.mgRowHover : Color.mgRow,
+            borderTop: isSelected ? Color.mgAccent.opacity(0.4) : Color.white.opacity(0.08),
+            borderBottom: isSelected ? Color.mgAccent.opacity(0.22) : Color.white.opacity(0.04),
+            radius: 7
+        )
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
     }
 }
 
@@ -1609,8 +1618,7 @@ private struct FeaturesPanel: View {
                     Image(systemName: "plus")
                         .font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.mgAccent)
                         .frame(width: 28, height: 28)
-                        .background(Color.mgAccent.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 6)
                 }
                 .buttonStyle(.plain)
             }
@@ -1723,11 +1731,14 @@ private struct FeatureTabChip: View {
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 5)
-        .background(isActive ? Color.mgSurface : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(isActive ? Color.mgBorder : Color.clear))
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
+        .glassCard(
+            fill: isActive ? Color.mgAccent.opacity(0.1) : Color.clear,
+            borderTop: isActive ? Color.mgAccent.opacity(0.45) : Color.clear,
+            borderBottom: isActive ? Color.mgAccent.opacity(0.25) : Color.clear,
+            radius: 6
+        )
     }
 }
 
@@ -1827,8 +1838,7 @@ private struct FeatureInfoSidebar: View {
                                 Image(systemName: "plus")
                                     .font(.system(size: 10, weight: .semibold)).foregroundStyle(Color.mgAccent)
                                     .frame(width: 22, height: 22)
-                                    .background(Color.mgAccent.opacity(0.12))
-                                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                                    .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 4)
                             }
                             .buttonStyle(.plain)
                         }
@@ -2137,8 +2147,7 @@ private struct RepoDetailView: View {
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(Color.mgAccent)
                             .frame(width: 22, height: 22)
-                            .background(Color.mgAccent.opacity(0.12))
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 4)
                     }
                     .buttonStyle(.plain)
                 }
@@ -2203,8 +2212,7 @@ private struct RepoDetailView: View {
                                             .font(.system(size: 10))
                                             .foregroundStyle(Color.mgAccent)
                                             .frame(width: 22, height: 22)
-                                            .background(Color.mgAccent.opacity(0.12))
-                                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                                            .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 4)
                                     }
                                     .buttonStyle(.plain)
                                     .help("Open in workspace")
@@ -2572,8 +2580,7 @@ private struct RepoDetailView: View {
                                     .font(.system(size: 10))
                                     .foregroundStyle(Color.mgAccent)
                                     .frame(width: 22, height: 22)
-                                    .background(Color.mgAccent.opacity(0.12))
-                                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                                    .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 4)
                             }
                             .buttonStyle(.plain)
                             .help("Open on GitHub")
@@ -2599,8 +2606,7 @@ private struct RepoDetailView: View {
                                         .font(.system(size: 10))
                                         .foregroundStyle(Color.mgAccent)
                                         .frame(width: 22, height: 22)
-                                        .background(Color.mgAccent.opacity(0.12))
-                                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                                        .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 4)
                                 }
                                 .buttonStyle(.plain)
                                 .help("Open in workspace")
@@ -2611,8 +2617,7 @@ private struct RepoDetailView: View {
                                         .font(.system(size: 10))
                                         .foregroundStyle(Color.mgAccent)
                                         .frame(width: 22, height: 22)
-                                        .background(Color.mgAccent.opacity(0.12))
-                                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                                        .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 4)
                                 }
                                 .buttonStyle(.plain)
                                 .help("Review with Agent")
@@ -2996,8 +3001,7 @@ private struct IssuesPanel: View {
                     Image(systemName: "plus")
                         .font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.mgAccent)
                         .frame(width: 28, height: 28)
-                        .background(Color.mgAccent.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 6)
                 }
                 .buttonStyle(.plain)
             }
@@ -3032,8 +3036,7 @@ private struct IssuesPanel: View {
                                         .font(.system(size: 10))
                                         .foregroundStyle(Color.mgAccent)
                                         .frame(width: 22, height: 22)
-                                        .background(Color.mgAccent.opacity(0.12))
-                                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                                        .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 4)
                                 }
                                 .buttonStyle(.plain)
                                 .help("Open workspace")
