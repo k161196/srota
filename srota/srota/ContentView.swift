@@ -1152,7 +1152,7 @@ struct ContentView: View {
             .transition(.opacity.combined(with: .scale(scale: 0.97)))
                 }
         if shortcuts.showHunk {
-            LazygitOverlay(cwd: shortcuts.hunkCWD, title: "hunk", icon: "square.split.diagonal.2x2", launcherPath: makeToolLauncher(name: "hunk", command: "hunk show")) {
+            LazygitOverlay(cwd: shortcuts.hunkCWD, title: "hunk", icon: "square.split.diagonal.2x2", launcherPath: makeToolLauncher(name: "hunk", command: "hunk diff")) {
                 let prevState = manager.selectedWorkspace?.selectedTab?.focusedViewState
                 withAnimation(.easeInOut(duration: 0.15)) { shortcuts.showHunk = false }
                 if let prevState {
