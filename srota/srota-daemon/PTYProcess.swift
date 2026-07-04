@@ -198,14 +198,18 @@ final class PTYProcess {
         )
     }
 
-    // Fallback for when the CLI's own hooks never fire (killed, crashed) — watches the shell's
-    // direct children by exec path, independent of hooks/notify.sh. Runs off the daemon's existing
-    // 1s reaper timer. Can't tell codex-work/codex-personal apart from codex (all exec into the same
-    // "codex" binary) — only detects that *an* agent is running, which is all this is used for.
+    // Fallback for when the CLI's own hooks never fire (killed, crashed, or — as with a custom
+    // CODEX_HOME profile like codex-work/codex-personal — never configured), independent of
+    // hooks/notify.sh. Runs off the daemon's existing 1s reaper timer. Walks the shell's full
+    // descendant tree, not just direct children: `codex` is a node shebang shim that spawns
+    // (not execs) the real native "codex" binary as its own child, so that binary sits one level
+    // below the shell. Can't tell codex-work/codex-personal apart from codex (all end up spawning
+    // the same "codex" binary) — only detects that *an* agent is running, which is all this is used for.
     private static let knownAgentBinaries: Set<String> = ["claude", "codex"]
+    private static let maxDescendantDepth = 4
 
     func pollAgentChild() -> AgentStatusPayload? {
-        let matched = Self.listChildPIDs(of: pid).lazy.compactMap { childPID -> (pid_t, String)? in
+        let matched = Self.listDescendantPIDs(of: pid).lazy.compactMap { childPID -> (pid_t, String)? in
             guard let path = Self.execPath(of: childPID) else { return nil }
             let name = (path as NSString).lastPathComponent
             return Self.knownAgentBinaries.contains(name) ? (childPID, name) : nil
@@ -233,13 +237,33 @@ final class PTYProcess {
         return nil
     }
 
+    // proc_listchildpids only succeeds when the caller IS the target's direct parent — fine for
+    // the daemon's own forked shell (depth 1), but it silently returns nothing when asked for a
+    // grandchild's children (e.g. the shell's "node" child isn't the daemon's child). Walk the
+    // system-wide process table instead (same mechanism `ps`/`pgrep` use), which has no such
+    // ancestry restriction.
     private static func listChildPIDs(of pid: pid_t) -> [pid_t] {
-        let bufSize = proc_listchildpids(pid, nil, 0)
-        guard bufSize > 0 else { return [] }
-        var buf = [pid_t](repeating: 0, count: Int(bufSize) / MemoryLayout<pid_t>.size)
-        let n = proc_listchildpids(pid, &buf, bufSize)
-        guard n > 0 else { return [] }
-        return Array(buf.prefix(Int(n) / MemoryLayout<pid_t>.size))
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
+        var size = 0
+        guard sysctl(&mib, u_int(mib.count), nil, &size, nil, 0) == 0, size > 0 else { return [] }
+        let stride = MemoryLayout<kinfo_proc>.stride
+        var procs = [kinfo_proc](repeating: kinfo_proc(), count: size / stride)
+        guard sysctl(&mib, u_int(mib.count), &procs, &size, nil, 0) == 0 else { return [] }
+        return procs.prefix(size / stride).filter { $0.kp_eproc.e_ppid == pid }.map { $0.kp_proc.p_pid }
+    }
+
+    // BFS over descendants (children, grandchildren, ...) up to maxDescendantDepth — a shebang
+    // shim (env -> node -> real binary) can put the process we care about several levels down.
+    private static func listDescendantPIDs(of pid: pid_t, maxDepth: Int = maxDescendantDepth) -> [pid_t] {
+        var result: [pid_t] = []
+        var frontier = [pid]
+        for _ in 0..<maxDepth {
+            let children = frontier.flatMap { listChildPIDs(of: $0) }
+            guard !children.isEmpty else { break }
+            result.append(contentsOf: children)
+            frontier = children
+        }
+        return result
     }
 
     // ponytail: PROC_PIDPATHINFO_MAXSIZE macro isn't importable into Swift — 4*MAXPATHLEN(1024) per proc_info.h
