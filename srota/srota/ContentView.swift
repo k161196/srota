@@ -687,6 +687,81 @@ private extension Color {
     static let labelMuted   = Color(red: 0.92, green: 0.92, blue: 0.93).opacity(0.40)
 }
 
+// MARK: - Sidebar resize handle (AppKit-driven, same technique as PaneResizingView)
+
+// A SwiftUI DragGesture on a 1-3pt Rectangle loses tracking on fast mouse
+// moves because gesture recognition needs the cursor to stay inside that
+// thin hit area every frame. AppKit gives a view that receives mouseDown
+// implicit capture of all mouseDragged/mouseUp events until release, even
+// once the cursor leaves its bounds - the same mechanism PaneResizingView
+// relies on for jitter-free dragging.
+private final class SidebarResizeHandleView: NSView {
+    var onDragChanged: (CGFloat) -> Void = { _ in }
+    var onDragEnded: () -> Void = {}
+    var onHoverChanged: (Bool) -> Void = { _ in }
+
+    private var dragStartWindowX: CGFloat?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.activeInActiveApp, .mouseEnteredAndExited, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .resizeLeftRight)
+    }
+
+    override func mouseEntered(with event: NSEvent) { onHoverChanged(true) }
+
+    override func mouseExited(with event: NSEvent) {
+        if dragStartWindowX == nil { onHoverChanged(false) }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        dragStartWindowX = event.locationInWindow.x
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let startX = dragStartWindowX else { return }
+        onDragChanged(event.locationInWindow.x - startX)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard dragStartWindowX != nil else { return }
+        dragStartWindowX = nil
+        onDragEnded()
+        if !bounds.contains(convert(event.locationInWindow, from: nil)) {
+            onHoverChanged(false)
+        }
+    }
+}
+
+private struct SidebarResizeHandle: NSViewRepresentable {
+    let onDragChanged: (CGFloat) -> Void
+    let onDragEnded: () -> Void
+    let onHoverChanged: (Bool) -> Void
+
+    func makeNSView(context: Context) -> SidebarResizeHandleView {
+        let v = SidebarResizeHandleView()
+        v.onDragChanged = onDragChanged
+        v.onDragEnded = onDragEnded
+        v.onHoverChanged = onHoverChanged
+        return v
+    }
+
+    func updateNSView(_ v: SidebarResizeHandleView, context: Context) {
+        v.onDragChanged = onDragChanged
+        v.onDragEnded = onDragEnded
+        v.onHoverChanged = onHoverChanged
+    }
+}
+
 // MARK: - Sidebar divider
 
 private struct SidebarDivider: View {
@@ -696,23 +771,68 @@ private struct SidebarDivider: View {
     @State private var dragStartWidth: CGFloat? = nil
 
     var body: some View {
-        Rectangle()
-            .fill(isHovered ? Color.accentOrange.opacity(0.6) : Color.white.opacity(0.06))
-            .frame(width: SidebarResizeLogic.dividerThickness(sidebarVisible: sidebarVisible, isHovered: isHovered))
-            .opacity(sidebarVisible ? 1 : 0)
-            .onHover { isHovered = $0 }
-            .allowsHitTesting(sidebarVisible)
-            .gesture(
-                DragGesture(minimumDistance: 1)
-                .onChanged { v in
+        ZStack {
+            Rectangle()
+                .fill(Color.white.opacity(0.06))
+                .frame(width: 1)
+            if isHovered {
+                Image(systemName: "arrow.left.and.right")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Color.accentOrange)
+                    .frame(width: 16, height: 16)
+                    .background(Circle().fill(Color.tabBarBg))
+                    .overlay(Circle().stroke(Color.white.opacity(0.1), lineWidth: 1))
+                    .transition(.opacity)
+            }
+            SidebarResizeHandle(
+                onDragChanged: { dx in
                     let startWidth = dragStartWidth ?? width
                     dragStartWidth = startWidth
-                    width = SidebarResizeLogic.updatedWidth(startWidth: startWidth, translationWidth: v.translation.width)
-                }
-                .onEnded { _ in dragStartWidth = nil }
+                    width = SidebarResizeLogic.updatedWidth(startWidth: startWidth, translationWidth: dx)
+                },
+                onDragEnded: { dragStartWidth = nil },
+                onHoverChanged: { isHovered = $0 }
             )
-            .animation(.easeOut(duration: 0.12), value: isHovered)
-            .help("Drag to resize sidebar")
+        }
+        .frame(width: 9)
+        .opacity(sidebarVisible ? 1 : 0)
+        .allowsHitTesting(sidebarVisible)
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .help("Drag to resize sidebar")
+    }
+}
+
+// MARK: - Resizable sidebar container
+
+// Owns `width` locally so dragging only re-renders this subtree, not the
+// whole ContentView.body (same reasoning as the pane resizer, which scopes
+// its drag state to the small per-tab TerminalTab instead of the root view).
+private struct ResizableSidebar: View {
+    @ObservedObject var manager: TerminalManager
+    let sidebarVisible: Bool
+    let keyboardFocusedWorkspaceID: UUID?
+    let onAdd: () -> Void
+    let onSelectWorkspace: (UUID) -> Void
+    let onSelectAgentTab: (UUID, UUID, UUID) -> Void
+    let onShowAllAgents: () -> Void
+
+    @State private var width: CGFloat = 220
+
+    var body: some View {
+        SidebarView(
+            manager: manager,
+            keyboardFocusedWorkspaceID: keyboardFocusedWorkspaceID,
+            onAdd: onAdd,
+            onSelectWorkspace: onSelectWorkspace,
+            onSelectAgentTab: onSelectAgentTab,
+            onShowAllAgents: onShowAllAgents
+        )
+        .frame(width: width, alignment: .leading) // pin inner layout so it doesn't reflow every animation frame
+        .frame(width: sidebarVisible ? width : 0, alignment: .leading)
+        .clipped()
+        .allowsHitTesting(sidebarVisible)
+
+        SidebarDivider(sidebarVisible: sidebarVisible, width: $width)
     }
 }
 
@@ -729,7 +849,6 @@ struct ContentView: View {
     @Environment(PresetsStore.self) private var presetsStore
     @Environment(AgentsStore.self) private var agentsStore
     @State private var sidebarVisible = true
-    @State private var sidebarWidth: CGFloat = 220
     @State private var showBaseDirectoryPicker = false
     @State private var managementTab: ManagementTab = .workspaces
     @State private var restoredSessions = false
@@ -780,8 +899,9 @@ struct ContentView: View {
         )
         ZStack {
         HStack(spacing: 0) {
-                SidebarView(
+                ResizableSidebar(
                     manager: manager,
+                    sidebarVisible: sidebarVisible,
                     keyboardFocusedWorkspaceID: sidebarKeyboardFocus ? sidebarHighlightedWorkspaceID : nil,
                     onAdd: {
                         clearSidebarKeyboardFocus()
@@ -799,11 +919,6 @@ struct ContentView: View {
                     },
                     onShowAllAgents: { managementTab = .agents }
                 )
-            .frame(width: sidebarVisible ? sidebarWidth : 0)
-            .clipped()
-            .allowsHitTesting(sidebarVisible)
-
-            SidebarDivider(sidebarVisible: sidebarVisible, width: $sidebarWidth)
 
                 VStack(spacing: 0) {
                     if let ws = manager.selectedWorkspace {

@@ -7,11 +7,6 @@ enum SidebarResizeLogic {
     static func updatedWidth(startWidth: CGFloat, translationWidth: CGFloat) -> CGFloat {
         max(minWidth, min(maxWidth, startWidth + translationWidth))
     }
-
-    static func dividerThickness(sidebarVisible: Bool, isHovered: Bool) -> CGFloat {
-        guard sidebarVisible else { return 0 }
-        return isHovered ? 3 : 1
-    }
 }
 
 enum PaneResizeLogic {
