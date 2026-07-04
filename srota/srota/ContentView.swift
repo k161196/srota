@@ -1886,7 +1886,7 @@ private struct SidebarView: View {
                     .background(isDragTargetUnfiled ? Color.accentOrange.opacity(0.08) : Color.clear)
                     .contentShape(Rectangle())
                     .onTapGesture { workspacesExpanded.toggle() }
-                    .onDrop(of: [.workspaceDrag], isTargeted: $isDragTargetUnfiled) { providers in
+                    .onDrop(of: [.plainText], isTargeted: $isDragTargetUnfiled) { providers in
                         isDragTargetUnfiled = false
                         return dropWorkspace(providers, toFolder: nil, manager: manager)
                     }
@@ -1907,7 +1907,7 @@ private struct SidebarView: View {
                                 }
                             }
                             .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { unfiledListHeight = $0 }
-                            .onDrop(of: [.workspaceDrag], delegate: WorkspaceListReorderDropDelegate(
+                            .onDrop(of: [.plainText], delegate: WorkspaceListReorderDropDelegate(
                                 workspaces: unfiled, folderID: nil, manager: manager, containerHeight: unfiledListHeight))
                             VStack(spacing: 0) {
                                 ForEach(manager.folders) { folder in
@@ -1928,7 +1928,7 @@ private struct SidebarView: View {
                             }
                             .coordinateSpace(name: "foldersList")
                             .onPreferenceChange(FolderFramePreferenceKey.self) { folderFrames = $0 }
-                            .onDrop(of: [.folderDrag], delegate: FolderListReorderDropDelegate(
+                            .onDrop(of: [.plainText], delegate: FolderListReorderDropDelegate(
                                 folders: manager.folders, frames: folderFrames, manager: manager))
                         }
                         .padding(.top, 2)
@@ -2068,8 +2068,8 @@ private struct FolderRow: View {
             .contentShape(Rectangle())
             .onTapGesture { if !isRenaming { folder.isExpanded.toggle() } }
             .onHover { isHovered = $0 }
-            .onDrag { idProvider(folder.id, as: .folderDrag) }
-            .onDrop(of: [.workspaceDrag], isTargeted: $isDragTarget) { providers in
+            .onDrag { idProvider(folder.id, kind: .folder) }
+            .onDrop(of: [.plainText], isTargeted: $isDragTarget) { providers in
                 isDragTarget = false
                 return fileWorkspaceIntoFolder(providers, target: folder, manager: manager)
             }
@@ -2103,7 +2103,7 @@ private struct FolderRow: View {
                     }
                 }
                 .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { workspaceListHeight = $0 }
-                .onDrop(of: [.workspaceDrag], delegate: WorkspaceListReorderDropDelegate(
+                .onDrop(of: [.plainText], delegate: WorkspaceListReorderDropDelegate(
                     workspaces: filed, folderID: folder.id, manager: manager, containerHeight: workspaceListHeight))
                 .padding(.leading, 12)
                 .overlay(alignment: .leading) {
@@ -2136,42 +2136,40 @@ private struct FolderRow: View {
     }
 }
 
-// Workspace and folder drags use distinct UTTypes rather than a shared plain-text string
-// prefix. That matters for routing, not just parsing: `.onDrop(of:)` filters by type before
-// ever calling a delegate, so a workspace-list drop target declared `of: [.workspaceDrag]`
-// never receives dropUpdated/performDrop for a folder drag at all — it used to (both were
-// plain text, distinguishable only by an async string decode, too late to stop the workspace
-// list from lighting up for a folder drag).
-private extension UTType {
-    // exportedAs synthesizes an ad-hoc type for private in-app use — unlike UTType(_:), it
-    // doesn't require the identifier to already be a known/declared type, which is why the
-    // plain lookup initializer crashed here (returns nil for an identifier nothing declares).
-    static let workspaceDrag = UTType(exportedAs: "com.srota.drag.workspace")
-    static let folderDrag = UTType(exportedAs: "com.srota.drag.folder")
-}
+// Workspace and folder drags are both plain text (a UUID string) but tagged with a distinct
+// `suggestedName` "kind" marker. A dedicated UTType per kind would be the more idiomatic way
+// to let `.onDrop(of:)` filter by type before any delegate runs, but that requires the type
+// to be declared in Info.plist — this target has none (GENERATE_INFOPLIST_FILE with no backing
+// file), and an undeclared custom UTType silently fails to match on the receiving side even
+// though it constructs fine. `suggestedName` is a plain stored property, readable synchronously
+// on the destination's NSItemProvider with no UTI machinery involved, which is enough to keep
+// a folder drag from being treated as a workspace drag (or vice versa) with zero project
+// configuration. Upgrade path: declare proper exported UTIs in Info.plist and switch back.
+private enum DragKind: String { case workspace, folder }
 
-private func idProvider(_ id: UUID, as type: UTType) -> NSItemProvider {
-    let provider = NSItemProvider()
-    provider.registerDataRepresentation(forTypeIdentifier: type.identifier, visibility: .all) { completion in
-        completion(Data(id.uuidString.utf8), nil)
-        return nil
-    }
+private func idProvider(_ id: UUID, kind: DragKind) -> NSItemProvider {
+    let provider = NSItemProvider(object: id.uuidString as NSString)
+    provider.suggestedName = kind.rawValue
     return provider
 }
 
-private func loadDraggedID(from info: DropInfo, type: UTType, _ completion: @escaping (UUID?) -> Void) {
-    guard let provider = info.itemProviders(for: [type]).first else { return completion(nil) }
-    provider.loadDataRepresentation(for: type) { data, _ in
-        let id = data.flatMap { String(data: $0, encoding: .utf8) }.flatMap(UUID.init(uuidString:))
+private func dragKind(_ providers: [NSItemProvider]) -> DragKind? {
+    providers.first?.suggestedName.flatMap(DragKind.init(rawValue:))
+}
+
+private func loadDraggedID(from providers: [NSItemProvider], _ completion: @escaping (UUID?) -> Void) {
+    guard let provider = providers.first else { return completion(nil) }
+    provider.loadObject(ofClass: NSString.self) { obj, _ in
+        let id = (obj as? String).flatMap(UUID.init(uuidString:))
         DispatchQueue.main.async { completion(id) }
     }
 }
 
 private func dropWorkspace(_ providers: [NSItemProvider], toFolder folderID: UUID?, manager: TerminalManager) -> Bool {
-    guard let provider = providers.first else { return false }
-    provider.loadDataRepresentation(for: .workspaceDrag) { data, _ in
-        guard let data, let str = String(data: data, encoding: .utf8), let wsID = UUID(uuidString: str) else { return }
-        DispatchQueue.main.async { manager.moveWorkspace(id: wsID, toFolder: folderID) }
+    guard dragKind(providers) == .workspace else { return false }
+    loadDraggedID(from: providers) { wsID in
+        guard let wsID else { return }
+        manager.moveWorkspace(id: wsID, toFolder: folderID)
     }
     return true
 }
@@ -2202,6 +2200,7 @@ private struct WorkspaceListReorderDropDelegate: DropDelegate {
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
+        guard dragKind(info.itemProviders(for: [.plainText])) == .workspace else { return nil }
         let t = target(for: info.location)
         manager.noteReorderDropUpdate(targetID: t?.id, edge: t?.edge)
         return DropProposal(operation: .move)
@@ -2212,9 +2211,10 @@ private struct WorkspaceListReorderDropDelegate: DropDelegate {
     }
 
     func performDrop(info: DropInfo) -> Bool {
+        guard dragKind(info.itemProviders(for: [.plainText])) == .workspace else { return false }
         let t = target(for: info.location)
         manager.clearReorderDrop()
-        loadDraggedID(from: info, type: .workspaceDrag) { wsID in
+        loadDraggedID(from: info.itemProviders(for: [.plainText])) { wsID in
             guard let wsID else { return }
             guard let t, t.id != wsID else {
                 manager.moveWorkspace(id: wsID, toFolder: folderID)
@@ -2255,6 +2255,7 @@ private struct FolderListReorderDropDelegate: DropDelegate {
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
+        guard dragKind(info.itemProviders(for: [.plainText])) == .folder else { return nil }
         let t = target(for: info.location)
         manager.noteReorderDropUpdate(targetID: t?.id, edge: t?.edge)
         return DropProposal(operation: .move)
@@ -2265,9 +2266,10 @@ private struct FolderListReorderDropDelegate: DropDelegate {
     }
 
     func performDrop(info: DropInfo) -> Bool {
+        guard dragKind(info.itemProviders(for: [.plainText])) == .folder else { return false }
         let t = target(for: info.location)
         manager.clearReorderDrop()
-        loadDraggedID(from: info, type: .folderDrag) { folderID in
+        loadDraggedID(from: info.itemProviders(for: [.plainText])) { folderID in
             guard let folderID, let t, t.id != folderID else { return }
             if t.edge == .bottom {
                 manager.moveFolder(id: folderID, after: t.id)
@@ -2282,10 +2284,10 @@ private struct FolderListReorderDropDelegate: DropDelegate {
 /// Dropping a workspace onto a folder's header files it into that folder (not a reorder —
 /// folder reordering is handled by FolderListReorderDropDelegate on the folders container).
 private func fileWorkspaceIntoFolder(_ providers: [NSItemProvider], target: WorkspaceFolder, manager: TerminalManager) -> Bool {
-    guard let provider = providers.first else { return false }
-    provider.loadDataRepresentation(for: .workspaceDrag) { data, _ in
-        guard let data, let str = String(data: data, encoding: .utf8), let wsID = UUID(uuidString: str) else { return }
-        DispatchQueue.main.async { manager.moveWorkspace(id: wsID, toFolder: target.id) }
+    guard dragKind(providers) == .workspace else { return false }
+    loadDraggedID(from: providers) { wsID in
+        guard let wsID else { return }
+        manager.moveWorkspace(id: wsID, toFolder: target.id)
     }
     return true
 }
@@ -2487,7 +2489,7 @@ private struct WorkspaceRow: View {
         .contentShape(Rectangle())
         .onTapGesture { if !isRenaming { onSelect() } }
         .onHover { isHovered = $0 }
-        .onDrag { idProvider(workspace.id, as: .workspaceDrag) }
+        .onDrag { idProvider(workspace.id, kind: .workspace) }
         .contextMenu {
             Button(workspace.isPinned ? "Unpin" : "Pin") {
                 workspace.isPinned.toggle()
