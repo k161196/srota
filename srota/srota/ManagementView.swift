@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import GhosttyTerminal
 
 struct FeatureAgentTab: Identifiable {
@@ -1922,6 +1923,30 @@ private func gitURLComponents(_ url: String) -> (org: String, repo: String)? {
     return (parts[0], parts[1])
 }
 
+// Locates the gh CLI binary; GUI apps don't inherit the login shell's PATH.
+private func resolveGHPath() -> String? {
+    for path in ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"] {
+        if FileManager.default.fileExists(atPath: path) { return path }
+    }
+    let p = Process(); let pipe = Pipe()
+    p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    p.arguments = ["-lc", "which gh"]
+    p.standardOutput = pipe; p.standardError = Pipe()
+    try? p.run(); p.waitUntilExit()
+    let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return out.isEmpty ? nil : out
+}
+
+private struct PullRequestEntry: Identifiable, Decodable {
+    let number: Int
+    let title: String
+    let headRefName: String
+    let author: Author
+    struct Author: Decodable { let login: String }
+    var id: Int { number }
+}
+
 // MARK: - Repos panel
 
 private struct ReposPanel: View {
@@ -1975,8 +2000,27 @@ private struct RepoDetailView: View {
     @State private var pendingPath = ""
     @State private var checkoutError: String? = nil
     @State private var fetchingBranches = false
+    @State private var detailTab: RepoDetailTab = .branches
+    @State private var pullRequests: [PullRequestEntry] = []
+    @State private var prSearch = ""
+    @State private var fetchingPRs = false
+    @State private var prError: String? = nil
+    @State private var checkingOutPR: Int? = nil
+
+    enum RepoDetailTab { case branches, prs }
 
     var branches: [RepoBranch] { db.repoBranches.filter { $0.repoID == repo.id } }
+
+    var githubComponents: (org: String, repo: String)? { gitURLComponents(repoURL) }
+
+    var filteredPRs: [PullRequestEntry] {
+        prSearch.isEmpty ? pullRequests : pullRequests.filter {
+            $0.title.localizedCaseInsensitiveContains(prSearch)
+                || $0.headRefName.localizedCaseInsensitiveContains(prSearch)
+                || $0.author.login.localizedCaseInsensitiveContains(prSearch)
+                || String($0.number).contains(prSearch)
+        }
+    }
 
     var sortedFilteredBranches: [RepoBranch] {
         let filtered = branchSearch.isEmpty ? branches
@@ -2018,6 +2062,21 @@ private struct RepoDetailView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 6))
             }
 
+            if githubComponents != nil {
+                HStack(spacing: 4) {
+                    FeatureTabChip(label: "Branches", isActive: detailTab == .branches, isCloseable: false,
+                                   onSelect: { detailTab = .branches }, onClose: {})
+                    FeatureTabChip(label: "PRs", isActive: detailTab == .prs, isCloseable: false,
+                                   onSelect: {
+                                       detailTab = .prs
+                                       if pullRequests.isEmpty && !fetchingPRs { fetchPRs() }
+                                   }, onClose: {})
+                }
+            }
+
+            if detailTab == .prs && githubComponents != nil {
+                prSection
+            } else {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("BRANCHES")
@@ -2152,6 +2211,7 @@ private struct RepoDetailView: View {
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
                 }
             }
+            }
         }
         .sheet(isPresented: $showAddBranch) {
             RepoBranchSheet(repoID: repo.id, existing: nil, db: db, isPresented: $showAddBranch)
@@ -2179,6 +2239,7 @@ private struct RepoDetailView: View {
 
     private func load() {
         name = repo.name; repoURL = repo.url; defaultBranch = repo.defaultBranch
+        detailTab = .branches; pullRequests = []; prError = nil
     }
 
     private func branchPath(_ branchName: String) -> String? {
@@ -2303,6 +2364,205 @@ private struct RepoDetailView: View {
                     db.addRepoBranch(repoID: repoID, name: n)
                 }
                 fetchingBranches = false
+            }
+        }
+    }
+
+    private func fetchPRs() {
+        guard let (org, repoName) = githubComponents else { return }
+        fetchingPRs = true
+        prError = nil
+        Task.detached {
+            guard let ghPath = resolveGHPath() else {
+                await MainActor.run {
+                    prError = "gh CLI not found — install from https://cli.github.com"
+                    fetchingPRs = false
+                }
+                return
+            }
+            let p = Process(); let outPipe = Pipe(); let errPipe = Pipe()
+            p.executableURL = URL(fileURLWithPath: ghPath)
+            p.arguments = ["pr", "list", "--repo", "\(org)/\(repoName)", "--state", "open",
+                           "--json", "number,title,headRefName,author", "--limit", "100"]
+            p.standardOutput = outPipe; p.standardError = errPipe
+            do { try p.run() } catch {
+                await MainActor.run { prError = error.localizedDescription; fetchingPRs = false }
+                return
+            }
+            p.waitUntilExit()
+            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            if p.terminationStatus != 0 {
+                let msg = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                await MainActor.run {
+                    prError = msg.isEmpty ? "gh pr list failed" : msg
+                    fetchingPRs = false
+                }
+                return
+            }
+            let decoded = try? JSONDecoder().decode([PullRequestEntry].self, from: outData)
+            await MainActor.run {
+                pullRequests = decoded ?? []
+                fetchingPRs = false
+            }
+        }
+    }
+
+    private func checkoutPR(_ pr: PullRequestEntry) {
+        guard let path = branchPath(pr.headRefName), let mainPath = mainClonePath, isMainCloned else { return }
+        checkingOutPR = pr.number
+        let repoID = repo.id
+        let headRef = pr.headRefName
+        Task.detached {
+            let fetchP = Process(); let fetchErrPipe = Pipe()
+            fetchP.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            fetchP.arguments = ["-C", mainPath, "fetch", "origin", "pull/\(pr.number)/head:\(headRef)"]
+            fetchP.standardError = fetchErrPipe
+            do { try fetchP.run() } catch {
+                await MainActor.run { checkingOutPR = nil; checkoutError = error.localizedDescription }
+                return
+            }
+            fetchP.waitUntilExit()
+            if fetchP.terminationStatus != 0 {
+                let msg = String(data: fetchErrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                await MainActor.run { checkingOutPR = nil; checkoutError = msg.isEmpty ? "git fetch failed" : msg }
+                return
+            }
+            let worktreeP = Process(); let worktreeErrPipe = Pipe()
+            worktreeP.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            worktreeP.arguments = ["-C", mainPath, "worktree", "add", path, headRef]
+            worktreeP.standardError = worktreeErrPipe
+            do { try worktreeP.run() } catch {
+                await MainActor.run { checkingOutPR = nil; checkoutError = error.localizedDescription }
+                return
+            }
+            worktreeP.waitUntilExit()
+            if worktreeP.terminationStatus != 0 {
+                let msg = String(data: worktreeErrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                await MainActor.run { checkingOutPR = nil; checkoutError = msg.isEmpty ? "git worktree add failed" : msg }
+            } else {
+                await MainActor.run {
+                    db.addRepoBranch(repoID: repoID, name: headRef)
+                    checkingOutPR = nil
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var prSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("PULL REQUESTS")
+                    .font(.system(size: 10, weight: .medium)).tracking(0.8)
+                    .foregroundStyle(Color.mgMuted)
+                Spacer()
+                if fetchingPRs {
+                    ProgressView().scaleEffect(0.6).frame(width: 32)
+                } else {
+                    Button("Fetch") { fetchPRs() }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11)).foregroundStyle(Color.mgAccent)
+                        .help("Fetch open PRs from GitHub")
+                }
+            }
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11)).foregroundStyle(Color.mgMuted)
+                TextField("Filter PRs…", text: $prSearch)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.mgLabel)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            .background(Color.mgSurface)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            if let prError {
+                Text(prError)
+                    .font(.system(size: 12)).foregroundStyle(Color.mgMuted)
+            } else if filteredPRs.isEmpty {
+                Text(fetchingPRs ? "Loading…" : "No open PRs")
+                    .font(.system(size: 12)).foregroundStyle(Color.mgMuted)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(filteredPRs) { pr in
+                        let clonePath = branchPath(pr.headRefName)
+                        let isCloned = clonePath.map { FileManager.default.fileExists(atPath: $0) } ?? false
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("#\(pr.number) \(pr.title)")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Color.mgLabel).lineLimit(1)
+                                Text("by \(pr.author.login) (\(pr.headRefName))")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(isCloned ? Color.mgAccent : Color.mgMuted)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            if isCloned { BranchTag(kind: .local) }
+                            Button {
+                                if let (org, repoName) = githubComponents,
+                                   let url = URL(string: "https://github.com/\(org)/\(repoName)/pull/\(pr.number)") {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            } label: {
+                                Image(systemName: "arrow.up.forward.square")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Color.mgAccent)
+                                    .frame(width: 22, height: 22)
+                                    .background(Color.mgAccent.opacity(0.12))
+                                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Open on GitHub")
+                            if checkingOutPR == pr.number {
+                                ProgressView().scaleEffect(0.6).frame(width: 28)
+                            } else if isCloned, let path = clonePath {
+                                Button {
+                                    NotificationCenter.default.post(
+                                        name: .srotaOpenWorkspace,
+                                        object: nil,
+                                        userInfo: [
+                                            "path":           path,
+                                            "name":           pr.headRefName,
+                                            "folderName":     repo.name,
+                                            "folderTag":      "",
+                                            "createWorktree": false,
+                                            "projectPath":    path,
+                                            "branchRef":      pr.headRefName
+                                        ]
+                                    )
+                                } label: {
+                                    Image(systemName: "terminal")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Color.mgAccent)
+                                        .frame(width: 22, height: 22)
+                                        .background(Color.mgAccent.opacity(0.12))
+                                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                                }
+                                .buttonStyle(.plain)
+                                .help("Open in workspace")
+                            } else {
+                                Button("Worktree") { checkoutPR(pr) }
+                                    .buttonStyle(.plain)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(isMainCloned ? Color.mgAccent : Color.mgMuted.opacity(0.5))
+                                    .disabled(!isMainCloned)
+                                    .help(isMainCloned ? "" : "Clone \(defaultBranch) first")
+                                    .frame(width: 55)
+                            }
+                        }
+                        .padding(.horizontal, 10).padding(.vertical, 7)
+                        .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
+                    }
+                }
+                .background(Color.mgSurface)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
             }
         }
     }
