@@ -13,7 +13,7 @@ private extension Color {
 
 // MARK: - Panel
 
-private enum SettingsSection { case terminal, shortcuts, agents, mcp, daemon }
+private enum SettingsSection { case terminal, shortcuts, agents, editors, mcp, daemon }
 
 struct SettingsPanel: View {
     @Binding var isPresented: Bool
@@ -49,6 +49,9 @@ struct SettingsPanel: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .agents:
                 AgentsSettingsView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .editors:
+                EditorsSettingsView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .mcp:
                 MCPSettingsView()
@@ -115,6 +118,8 @@ private struct SettingsSidebar: View {
                 .onTapGesture { section = .shortcuts }
             SidebarRow(label: "Agents", icon: "sparkles", isSelected: section == .agents)
                 .onTapGesture { section = .agents }
+            SidebarRow(label: "Open With", icon: "arrow.up.forward.app", isSelected: section == .editors)
+                .onTapGesture { section = .editors }
             SidebarRow(label: "MCP", icon: "network", isSelected: section == .mcp)
                 .onTapGesture { section = .mcp }
             SidebarRow(label: "Processes", icon: "square.stack.3d.up", isSelected: section == .daemon)
@@ -363,6 +368,85 @@ private struct ShortcutsSettingsView: View {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.stBorder))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
+            }
+            .padding(28)
+        }
+        .background(Color.stBg)
+    }
+}
+
+// MARK: - Editors ("Open With") settings
+
+private struct EditorsSettingsView: View {
+    @Environment(EditorsStore.self) private var store
+
+    var body: some View {
+        @Bindable var store = store
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Open With")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(Color.stLabel)
+                    Text("Runs as if typed in a terminal already cd'd into the pane's directory — same syntax you'd use yourself (e.g. \"code .\", \"cursor .\", \"z\"). Shown in each pane's Open menu.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.stMuted)
+                }
+                .padding(.bottom, 20)
+
+                if !store.editors.isEmpty {
+                    VStack(spacing: 0) {
+                        ForEach($store.editors) { $editor in
+                            HStack(spacing: 8) {
+                                TextField("Name", text: $editor.name)
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Color.stLabel)
+                                    .frame(width: 140)
+                                TextField("Command, e.g. code", text: $editor.command)
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundStyle(Color.stLabel)
+                                Button {
+                                    store.delete(id: editor.id)
+                                } label: {
+                                    Image(systemName: "minus.circle")
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(Color.stMuted)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            if editor.id != store.editors.last?.id {
+                                Rectangle().fill(Color.stBorder).frame(height: 1)
+                            }
+                        }
+                    }
+                    .background(Color.stSurface)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.stBorder))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .onChange(of: store.editors) { _, _ in store.save() }
+                    .padding(.bottom, 12)
+                }
+
+                Button {
+                    store.add(EditorItem(name: "", command: ""))
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("Add Editor")
+                            .font(.system(size: 13, weight: .medium))
+                    }
+                    .foregroundStyle(Color.stLabel)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color.stSurface)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.stBorder))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
             }
             .padding(28)
         }

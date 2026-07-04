@@ -14,11 +14,11 @@ private func resolveCWD(_ raw: String?) -> String? {
 }
 
 
-private func makeLazygitLauncher() -> String {
+private func makeToolLauncher(name: String, command: String) -> String {
     let dir = NSHomeDirectory() + "/\(Srota.dir)/launchers"
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    let path = dir + "/lazygit.sh"
-    let script = "#!/bin/sh\nexport PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"\nexec lazygit\n"
+    let path = dir + "/\(name).sh"
+    let script = "#!/bin/sh\nexport PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"\nexec \(command)\n"
     try? script.write(toFile: path, atomically: true, encoding: .utf8)
     try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
     return path
@@ -1000,9 +1000,21 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.15), value: shortcuts.awaitingChord)
         .allowsHitTesting(false)
         if shortcuts.showLazygit {
-            LazygitOverlay(cwd: shortcuts.lazygitCWD) {
+            LazygitOverlay(cwd: shortcuts.lazygitCWD, launcherPath: makeToolLauncher(name: "lazygit", command: "lazygit")) {
                 let prevState = manager.selectedWorkspace?.selectedTab?.focusedViewState
                 withAnimation(.easeInOut(duration: 0.15)) { shortcuts.showLazygit = false }
+                if let prevState {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        focusTerminalView(for: prevState)
+                    }
+                }
+            }
+            .transition(.opacity.combined(with: .scale(scale: 0.97)))
+                }
+        if shortcuts.showHunk {
+            LazygitOverlay(cwd: shortcuts.hunkCWD, title: "hunk", icon: "square.split.diagonal.2x2", launcherPath: makeToolLauncher(name: "hunk", command: "hunk show")) {
+                let prevState = manager.selectedWorkspace?.selectedTab?.focusedViewState
+                withAnimation(.easeInOut(duration: 0.15)) { shortcuts.showHunk = false }
                 if let prevState {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                         focusTerminalView(for: prevState)
@@ -1219,6 +1231,10 @@ struct ContentView: View {
         shortcuts.actions["g"] = {
             shortcuts.lazygitCWD = manager.selectedWorkspace?.selectedTab?.statusPath
             withAnimation(.easeInOut(duration: 0.15)) { shortcuts.showLazygit = true }
+        }
+        shortcuts.actions["d"] = {
+            shortcuts.hunkCWD = manager.selectedWorkspace?.selectedTab?.statusPath
+            withAnimation(.easeInOut(duration: 0.15)) { shortcuts.showHunk = true }
         }
         shortcuts.plainKeyHandler = { event in
             handleSidebarPlainKey(event)
@@ -2609,9 +2625,11 @@ private struct ReactivePaneHeader: View {
     let onDragEnded:   (CGPoint) -> Void
 
     var body: some View {
-        let title = customName.isEmpty ? smartTitle(for: resolveCWD(state.workingDirectory)) : customName
+        let cwd = resolveCWD(state.workingDirectory)
+        let title = customName.isEmpty ? smartTitle(for: cwd) : customName
         PaneHeader(
             title: title,
+            cwd: cwd,
             focused: focused,
             showClose: showClose,
             status: status,
@@ -2625,6 +2643,7 @@ private struct ReactivePaneHeader: View {
 
 private struct PaneHeader: View {
     let title: String
+    let cwd: String?
     let focused: Bool
     let showClose: Bool
     let status: AgentRunStatus?
@@ -2633,6 +2652,7 @@ private struct PaneHeader: View {
     let onDragChanged: (CGPoint) -> Void
     let onDragEnded:   (CGPoint) -> Void
 
+    @Environment(EditorsStore.self) private var editorsStore
     @State private var isHovered  = false
     @State private var isRenaming = false
     @State private var editText   = ""
@@ -2666,6 +2686,53 @@ private struct PaneHeader: View {
                 }
 
                 Spacer(minLength: 0)
+
+                if let defaultEditor = editorsStore.defaultEditor, !isRenaming {
+                    HStack(spacing: 3) {
+                        Button {
+                            if let cwd { editorsStore.open(defaultEditor, at: cwd) }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.up.forward.app")
+                                    .font(.system(size: 9.5))
+                                Text(defaultEditor.name.isEmpty ? defaultEditor.command : defaultEditor.name)
+                                    .font(.system(size: 11))
+                                    .lineLimit(1)
+                            }
+                            .foregroundStyle(Color.labelMuted)
+                            .frame(height: 14)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open in \(defaultEditor.name.isEmpty ? defaultEditor.command : defaultEditor.name)")
+
+                        if editorsStore.editors.count > 1 {
+                            Menu {
+                                ForEach(editorsStore.editors) { editor in
+                                    Button {
+                                        if let cwd { editorsStore.open(editor, at: cwd) }
+                                    } label: {
+                                        if editor.id == defaultEditor.id {
+                                            Label(editor.name.isEmpty ? editor.command : editor.name, systemImage: "checkmark")
+                                        } else {
+                                            Text(editor.name.isEmpty ? editor.command : editor.name)
+                                        }
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 9.5))
+                                    .foregroundStyle(Color.labelMuted)
+                                    .frame(width: 10, height: 14)
+                            }
+                            .menuStyle(.button)
+                            .buttonStyle(.plain)
+                            .menuIndicator(.hidden)
+                            .fixedSize()
+                        }
+                    }
+                    .disabled(cwd == nil)
+                    .opacity(isHovered ? 1 : 0)
+                }
 
                 if showClose && !isRenaming {
                     Button(action: onClose) {
@@ -2748,8 +2815,8 @@ private func focusTerminalView(for state: TerminalViewState) {
 
 private final class LazygitState: ObservableObject {
     let viewState: TerminalViewState
-    init(cwd: String?) {
-        let config = TerminalConfiguration(configure: { b in b.withCustom("command", makeLazygitLauncher()) })
+    init(cwd: String?, launcherPath: String) {
+        let config = TerminalConfiguration(configure: { b in b.withCustom("command", launcherPath) })
         viewState = TerminalViewState(terminalConfiguration: config)
         viewState.configuration = TerminalSurfaceOptions(backend: .exec, workingDirectory: cwd)
         viewState.controller.setColorScheme(.dark)
@@ -2758,13 +2825,19 @@ private final class LazygitState: ObservableObject {
 
 private struct LazygitOverlay: View {
     let cwd: String?
+    let title: String
+    let icon: String
+    let launcherPath: String
     let onDismiss: () -> Void
     @StateObject private var lazygit: LazygitState
 
-    init(cwd: String?, onDismiss: @escaping () -> Void) {
+    init(cwd: String?, title: String = "lazygit", icon: String = "arrow.triangle.branch", launcherPath: String, onDismiss: @escaping () -> Void) {
         self.cwd = cwd
+        self.title = title
+        self.icon = icon
+        self.launcherPath = launcherPath
         self.onDismiss = onDismiss
-        _lazygit = StateObject(wrappedValue: LazygitState(cwd: cwd))
+        _lazygit = StateObject(wrappedValue: LazygitState(cwd: cwd, launcherPath: launcherPath))
     }
 
     var body: some View {
@@ -2776,10 +2849,10 @@ private struct LazygitOverlay: View {
             GeometryReader { geo in
                 VStack(spacing: 0) {
                     HStack(spacing: 8) {
-                        Image(systemName: "arrow.triangle.branch")
+                        Image(systemName: icon)
                             .font(.system(size: 10))
                             .foregroundStyle(Color.accentOrange)
-                        Text("lazygit")
+                        Text(title)
                             .font(.system(size: 12, weight: .medium, design: .monospaced))
                             .foregroundStyle(Color.labelPrimary)
                         if let cwd {

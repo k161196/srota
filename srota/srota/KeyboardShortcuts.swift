@@ -53,6 +53,8 @@ final class KeyboardShortcutManager {
     var showWorkspaceSwitcher = false
     var showLazygit = false
     var lazygitCWD: String? = nil
+    var showHunk = false
+    var hunkCWD: String? = nil
     var actions: [String: () -> Void] = [:]
     var plainKeyHandler: ((NSEvent) -> Bool)? = nil
 
@@ -77,7 +79,7 @@ final class KeyboardShortcutManager {
     }
 
     private func handle(_ event: NSEvent) -> Bool {
-        if showWorkspaceSwitcher || showLazygit { return false }
+        if showWorkspaceSwitcher || showLazygit || showHunk { return false }
         // Don't intercept when user is editing text
         if let responder = NSApp.keyWindow?.firstResponder,
            responder is NSTextView || responder is NSTextField {
