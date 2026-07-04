@@ -1938,23 +1938,10 @@ private struct PinnedWorkspaceCard: View {
 
     @Environment(WorkspaceDB.self) private var db
     @State private var isHovered = false
-    @State private var isPulsing = false
-
-    private var initial: String {
-        String(workspace.name.trimmingCharacters(in: .whitespaces).first ?? "W").uppercased()
-    }
 
     var body: some View {
         Button(action: onSelect) {
             HStack(spacing: 10) {
-                Text(initial)
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Color.accentOrange)
-                    .frame(width: 36, height: 36)
-                    .background(LinearGradient(colors: [Color.accentOrange.opacity(0.4), Color.accentOrange.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.accentOrange.opacity(0.35), lineWidth: 1))
-
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 5) {
                         Text(workspace.name)
@@ -1968,10 +1955,8 @@ private struct PinnedWorkspaceCard: View {
                         }
                     }
                     HStack(spacing: 4) {
-                        Text("\(workspace.tabs.count) tab\(workspace.tabs.count == 1 ? "" : "s")")
-                            .fixedSize()
                         if let folderName, !folderName.isEmpty {
-                            Text("· \(folderName)")
+                            Text(folderName)
                         }
                         if let folderTag, !folderTag.isEmpty {
                             Text("· \(folderTag)")
@@ -1992,27 +1977,21 @@ private struct PinnedWorkspaceCard: View {
                             .foregroundStyle(Color.labelSecondary)
                     }
                     .buttonStyle(.plain)
-                } else if let status = workspace.displayStatus {
-                    Circle()
-                        .fill(status.color)
-                        .frame(width: 7, height: 7)
-                        .shadow(color: status.color.opacity(isPulsing ? 0.9 : 0.4), radius: isPulsing ? 6 : 2)
-                        .onAppear {
-                            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                                isPulsing = true
-                            }
-                        }
+                } else {
+                    Text("\(workspace.tabs.count)")
+                        .font(.system(size: 10).monospacedDigit())
+                        .foregroundStyle(Color.sectionHeader.opacity(0.7))
                 }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .padding(.vertical, 7)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .glassCard(
-            fill: isSelected ? Color.white.opacity(0.08) : Color.white.opacity(0.045),
-            borderTop: Color.white.opacity(isSelected ? 0.22 : 0.14),
-            borderBottom: Color.white.opacity(0.07),
+            fill: isSelected ? Color.accentOrange.opacity(0.1) : Color.white.opacity(0.045),
+            borderTop: isSelected ? Color.accentOrange.opacity(0.5) : Color.white.opacity(0.14),
+            borderBottom: isSelected ? Color.accentOrange.opacity(0.3) : Color.white.opacity(0.07),
             radius: 10
         )
         .padding(.horizontal, 8)
@@ -2132,7 +2111,7 @@ private struct WorkspaceRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 5))
         .overlay(
             RoundedRectangle(cornerRadius: 5)
-                .stroke(isKeyboardFocused ? Color.accentOrange.opacity(0.55) : Color.clear, lineWidth: 1)
+                .stroke(isSelected ? Color.accentOrange.opacity(0.5) : isKeyboardFocused ? Color.accentOrange.opacity(0.55) : Color.clear, lineWidth: 1)
         )
         .padding(.horizontal, 4)
         .contentShape(Rectangle())
