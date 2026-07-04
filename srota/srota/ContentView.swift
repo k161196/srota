@@ -726,21 +726,24 @@ struct ContentView: View {
             onPresetLaunch: { preset in
                 let filtered = preset.commands.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
                 guard !filtered.isEmpty else { return }
+                let args = preset.arguments.trimmingCharacters(in: .whitespaces)
+                let lastCmd = (preset.isAgent && !args.isEmpty)
+                    ? "\(filtered.last!) \(args)"
+                    : filtered.last!
                 let cmd: String
-                if !preset.systemPrompt.isEmpty {
+                if preset.isAgent && !preset.systemPrompt.isEmpty {
                     let hex = String(UUID().uuidString.filter { $0.isHexDigit }.prefix(6).lowercased())
                     let launchersDir = NSHomeDirectory() + "/\(Srota.dir)/launchers"
                     try? FileManager.default.createDirectory(atPath: launchersDir, withIntermediateDirectories: true)
                     let promptFile = launchersDir + "/preset-prompt-\(hex).txt"
                     try? preset.systemPrompt.write(toFile: promptFile, atomically: true, encoding: .utf8)
                     let spVar = "__SROTA_SP=$(cat '\(promptFile)')"
-                    let lastCmd = filtered.last!
                     let launch = preset.systemPromptFlag.isEmpty
                         ? "\(spVar); \(lastCmd) \"$__SROTA_SP\""
                         : "\(spVar); \(lastCmd) \(preset.systemPromptFlag) \"$__SROTA_SP\""
                     cmd = filtered.dropLast().map { $0 + "\n" }.joined() + launch + "\n"
                 } else {
-                    cmd = filtered.joined(separator: "\n") + "\n"
+                    cmd = (filtered.dropLast() + [lastCmd]).joined(separator: "\n") + "\n"
                 }
                 if let featureState = agentFocus.activeViewState, managementTab == .features {
                     featureState.send(cmd)
@@ -859,14 +862,16 @@ struct ContentView: View {
             let folder = folderName.map { manager.folder(named: $0, tag: folderTag) }
             let folderID = folder?.id
 
-            let launchAgentName    = note.userInfo?["launchAgentName"] as? String
-            let launchAgentContext = note.userInfo?["launchAgentContext"] as? String
+            let launchAgentName     = note.userInfo?["launchAgentName"] as? String
+            let launchAgentContext  = note.userInfo?["launchAgentContext"] as? String
+            let launchAgentPresetID = note.userInfo?["launchAgentPresetID"] as? String
             @MainActor func launchAgentIfRequested() {
                 guard let launchAgentName,
                       let agent = agentsStore.agents.first(where: { $0.name == launchAgentName }) else { return }
                 let systemPrompt = agentsStore.systemPrompt(for: agent)
                 let firstMessage = (launchAgentContext?.isEmpty == false) ? launchAgentContext! : agentsStore.firstMessage(for: agent)
-                launchAgent(agent: agent, systemPrompt: systemPrompt, firstMessage: firstMessage, preset: nil)
+                let preset = launchAgentPresetID.flatMap { id in presetsStore.presets.first { $0.id.uuidString == id } }
+                launchAgent(agent: agent, systemPrompt: systemPrompt, firstMessage: firstMessage, preset: preset)
             }
 
             // if workspace with same name already exists in that folder, just select it
@@ -1059,20 +1064,31 @@ struct ContentView: View {
         let base = resolvedPreset?.commands.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
                          .joined(separator: " ")
             ?? (agent.name.localizedCaseInsensitiveContains("codex") ? "codex" : "claude")
-        // Write system prompt to file — send() treats \n as Enter, so inlining a multiline prompt breaks the command
+        // Empty flag = agent takes prompt positionally (e.g. codex) — no separate system-prompt flag,
+        // so fold the system prompt into the user prompt instead of dropping it.
+        let flag = resolvedPreset?.systemPromptFlag ?? "--system-prompt"
+        let promptContent = flag.isEmpty
+            ? [systemPrompt, firstMessage].filter { !$0.isEmpty }.joined(separator: "\n\n")
+            : systemPrompt
+        // Write prompt to file — send() treats \n as Enter, so inlining a multiline prompt breaks the command
         let hex = String(UUID().uuidString.filter { $0.isHexDigit }.prefix(6).lowercased())
         let launchersDir = NSHomeDirectory() + "/\(Srota.dir)/launchers"
         try? FileManager.default.createDirectory(atPath: launchersDir, withIntermediateDirectories: true)
         let promptFile = launchersDir + "/agent-prompt-\(hex).txt"
-        try? systemPrompt.write(toFile: promptFile, atomically: true, encoding: .utf8)
+        try? promptContent.write(toFile: promptFile, atomically: true, encoding: .utf8)
 
         // ponytail: first message uses echo with basic escaping; use file approach if messages contain $vars/backticks
         let escapedFirst = firstMessage
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
-        let cmd = firstMessage.isEmpty
-            ? "__SROTA_SP=$(cat '\(promptFile)'); \(base) --system-prompt \"$__SROTA_SP\"\n"
-            : "__SROTA_SP=$(cat '\(promptFile)'); echo \"\(escapedFirst)\" | \(base) --system-prompt \"$__SROTA_SP\"\n"
+        let cmd: String
+        if flag.isEmpty {
+            cmd = "__SROTA_SP=$(cat '\(promptFile)'); \(base) \"$__SROTA_SP\"\n"
+        } else {
+            cmd = firstMessage.isEmpty
+                ? "__SROTA_SP=$(cat '\(promptFile)'); \(base) \(flag) \"$__SROTA_SP\"\n"
+                : "__SROTA_SP=$(cat '\(promptFile)'); echo \"\(escapedFirst)\" | \(base) \(flag) \"$__SROTA_SP\"\n"
+        }
 
         if agent.runInTempDir {
             let df = DateFormatter(); df.dateFormat = "yyyy_MM_dd"

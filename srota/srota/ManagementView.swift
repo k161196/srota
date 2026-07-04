@@ -1992,6 +1992,8 @@ private struct RepoDetailView: View {
     let repo: RepoEntry
     let db: WorkspaceDB
     @Environment(AppSettings.self) var settings
+    @Environment(PresetsStore.self) var presetsStore
+    @State private var agentPickerPRNumber: Int? = nil
     @State private var name          = ""
     @State private var repoURL       = ""
     @State private var defaultBranch = ""
@@ -2456,6 +2458,25 @@ private struct RepoDetailView: View {
         }
     }
 
+    private func launchReviewAgent(_ preset: TerminalPreset, pr: PullRequestEntry, path: String) {
+        NotificationCenter.default.post(
+            name: .srotaOpenWorkspace,
+            object: nil,
+            userInfo: [
+                "path":                 path,
+                "name":                 pr.headRefName,
+                "folderName":           repo.name,
+                "folderTag":            "",
+                "createWorktree":       false,
+                "projectPath":          path,
+                "branchRef":            pr.headRefName,
+                "launchAgentName":      "GitHub PR Review Agent",
+                "launchAgentContext":   "Review PR #\(pr.number): \(pr.title) (base: \(defaultBranch)).",
+                "launchAgentPresetID":  preset.id.uuidString
+            ]
+        )
+    }
+
     @ViewBuilder
     private var prSection: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -2552,21 +2573,7 @@ private struct RepoDetailView: View {
                                 .buttonStyle(.plain)
                                 .help("Open in workspace")
                                 Button {
-                                    NotificationCenter.default.post(
-                                        name: .srotaOpenWorkspace,
-                                        object: nil,
-                                        userInfo: [
-                                            "path":               path,
-                                            "name":               pr.headRefName,
-                                            "folderName":         repo.name,
-                                            "folderTag":          "",
-                                            "createWorktree":     false,
-                                            "projectPath":        path,
-                                            "branchRef":          pr.headRefName,
-                                            "launchAgentName":    "GitHub PR Review Agent",
-                                            "launchAgentContext": "Review PR #\(pr.number): \(pr.title) (base: \(defaultBranch))."
-                                        ]
-                                    )
+                                    agentPickerPRNumber = pr.number
                                 } label: {
                                     Image(systemName: "sparkles")
                                         .font(.system(size: 10))
@@ -2577,6 +2584,15 @@ private struct RepoDetailView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .help("Review with Agent")
+                                .popover(isPresented: Binding(
+                                    get: { agentPickerPRNumber == pr.number },
+                                    set: { if !$0 { agentPickerPRNumber = nil } }
+                                ), arrowEdge: .bottom) {
+                                    PresetPickerPopover(presets: presetsStore.presets.filter { $0.isAgent }) { preset in
+                                        agentPickerPRNumber = nil
+                                        launchReviewAgent(preset, pr: pr, path: path)
+                                    }
+                                }
                             } else {
                                 Button("Worktree") { checkoutPR(pr) }
                                     .buttonStyle(.plain)

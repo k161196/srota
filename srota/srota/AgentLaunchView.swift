@@ -24,7 +24,7 @@ struct AgentPickerPopover: View {
                     .padding(12)
             } else {
                 ForEach(agents) { agent in
-                    AgentPickerRow(agent: agent) { onSelect(agent) }
+                    AgentPickerRow(name: agent.name, description: agent.description) { onSelect(agent) }
                 }
             }
         }
@@ -35,18 +35,19 @@ struct AgentPickerPopover: View {
 }
 
 private struct AgentPickerRow: View {
-    let agent: AgentItem
+    let name: String
+    let description: String
     let action: () -> Void
     @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(agent.name)
+                Text(name)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Color.alLabel)
-                if !agent.description.isEmpty {
-                    Text(agent.description)
+                if !description.isEmpty {
+                    Text(description)
                         .font(.system(size: 11))
                         .foregroundStyle(Color.alMuted)
                         .lineLimit(1)
@@ -60,6 +61,31 @@ private struct AgentPickerRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
+    }
+}
+
+// MARK: - Popover: agent preset picker
+
+struct PresetPickerPopover: View {
+    let presets: [TerminalPreset]
+    let onSelect: (TerminalPreset) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if presets.isEmpty {
+                Text("No agent presets configured")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.alMuted)
+                    .padding(12)
+            } else {
+                ForEach(presets) { preset in
+                    AgentPickerRow(name: preset.name, description: preset.description) { onSelect(preset) }
+                }
+            }
+        }
+        .padding(6)
+        .frame(minWidth: 220)
+        .background(Color.alBg)
     }
 }
 

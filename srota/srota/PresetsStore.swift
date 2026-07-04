@@ -6,6 +6,10 @@ struct TerminalPreset: Codable, Identifiable {
     var name: String
     var description: String = ""
     var commands: [String]
+    // Agent presets launch a CLI agent (claude, codex-work, ...) and unlock arguments + system prompt below.
+    var isAgent: Bool = false
+    // Extra flags appended to the last command, e.g. --dangerously-skip-permissions.
+    var arguments: String = ""
     var systemPrompt: String = ""
     // Flag used to pass system prompt. Empty = positional first arg (e.g. codex 'PROMPT').
     // Non-empty = appended flag (e.g. --system-prompt for claude).
