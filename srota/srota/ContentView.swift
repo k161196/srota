@@ -570,6 +570,14 @@ final class TerminalManager: ObservableObject {
     @Published var reorderDropEdge: VerticalEdge?
     private var reorderDropAutoClear: DispatchWorkItem?
 
+    // Set synchronously in the source row's .onDrag closure, which always runs before any
+    // destination sees the drag — plain in-process state, not carried on the NSItemProvider
+    // itself. That distinction matters: NSItemProvider.suggestedName looked like a valid
+    // synchronous "kind" marker but doesn't survive AppKit's actual pasteboard-mediated drag
+    // transfer (it's meant for file-promise naming), so every drop's kind check silently
+    // failed and nothing moved at all.
+    var draggedKind: DragKind?
+
     // ponytail: self-expiring safety net. dropUpdated fires continuously (many times/sec)
     // while a drag is actually hovering, re-arming this before it ever fires — so in the
     // normal case this never triggers. It only fires when dropUpdated calls stop without a
@@ -600,6 +608,7 @@ final class TerminalManager: ObservableObject {
     func clearReorderDrop() {
         reorderDropAutoClear?.cancel()
         reorderDropAutoClear = nil
+        draggedKind = nil
         guard reorderDropTargetID != nil else { return }
         withAnimation(.easeOut(duration: 0.12)) {
             reorderDropTargetID = nil
@@ -1792,8 +1801,8 @@ private struct SidebarView: View {
     @State private var isDragTargetUnfiled = false
     @State private var pinnedExpanded = true
     @State private var workspacesExpanded = true
-    @State private var unfiledListHeight: CGFloat = 0
     @State private var folderFrames: [UUID: CGRect] = [:]
+    @State private var workspaceFrames: [UUID: WorkspaceFrameInfo] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1904,11 +1913,13 @@ private struct SidebarView: View {
                                         onSelect: { onSelectWorkspace(ws.id) },
                                         onClose:  { manager.closeWorkspace(id: ws.id) }
                                     )
+                                    .background(GeometryReader { geo in
+                                        Color.clear.preference(
+                                            key: WorkspaceFramePreferenceKey.self,
+                                            value: [ws.id: WorkspaceFrameInfo(frame: geo.frame(in: .named("sidebarDrag")), folderID: nil)])
+                                    })
                                 }
                             }
-                            .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { unfiledListHeight = $0 }
-                            .onDrop(of: [.plainText], delegate: WorkspaceListReorderDropDelegate(
-                                workspaces: unfiled, folderID: nil, manager: manager, containerHeight: unfiledListHeight))
                             VStack(spacing: 0) {
                                 ForEach(manager.folders) { folder in
                                     FolderRow(
@@ -1922,16 +1933,17 @@ private struct SidebarView: View {
                                     .background(GeometryReader { geo in
                                         Color.clear.preference(
                                             key: FolderFramePreferenceKey.self,
-                                            value: [folder.id: geo.frame(in: .named("foldersList"))])
+                                            value: [folder.id: geo.frame(in: .named("sidebarDrag"))])
                                     })
                                 }
                             }
-                            .coordinateSpace(name: "foldersList")
-                            .onPreferenceChange(FolderFramePreferenceKey.self) { folderFrames = $0 }
-                            .onDrop(of: [.plainText], delegate: FolderListReorderDropDelegate(
-                                folders: manager.folders, frames: folderFrames, manager: manager))
                         }
                         .padding(.top, 2)
+                        .coordinateSpace(name: "sidebarDrag")
+                        .onPreferenceChange(WorkspaceFramePreferenceKey.self) { workspaceFrames = $0 }
+                        .onPreferenceChange(FolderFramePreferenceKey.self) { folderFrames = $0 }
+                        .onDrop(of: [.plainText], delegate: SidebarReorderDropDelegate(
+                            workspaceFrames: workspaceFrames, folderFrames: folderFrames, manager: manager))
                     }
                 }
             }
@@ -2000,13 +2012,16 @@ private struct FolderRow: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var isHovered    = false
-    @State private var isDragTarget = false
     @State private var isRenaming   = false
     @State private var editText     = ""
-    @State private var workspaceListHeight: CGFloat = 0
     @FocusState private var fieldFocused: Bool
 
     private var isDropTarget: Bool { manager.reorderDropTargetID == folder.id }
+    // A workspace drag hovering here means "file into this folder" (whole-header highlight);
+    // a folder drag means "reorder" (insertion line) — both drive the same isDropTarget flag,
+    // set by the single SidebarReorderDropDelegate on the sidebar's drag surface.
+    private var isFilingTarget: Bool { isDropTarget && manager.draggedKind == .workspace }
+    private var isReorderTarget: Bool { isDropTarget && manager.draggedKind == .folder }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2017,9 +2032,9 @@ private struct FolderRow: View {
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(Color.sectionHeader)
                         .frame(width: 10)
-                    Image(systemName: isDragTarget ? "folder.fill" : "folder")
+                    Image(systemName: isFilingTarget ? "folder.fill" : "folder")
                         .font(.system(size: 10))
-                        .foregroundStyle(isDragTarget ? Color.accentOrange : Color.labelSecondary)
+                        .foregroundStyle(isFilingTarget ? Color.accentOrange : Color.labelSecondary)
                     if isRenaming {
                         TextField("", text: $editText)
                             .font(.system(size: 13))
@@ -2032,7 +2047,7 @@ private struct FolderRow: View {
                         VStack(alignment: .leading, spacing: 1) {
                             Text(folder.name)
                                 .font(.system(size: 13))
-                                .foregroundStyle(isDragTarget ? Color.accentOrange : Color.labelSecondary)
+                                .foregroundStyle(isFilingTarget ? Color.accentOrange : Color.labelSecondary)
                                 .lineLimit(1)
                             if !folder.tag.isEmpty {
                                 Text(folder.tag)
@@ -2068,15 +2083,11 @@ private struct FolderRow: View {
             .contentShape(Rectangle())
             .onTapGesture { if !isRenaming { folder.isExpanded.toggle() } }
             .onHover { isHovered = $0 }
-            .onDrag { idProvider(folder.id, kind: .folder) }
-            .onDrop(of: [.plainText], isTargeted: $isDragTarget) { providers in
-                isDragTarget = false
-                return fileWorkspaceIntoFolder(providers, target: folder, manager: manager)
-            }
+            .onDrag { manager.draggedKind = .folder; return idProvider(folder.id) }
             .glassCard(
-                fill: isDragTarget ? Color.accentOrange.opacity(0.12) : isHovered ? Color.rowHover : Color.white.opacity(0.04),
-                borderTop: isDragTarget ? Color.accentOrange.opacity(0.5) : Color.white.opacity(0.1),
-                borderBottom: isDragTarget ? Color.accentOrange.opacity(0.5) : Color.white.opacity(0.06),
+                fill: isFilingTarget ? Color.accentOrange.opacity(0.12) : isHovered ? Color.rowHover : Color.white.opacity(0.04),
+                borderTop: isFilingTarget ? Color.accentOrange.opacity(0.5) : Color.white.opacity(0.1),
+                borderBottom: isFilingTarget ? Color.accentOrange.opacity(0.5) : Color.white.opacity(0.06),
                 radius: 7
             )
             .padding(.horizontal, 4)
@@ -2100,11 +2111,13 @@ private struct FolderRow: View {
                             onSelect: { onSelectWorkspace(ws.id) },
                             onClose:  { manager.closeWorkspace(id: ws.id) }
                         )
+                        .background(GeometryReader { geo in
+                            Color.clear.preference(
+                                key: WorkspaceFramePreferenceKey.self,
+                                value: [ws.id: WorkspaceFrameInfo(frame: geo.frame(in: .named("sidebarDrag")), folderID: folder.id)])
+                        })
                     }
                 }
-                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { workspaceListHeight = $0 }
-                .onDrop(of: [.plainText], delegate: WorkspaceListReorderDropDelegate(
-                    workspaces: filed, folderID: folder.id, manager: manager, containerHeight: workspaceListHeight))
                 .padding(.leading, 12)
                 .overlay(alignment: .leading) {
                     Rectangle().fill(Color.white.opacity(0.08)).frame(width: 1)
@@ -2114,7 +2127,7 @@ private struct FolderRow: View {
             }
         }
         .overlay(alignment: manager.reorderDropEdge == .bottom ? .bottom : .top) {
-            if isDropTarget {
+            if isReorderTarget {
                 Rectangle().fill(Color.accentOrange).frame(height: 2)
             }
         }
@@ -2136,25 +2149,18 @@ private struct FolderRow: View {
     }
 }
 
-// Workspace and folder drags are both plain text (a UUID string) but tagged with a distinct
-// `suggestedName` "kind" marker. A dedicated UTType per kind would be the more idiomatic way
-// to let `.onDrop(of:)` filter by type before any delegate runs, but that requires the type
-// to be declared in Info.plist — this target has none (GENERATE_INFOPLIST_FILE with no backing
-// file), and an undeclared custom UTType silently fails to match on the receiving side even
-// though it constructs fine. `suggestedName` is a plain stored property, readable synchronously
-// on the destination's NSItemProvider with no UTI machinery involved, which is enough to keep
-// a folder drag from being treated as a workspace drag (or vice versa) with zero project
-// configuration. Upgrade path: declare proper exported UTIs in Info.plist and switch back.
-private enum DragKind: String { case workspace, folder }
+// Workspace and folder drags carry only a UUID string — kind discrimination lives on
+// manager.draggedKind (set synchronously in the source row's .onDrag, before any destination
+// can see the drag), not on the NSItemProvider. NSItemProvider.suggestedName looked like a
+// valid synchronous "kind" marker but doesn't survive AppKit's actual pasteboard-mediated drag
+// transfer (it's meant for file-promise naming), so every drop's kind check silently failed.
+// A dedicated UTType per kind would be the idiomatic way to let `.onDrop(of:)` filter before
+// any delegate runs, but that requires declaring the type in Info.plist, which this target
+// doesn't have (GENERATE_INFOPLIST_FILE with no backing file) — upgrade path if that changes.
+enum DragKind: Equatable { case workspace, folder }
 
-private func idProvider(_ id: UUID, kind: DragKind) -> NSItemProvider {
-    let provider = NSItemProvider(object: id.uuidString as NSString)
-    provider.suggestedName = kind.rawValue
-    return provider
-}
-
-private func dragKind(_ providers: [NSItemProvider]) -> DragKind? {
-    providers.first?.suggestedName.flatMap(DragKind.init(rawValue:))
+private func idProvider(_ id: UUID) -> NSItemProvider {
+    NSItemProvider(object: id.uuidString as NSString)
 }
 
 private func loadDraggedID(from providers: [NSItemProvider], _ completion: @escaping (UUID?) -> Void) {
@@ -2166,7 +2172,7 @@ private func loadDraggedID(from providers: [NSItemProvider], _ completion: @esca
 }
 
 private func dropWorkspace(_ providers: [NSItemProvider], toFolder folderID: UUID?, manager: TerminalManager) -> Bool {
-    guard dragKind(providers) == .workspace else { return false }
+    guard manager.draggedKind == .workspace else { return false }
     loadDraggedID(from: providers) { wsID in
         guard let wsID else { return }
         manager.moveWorkspace(id: wsID, toFolder: folderID)
@@ -2174,59 +2180,15 @@ private func dropWorkspace(_ providers: [NSItemProvider], toFolder folderID: UUI
     return true
 }
 
-/// Single drop delegate for an entire workspace list (the unfiled list, or one folder's),
-/// rather than one per row. A per-row onDrop is registered on that row's own NSView, and
-/// SwiftUI tears down and recreates those views when the list reorders mid-drag — which is
-/// exactly when a drop lands — so AppKit's dropExited/performDrop bookkeeping for that
-/// specific view can get lost, leaving the insertion line stuck. The list container itself
-/// is never recreated by a reorder, so a delegate owned by it survives the whole gesture.
-/// HIG pairs an insertion indicator with highlighting for list reordering:
-/// developer.apple.com/design/human-interface-guidelines/drag-and-drop
-private struct WorkspaceListReorderDropDelegate: DropDelegate {
-    let workspaces: [Workspace]
-    let folderID: UUID?
-    let manager: TerminalManager
-    let containerHeight: CGFloat
+private struct WorkspaceFrameInfo: Equatable {
+    var frame: CGRect
+    var folderID: UUID?   // nil for unfiled
+}
 
-    private var rowHeight: CGFloat {
-        workspaces.isEmpty ? 0 : containerHeight / CGFloat(workspaces.count)
-    }
-
-    private func target(for location: CGPoint) -> (id: UUID, edge: VerticalEdge)? {
-        guard !workspaces.isEmpty, rowHeight > 0 else { return nil }
-        let idx = min(workspaces.count - 1, max(0, Int(location.y / rowHeight)))
-        let withinRow = location.y - CGFloat(idx) * rowHeight
-        return (workspaces[idx].id, withinRow < rowHeight / 2 ? .top : .bottom)
-    }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        guard dragKind(info.itemProviders(for: [.plainText])) == .workspace else { return nil }
-        let t = target(for: info.location)
-        manager.noteReorderDropUpdate(targetID: t?.id, edge: t?.edge)
-        return DropProposal(operation: .move)
-    }
-
-    func dropExited(info: DropInfo) {
-        manager.clearReorderDrop()
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        guard dragKind(info.itemProviders(for: [.plainText])) == .workspace else { return false }
-        let t = target(for: info.location)
-        manager.clearReorderDrop()
-        loadDraggedID(from: info.itemProviders(for: [.plainText])) { wsID in
-            guard let wsID else { return }
-            guard let t, t.id != wsID else {
-                manager.moveWorkspace(id: wsID, toFolder: folderID)
-                return
-            }
-            if t.edge == .bottom {
-                manager.moveWorkspace(id: wsID, toFolder: folderID, after: t.id)
-            } else {
-                manager.moveWorkspace(id: wsID, toFolder: folderID, before: t.id)
-            }
-        }
-        return true
+private struct WorkspaceFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [UUID: WorkspaceFrameInfo] = [:]
+    static func reduce(value: inout [UUID: WorkspaceFrameInfo], nextValue: () -> [UUID: WorkspaceFrameInfo]) {
+        value.merge(nextValue()) { $1 }
     }
 }
 
@@ -2237,27 +2199,55 @@ private struct FolderFramePreferenceKey: PreferenceKey {
     }
 }
 
-/// Mirrors WorkspaceListReorderDropDelegate for the folders list, but folders vary in height
-/// (a folder expands to show its workspaces) so — unlike the uniform-height workspace rows —
-/// this can't divide the container evenly. It uses each folder's actual measured frame instead.
-private struct FolderListReorderDropDelegate: DropDelegate {
-    let folders: [WorkspaceFolder]
-    let frames: [UUID: CGRect]
+/// Single delegate for the entire sidebar drag-reorder surface — unfiled workspaces, folders,
+/// and workspaces nested inside an expanded folder. This used to be three separate onDrop
+/// registrations at different nesting levels (one per workspace list, one for the folders
+/// block); SwiftUI's onDrop regions don't compose reliably when nested — whichever
+/// registration wins a hit-test claims the drag exclusively for its whole bounds, so a more
+/// specific descendant region (a folder's own row list) could never receive its turn once an
+/// ancestor already claimed the same screen area. Fixing that pairwise (which interaction wins)
+/// only moved the bug around three times in a row. One delegate for the whole surface, resolving
+/// the target itself from measured frames instead of leaning on SwiftUI's hit-testing, removes
+/// the ambiguity structurally rather than patching each collision as it's found.
+private struct SidebarReorderDropDelegate: DropDelegate {
+    let workspaceFrames: [UUID: WorkspaceFrameInfo]
+    let folderFrames: [UUID: CGRect]
     let manager: TerminalManager
 
-    private func target(for location: CGPoint) -> (id: UUID, edge: VerticalEdge)? {
-        for folder in folders {
-            guard let frame = frames[folder.id], frame.minY <= location.y, location.y < frame.maxY else { continue }
+    private func workspaceTarget(for location: CGPoint) -> (id: UUID, folderID: UUID?, edge: VerticalEdge)? {
+        for (id, info) in workspaceFrames {
+            guard info.frame.minY <= location.y, location.y < info.frame.maxY else { continue }
+            let midY = info.frame.minY + info.frame.height / 2
+            return (id, info.folderID, location.y < midY ? .top : .bottom)
+        }
+        return nil
+    }
+
+    private func folderTarget(for location: CGPoint) -> (id: UUID, edge: VerticalEdge)? {
+        for (id, frame) in folderFrames {
+            guard frame.minY <= location.y, location.y < frame.maxY else { continue }
             let midY = frame.minY + frame.height / 2
-            return (folder.id, location.y < midY ? .top : .bottom)
+            return (id, location.y < midY ? .top : .bottom)
         }
         return nil
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        guard dragKind(info.itemProviders(for: [.plainText])) == .folder else { return nil }
-        let t = target(for: info.location)
-        manager.noteReorderDropUpdate(targetID: t?.id, edge: t?.edge)
+        switch manager.draggedKind {
+        case .workspace:
+            if let wt = workspaceTarget(for: info.location) {
+                manager.noteReorderDropUpdate(targetID: wt.id, edge: wt.edge)
+            } else if let ft = folderTarget(for: info.location) {
+                manager.noteReorderDropUpdate(targetID: ft.id, edge: nil)
+            } else {
+                manager.noteReorderDropUpdate(targetID: nil, edge: nil)
+            }
+        case .folder:
+            let ft = folderTarget(for: info.location)
+            manager.noteReorderDropUpdate(targetID: ft?.id, edge: ft?.edge)
+        case nil:
+            return nil
+        }
         return DropProposal(operation: .move)
     }
 
@@ -2266,30 +2256,43 @@ private struct FolderListReorderDropDelegate: DropDelegate {
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        guard dragKind(info.itemProviders(for: [.plainText])) == .folder else { return false }
-        let t = target(for: info.location)
-        manager.clearReorderDrop()
-        loadDraggedID(from: info.itemProviders(for: [.plainText])) { folderID in
-            guard let folderID, let t, t.id != folderID else { return }
-            if t.edge == .bottom {
-                manager.moveFolder(id: folderID, after: t.id)
-            } else {
-                manager.moveFolder(id: folderID, before: t.id)
+        switch manager.draggedKind {
+        case .workspace:
+            // A specific row wins over the folder it lives in — a row is a strictly more
+            // precise target than "somewhere in this folder", so it only falls back to filing
+            // into the folder itself when the drop isn't over any specific row.
+            let wt = workspaceTarget(for: info.location)
+            let ft = wt == nil ? folderTarget(for: info.location) : nil
+            manager.clearReorderDrop()
+            loadDraggedID(from: info.itemProviders(for: [.plainText])) { wsID in
+                guard let wsID else { return }
+                if let wt, wt.id != wsID {
+                    if wt.edge == .bottom {
+                        manager.moveWorkspace(id: wsID, toFolder: wt.folderID, after: wt.id)
+                    } else {
+                        manager.moveWorkspace(id: wsID, toFolder: wt.folderID, before: wt.id)
+                    }
+                } else if let ft {
+                    manager.moveWorkspace(id: wsID, toFolder: ft.id)
+                }
             }
+            return true
+        case .folder:
+            let ft = folderTarget(for: info.location)
+            manager.clearReorderDrop()
+            loadDraggedID(from: info.itemProviders(for: [.plainText])) { folderID in
+                guard let folderID, let ft, ft.id != folderID else { return }
+                if ft.edge == .bottom {
+                    manager.moveFolder(id: folderID, after: ft.id)
+                } else {
+                    manager.moveFolder(id: folderID, before: ft.id)
+                }
+            }
+            return true
+        case nil:
+            return false
         }
-        return true
     }
-}
-
-/// Dropping a workspace onto a folder's header files it into that folder (not a reorder —
-/// folder reordering is handled by FolderListReorderDropDelegate on the folders container).
-private func fileWorkspaceIntoFolder(_ providers: [NSItemProvider], target: WorkspaceFolder, manager: TerminalManager) -> Bool {
-    guard dragKind(providers) == .workspace else { return false }
-    loadDraggedID(from: providers) { wsID in
-        guard let wsID else { return }
-        manager.moveWorkspace(id: wsID, toFolder: target.id)
-    }
-    return true
 }
 
 private struct PinnedWorkspaceCard: View {
@@ -2489,7 +2492,7 @@ private struct WorkspaceRow: View {
         .contentShape(Rectangle())
         .onTapGesture { if !isRenaming { onSelect() } }
         .onHover { isHovered = $0 }
-        .onDrag { idProvider(workspace.id, kind: .workspace) }
+        .onDrag { manager.draggedKind = .workspace; return idProvider(workspace.id) }
         .contextMenu {
             Button(workspace.isPinned ? "Unpin" : "Pin") {
                 workspace.isPinned.toggle()
