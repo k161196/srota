@@ -101,8 +101,33 @@ struct TopNavBar: View {
     @Environment(AgentsStore.self)  private var agentsStore
     @State private var showAgentPicker = false
 
+    // Below this nav-bar width, the "Srota" wordmark is dropped to leave room for tabs.
+    private static let wordmarkMinWidth: CGFloat = 640
+
     var body: some View {
+        GeometryReader { geo in
         HStack(spacing: 0) {
+            Color.clear.frame(width: 78) // ponytail: reserves space for traffic-light buttons (hiddenTitleBar overlays them here)
+
+            HStack(spacing: 6) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .frame(width: 18, height: 18)
+                if geo.size.width > Self.wordmarkMinWidth {
+                    Text("Srota")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.mgLabel)
+                        .fixedSize()
+                }
+            }
+            .padding(.trailing, 12)
+
+            Rectangle()
+                .fill(Color.white.opacity(0.08))
+                .frame(width: 1)
+                .padding(.vertical, 9)
+                .padding(.trailing, 8)
+
             ForEach(ManagementTab.allCases, id: \.self) { tab in
                 TabButton(tab: tab, isActive: selected == tab) {
                     selected = tab
@@ -153,6 +178,7 @@ struct TopNavBar: View {
             }
             .buttonStyle(.plain)
             .padding(.trailing, 4)
+        }
         }
         .frame(height: 36)
         .background(Color(red: 0.05, green: 0.05, blue: 0.06))
@@ -205,6 +231,8 @@ private struct PresetQuickLaunchButton: View {
                     .font(.system(size: 10))
                 Text(preset.name)
                     .font(.system(size: 12))
+                    .lineLimit(1)
+                    .fixedSize()
             }
             .foregroundStyle(hovered ? Color.mgLabel : Color.mgMuted)
             .padding(.horizontal, 12)

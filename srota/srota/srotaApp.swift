@@ -48,6 +48,7 @@ struct srotaApp: App {
                     }
                 }
         }
+        .windowStyle(.hiddenTitleBar)
     }
 
     // Re-checks periodically because other tools (e.g. another CLI's hook installer)

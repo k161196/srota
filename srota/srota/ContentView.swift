@@ -1080,6 +1080,7 @@ struct ContentView: View {
                 }
         } // end ZStack
         } // end VStack
+        .ignoresSafeArea(.container, edges: .top)
         .alert("Worktree Error", isPresented: .init(
             get: { worktreeError != nil },
             set: { if !$0 { worktreeError = nil } }
