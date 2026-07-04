@@ -129,7 +129,7 @@ esac
 
 case "$PARSED" in
   Start)              exit 0 ;;  # status still logged above; no notification banner for prompt submission
-  Stop)               TITLE="$LABEL idle";          BODY="Waiting for your next prompt" ;;
+  Stop)               exit 0 ;;  # ponytail: status still logged above; no macOS banner on turn-end, per user preference
   SessionEnd)         TITLE="$LABEL done";          BODY="Session ended" ;;
   PermissionRequest)  TITLE="$LABEL needs approval"; BODY="Waiting for response" ;;
   *) exit 0 ;;

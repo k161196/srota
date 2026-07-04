@@ -12,7 +12,15 @@ struct FeatureAgentTab: Identifiable {
 final class FeatureAgentFocus {
     var activeViewState: TerminalViewState?
     var agentTabs: [FeatureAgentTab] = []
-    var activeTabID: String = "global"
+    var activeTabID: String = "global" {
+        didSet {
+            recentOrder.removeAll { $0 == activeTabID }
+            recentOrder.append(activeTabID)
+        }
+    }
+    // MRU order of tabIDs, used to pick an eviction candidate — kept separate from
+    // `agentTabs` so the visible tab bar order stays stable as you click between tabs.
+    var recentOrder: [String] = []
 }
 
 struct IssueAgentTab: Identifiable {
@@ -25,7 +33,13 @@ struct IssueAgentTab: Identifiable {
 final class IssueAgentFocus {
     var activeViewState: TerminalViewState?
     var agentTabs: [IssueAgentTab] = []
-    var activeTabID: String = "global"
+    var activeTabID: String = "global" {
+        didSet {
+            recentOrder.removeAll { $0 == activeTabID }
+            recentOrder.append(activeTabID)
+        }
+    }
+    var recentOrder: [String] = []
 }
 
 extension Notification.Name {
@@ -33,6 +47,10 @@ extension Notification.Name {
     static let srotaWorkspaceClosed  = Notification.Name("srota.workspaceClosed")
     static let srotaTabClosed        = Notification.Name("srota.tabClosed")
 }
+
+// ponytail: each open Feature/Issue tab keeps a live Ghostty (Metal) terminal surface
+// resident even while hidden — cap how many stay open at once, raise if too aggressive.
+private let maxOpenAgentTabs = 6
 
 // MARK: - Top-level tab enum
 
@@ -1462,7 +1480,17 @@ private struct FeaturesPanel: View {
             if settings.resolvedMCPServerPath != nil && !UserDefaults.standard.bool(forKey: "mcpSetupDismissed") {
                 showMCPSetup = true
             }
+            evictLeastRecentTabIfNeeded()
         }
+    }
+
+    private func evictLeastRecentTabIfNeeded() {
+        let closable = agentFocus.agentTabs.filter { $0.id != "global" }
+        guard closable.count > maxOpenAgentTabs else { return }
+        guard let lru = agentFocus.recentOrder.first(where: { id in
+            id != agentFocus.activeTabID && closable.contains { $0.id == id }
+        }) else { return }
+        closeTab(lru)
     }
 
     private func closeTab(_ id: String) {
@@ -1474,6 +1502,7 @@ private struct FeaturesPanel: View {
             cwds.forEach { removeContext(from: $0) }
         }
         agentFocus.agentTabs.removeAll { $0.id == id }
+        agentFocus.recentOrder.removeAll { $0 == id }
         if agentFocus.activeTabID == id { agentFocus.activeTabID = "global" }
     }
 
@@ -2819,7 +2848,17 @@ private struct IssuesPanel: View {
             if settings.resolvedMCPServerPath != nil && !UserDefaults.standard.bool(forKey: "mcpSetupDismissed") {
                 showMCPSetup = true
             }
+            evictLeastRecentTabIfNeeded()
         }
+    }
+
+    private func evictLeastRecentTabIfNeeded() {
+        let closable = agentFocus.agentTabs.filter { $0.id != "global" }
+        guard closable.count > maxOpenAgentTabs else { return }
+        guard let lru = agentFocus.recentOrder.first(where: { id in
+            id != agentFocus.activeTabID && closable.contains { $0.id == id }
+        }) else { return }
+        closeTab(lru)
     }
 
     private func closeTab(_ id: String) {
@@ -2828,6 +2867,7 @@ private struct IssuesPanel: View {
             repoPaths(forID: iid).forEach { removeContext(from: $0) }
         }
         agentFocus.agentTabs.removeAll { $0.id == id }
+        agentFocus.recentOrder.removeAll { $0 == id }
         if agentFocus.activeTabID == id { agentFocus.activeTabID = "global" }
     }
 
