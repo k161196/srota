@@ -2143,8 +2143,11 @@ private struct FolderRow: View {
 // plain text, distinguishable only by an async string decode, too late to stop the workspace
 // list from lighting up for a folder drag).
 private extension UTType {
-    static let workspaceDrag = UTType("com.srota.drag.workspace")!
-    static let folderDrag = UTType("com.srota.drag.folder")!
+    // exportedAs synthesizes an ad-hoc type for private in-app use — unlike UTType(_:), it
+    // doesn't require the identifier to already be a known/declared type, which is why the
+    // plain lookup initializer crashed here (returns nil for an identifier nothing declares).
+    static let workspaceDrag = UTType(exportedAs: "com.srota.drag.workspace")
+    static let folderDrag = UTType(exportedAs: "com.srota.drag.folder")
 }
 
 private func idProvider(_ id: UUID, as type: UTType) -> NSItemProvider {
