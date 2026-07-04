@@ -1986,38 +1986,23 @@ private struct AddIssueToFeatureSheet: View {
     }
 }
 
-// Parses git@github.com:org/repo.git or https://github.com/org/repo[.git]
-private func gitURLComponents(_ url: String) -> (org: String, repo: String)? {
-    var s = url
-    for prefix in ["git@github.com:", "https://github.com/", "http://github.com/"] {
-        if s.hasPrefix(prefix) { s = String(s.dropFirst(prefix.count)); break }
-    }
-    s = s.replacingOccurrences(of: ".git", with: "")
-    let parts = s.split(separator: "/", maxSplits: 1).map(String.init)
-    guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
-    return (parts[0], parts[1])
-}
-
-// Locates the gh CLI binary; GUI apps don't inherit the login shell's PATH.
-private func resolveGHPath() -> String? {
-    for path in ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"] {
-        if FileManager.default.fileExists(atPath: path) { return path }
-    }
-    let p = Process(); let pipe = Pipe()
-    p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-    p.arguments = ["-lc", "which gh"]
-    p.standardOutput = pipe; p.standardError = Pipe()
-    try? p.run(); p.waitUntilExit()
-    let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    return out.isEmpty ? nil : out
-}
-
 private struct PullRequestEntry: Identifiable, Decodable {
     let number: Int
     let title: String
     let headRefName: String
     let author: Author
+    struct Author: Decodable { let login: String }
+    var id: Int { number }
+}
+
+private struct IssueEntry: Identifiable, Decodable {
+    let number: Int
+    let title: String
+    let state: String
+    let url: String
+    let labels: [Label]
+    let author: Author
+    struct Label: Decodable { let name: String }
     struct Author: Decodable { let login: String }
     var id: Int { number }
 }
@@ -2083,8 +2068,15 @@ private struct RepoDetailView: View {
     @State private var fetchingPRs = false
     @State private var prError: String? = nil
     @State private var checkingOutPR: Int? = nil
+    @State private var issueEntries: [IssueEntry] = []
+    @State private var issueSearch = ""
+    @State private var fetchingIssues = false
+    @State private var issueError: String? = nil
+    @State private var checkingOutIssue: Int? = nil
+    @State private var showIssueSheet = false
+    @State private var editingIssue: IssueEntry? = nil
 
-    enum RepoDetailTab { case branches, prs }
+    enum RepoDetailTab { case branches, prs, issues }
 
     var branches: [RepoBranch] { db.repoBranches.filter { $0.repoID == repo.id } }
 
@@ -2096,6 +2088,14 @@ private struct RepoDetailView: View {
                 || $0.headRefName.localizedCaseInsensitiveContains(prSearch)
                 || $0.author.login.localizedCaseInsensitiveContains(prSearch)
                 || String($0.number).contains(prSearch)
+        }
+    }
+
+    var filteredIssues: [IssueEntry] {
+        issueSearch.isEmpty ? issueEntries : issueEntries.filter {
+            $0.title.localizedCaseInsensitiveContains(issueSearch)
+                || $0.author.login.localizedCaseInsensitiveContains(issueSearch)
+                || String($0.number).contains(issueSearch)
         }
     }
 
@@ -2124,21 +2124,6 @@ private struct RepoDetailView: View {
             MGField(label: "Git URL", text: $repoURL)
             MGField(label: "Default branch", text: $defaultBranch)
 
-            HStack {
-                Spacer()
-                Button("Save") {
-                    var updated = repo
-                    updated.name = name; updated.url = repoURL; updated.defaultBranch = defaultBranch
-                    db.updateRepo(updated)
-                }
-                .buttonStyle(.plain)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.black)
-                .padding(.horizontal, 14).padding(.vertical, 7)
-                .background(Color.mgAccent)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
-
             if githubComponents != nil {
                 HStack(spacing: 4) {
                     FeatureTabChip(label: "Branches", isActive: detailTab == .branches, isCloseable: false,
@@ -2148,11 +2133,18 @@ private struct RepoDetailView: View {
                                        detailTab = .prs
                                        if pullRequests.isEmpty && !fetchingPRs { fetchPRs() }
                                    }, onClose: {})
+                    FeatureTabChip(label: "Issues", isActive: detailTab == .issues, isCloseable: false,
+                                   onSelect: {
+                                       detailTab = .issues
+                                       if issueEntries.isEmpty && !fetchingIssues { fetchIssues() }
+                                   }, onClose: {})
                 }
             }
 
             if detailTab == .prs && githubComponents != nil {
                 prSection
+            } else if detailTab == .issues && githubComponents != nil {
+                issueSection
             } else {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
@@ -2314,7 +2306,7 @@ private struct RepoDetailView: View {
 
     private func load() {
         name = repo.name; repoURL = repo.url; defaultBranch = repo.defaultBranch
-        detailTab = .branches; pullRequests = []; prError = nil
+        detailTab = .branches; pullRequests = []; prError = nil; issueEntries = []; issueError = nil
     }
 
     private func branchPath(_ branchName: String) -> String? {
@@ -2483,6 +2475,66 @@ private struct RepoDetailView: View {
         }
     }
 
+    private func fetchIssues() {
+        guard let (org, repoName) = githubComponents else { return }
+        fetchingIssues = true
+        issueError = nil
+        Task.detached {
+            guard let ghPath = resolveGHPath() else {
+                await MainActor.run {
+                    issueError = "gh CLI not found — install from https://cli.github.com"
+                    fetchingIssues = false
+                }
+                return
+            }
+            let p = Process(); let outPipe = Pipe(); let errPipe = Pipe()
+            p.executableURL = URL(fileURLWithPath: ghPath)
+            p.arguments = ["issue", "list", "--repo", "\(org)/\(repoName)", "--state", "open",
+                           "--json", "number,title,state,url,labels,author", "--limit", "100"]
+            p.standardOutput = outPipe; p.standardError = errPipe
+            do { try p.run() } catch {
+                await MainActor.run { issueError = error.localizedDescription; fetchingIssues = false }
+                return
+            }
+            p.waitUntilExit()
+            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            if p.terminationStatus != 0 {
+                let msg = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                await MainActor.run {
+                    issueError = msg.isEmpty ? "gh issue list failed" : msg
+                    fetchingIssues = false
+                }
+                return
+            }
+            let decoded = try? JSONDecoder().decode([IssueEntry].self, from: outData)
+            await MainActor.run {
+                issueEntries = decoded ?? []
+                fetchingIssues = false
+            }
+        }
+    }
+
+    private func submitIssue(number: Int?, title: String, body: String) {
+        guard let (org, repoName) = githubComponents else { return }
+        Task.detached {
+            guard let ghPath = resolveGHPath() else { return }
+            let p = Process(); let errPipe = Pipe()
+            p.executableURL = URL(fileURLWithPath: ghPath)
+            if let number {
+                p.arguments = ["issue", "edit", String(number), "--repo", "\(org)/\(repoName)",
+                               "--title", title, "--body", body]
+            } else {
+                p.arguments = ["issue", "create", "--repo", "\(org)/\(repoName)",
+                               "--title", title, "--body", body]
+            }
+            p.standardError = errPipe
+            try? p.run()
+            p.waitUntilExit()
+            await MainActor.run { fetchIssues() }
+        }
+    }
+
     private func checkoutPR(_ pr: PullRequestEntry) {
         guard let path = branchPath(pr.headRefName), let mainPath = mainClonePath, isMainCloned else { return }
         checkingOutPR = pr.number
@@ -2521,6 +2573,35 @@ private struct RepoDetailView: View {
                 await MainActor.run {
                     db.addRepoBranch(repoID: repoID, name: headRef)
                     checkingOutPR = nil
+                }
+            }
+        }
+    }
+
+    private func checkoutIssue(_ issue: IssueEntry) {
+        let branchName = "issue/\(issue.number)"
+        guard let path = branchPath(branchName), let mainPath = mainClonePath, isMainCloned else { return }
+        checkingOutIssue = issue.number
+        let repoID = repo.id
+        let base = defaultBranch
+        Task.detached {
+            let worktreeP = Process(); let errPipe = Pipe()
+            worktreeP.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            worktreeP.arguments = ["-C", mainPath, "worktree", "add", path, "-b", branchName, base]
+            worktreeP.standardError = errPipe
+            do { try worktreeP.run() } catch {
+                await MainActor.run { checkingOutIssue = nil; checkoutError = error.localizedDescription }
+                return
+            }
+            worktreeP.waitUntilExit()
+            if worktreeP.terminationStatus != 0 {
+                let msg = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                await MainActor.run { checkingOutIssue = nil; checkoutError = msg.isEmpty ? "git worktree add failed" : msg }
+            } else {
+                await MainActor.run {
+                    db.addRepoBranch(repoID: repoID, name: branchName)
+                    checkingOutIssue = nil
                 }
             }
         }
@@ -2676,6 +2757,195 @@ private struct RepoDetailView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
             }
+        }
+    }
+
+    @ViewBuilder
+    private var issueSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("ISSUES")
+                    .font(.system(size: 10, weight: .medium)).tracking(0.8)
+                    .foregroundStyle(Color.mgMuted)
+                Spacer()
+                if fetchingIssues {
+                    ProgressView().scaleEffect(0.6).frame(width: 32)
+                } else {
+                    Button("Fetch") { fetchIssues() }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11)).foregroundStyle(Color.mgAccent)
+                        .help("Fetch open issues from GitHub")
+                }
+            }
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11)).foregroundStyle(Color.mgMuted)
+                TextField("Filter issues…", text: $issueSearch)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.mgLabel)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            .background(Color.mgSurface)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            if let issueError {
+                Text(issueError)
+                    .font(.system(size: 12)).foregroundStyle(Color.mgMuted)
+            } else if filteredIssues.isEmpty {
+                Text(fetchingIssues ? "Loading…" : "No open issues")
+                    .font(.system(size: 12)).foregroundStyle(Color.mgMuted)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(filteredIssues) { issue in
+                        let branchName = "issue/\(issue.number)"
+                        let clonePath = branchPath(branchName)
+                        let isCloned = clonePath.map { FileManager.default.fileExists(atPath: $0) } ?? false
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("#\(issue.number) \(issue.title)")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Color.mgLabel).lineLimit(1)
+                                Text(issue.labels.isEmpty
+                                     ? "by \(issue.author.login)"
+                                     : "by \(issue.author.login) · \(issue.labels.map(\.name).joined(separator: ", "))")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(isCloned ? Color.mgAccent : Color.mgMuted)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            if isCloned { BranchTag(kind: .local) }
+                            Button {
+                                editingIssue = issue
+                                showIssueSheet = true
+                            } label: {
+                                Image(systemName: "pencil")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Color.mgAccent)
+                                    .frame(width: 22, height: 22)
+                                    .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 4)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Edit issue")
+                            Button {
+                                if let url = URL(string: issue.url) { NSWorkspace.shared.open(url) }
+                            } label: {
+                                Image(systemName: "arrow.up.forward.square")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Color.mgAccent)
+                                    .frame(width: 22, height: 22)
+                                    .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 4)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Open on GitHub")
+                            if checkingOutIssue == issue.number {
+                                ProgressView().scaleEffect(0.6).frame(width: 28)
+                            } else if isCloned, let path = clonePath {
+                                Button {
+                                    NotificationCenter.default.post(
+                                        name: .srotaOpenWorkspace,
+                                        object: nil,
+                                        userInfo: [
+                                            "path":           path,
+                                            "name":           branchName,
+                                            "folderName":     repo.name,
+                                            "folderTag":      "",
+                                            "createWorktree": false,
+                                            "projectPath":    path,
+                                            "branchRef":      branchName
+                                        ]
+                                    )
+                                } label: {
+                                    Image(systemName: "terminal")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Color.mgAccent)
+                                        .frame(width: 22, height: 22)
+                                        .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 4)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Open in workspace")
+                            } else {
+                                Button("Worktree") { checkoutIssue(issue) }
+                                    .buttonStyle(.plain)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(isMainCloned ? Color.mgAccent : Color.mgMuted.opacity(0.5))
+                                    .disabled(!isMainCloned)
+                                    .help(isMainCloned ? "" : "Clone \(defaultBranch) first")
+                                    .frame(width: 55)
+                            }
+                        }
+                        .padding(.horizontal, 10).padding(.vertical, 7)
+                        .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
+                    }
+                }
+                .background(Color.mgSurface)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+            }
+
+            HStack {
+                Spacer()
+                Button("+ New Issue") {
+                    editingIssue = nil
+                    showIssueSheet = true
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .medium)).foregroundStyle(Color.mgAccent)
+            }
+        }
+        .sheet(isPresented: $showIssueSheet) {
+            GHIssueFormSheet(existing: editingIssue, isPresented: $showIssueSheet) { title, body in
+                submitIssue(number: editingIssue?.number, title: title, body: body)
+            }
+        }
+    }
+}
+
+private struct GHIssueFormSheet: View {
+    let existing: IssueEntry?
+    @Binding var isPresented: Bool
+    let onSubmit: (String, String) -> Void
+    @State private var title = ""
+    @State private var issueBody = ""
+
+    var isEditing: Bool { existing != nil }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text(isEditing ? "Edit Issue" : "New Issue")
+                .font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.mgLabel)
+            MGField(label: "Title", text: $title)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("BODY (optional)")
+                    .font(.system(size: 11, weight: .medium)).tracking(0.8).foregroundStyle(Color.mgMuted)
+                TextEditor(text: $issueBody)
+                    .font(.system(size: 13)).foregroundStyle(Color.mgLabel)
+                    .scrollContentBackground(.hidden)
+                    .padding(8).frame(minHeight: 100)
+                    .background(Color.mgSurface)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { isPresented = false }
+                    .buttonStyle(.plain).foregroundStyle(Color.mgMuted)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                Button(isEditing ? "Save" : "Create") {
+                    onSubmit(title, issueBody)
+                    isPresented = false
+                }
+                .buttonStyle(.plain).foregroundStyle(.black)
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(title.isEmpty ? Color.mgMuted : Color.mgAccent)
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .disabled(title.isEmpty)
+            }
+        }
+        .padding(28).frame(width: 380).background(Color.mgBg)
+        .onAppear {
+            title = existing?.title ?? ""
         }
     }
 }

@@ -2957,6 +2957,7 @@ private struct PaneHeader: View {
     @State private var isHovered  = false
     @State private var isRenaming = false
     @State private var editText   = ""
+    @State private var issuePopoverOpen = false
     @FocusState private var fieldFocused: Bool
 
     var body: some View {
@@ -2987,6 +2988,11 @@ private struct PaneHeader: View {
                 }
 
                 Spacer(minLength: 0)
+
+                if !isRenaming {
+                    PaneIssueButton(cwd: cwd, isOpen: $issuePopoverOpen)
+                        .opacity(isHovered || issuePopoverOpen ? 1 : 0)
+                }
 
                 if let defaultEditor = editorsStore.defaultEditor, !isRenaming {
                     HStack(spacing: 3) {
@@ -3032,7 +3038,7 @@ private struct PaneHeader: View {
                         }
                     }
                     .disabled(cwd == nil)
-                    .opacity(isHovered ? 1 : 0)
+                    .opacity(isHovered || issuePopoverOpen ? 1 : 0)
                 }
 
                 if showClose && !isRenaming {
@@ -3043,7 +3049,7 @@ private struct PaneHeader: View {
                             .frame(width: 14, height: 14)
                     }
                     .buttonStyle(.plain)
-                    .opacity(isHovered ? 1 : 0)
+                    .opacity(isHovered || issuePopoverOpen ? 1 : 0)
                 }
             }
             .padding(.horizontal, 10)
@@ -3078,6 +3084,66 @@ private struct PaneHeader: View {
         let name = editText.trimmingCharacters(in: .whitespaces)
         onRename(name)
         isRenaming = false
+    }
+}
+
+// isOpen is a binding owned by PaneHeader (not local state) so PaneHeader can keep this
+// button — and the other header icons — visible together while the popover is open;
+// otherwise the moment the mouse leaves the header for the popover, everything but this
+// button would vanish, or vice versa, leaving a lone icon with a detached-looking popover.
+// Each pane can be on a different directory/branch, so detection runs against this
+// pane's own live `cwd`, not the workspace's. Ephemeral — no DB persistence.
+private struct PaneIssueButton: View {
+    let cwd: String?
+    @Binding var isOpen: Bool
+    @State private var issueNumber: Int? = nil
+    @State private var repoPath: String = ""
+    @State private var statusMessage: String? = nil
+
+    var body: some View {
+        Button(action: toggle) {
+            Image(systemName: "exclamationmark.circle")
+                .font(.system(size: 10.5))
+                .foregroundStyle(isOpen ? Color.accentOrange : Color.labelMuted)
+                .frame(width: 14, height: 14)
+        }
+        .buttonStyle(.plain)
+        .disabled(cwd == nil)
+        .help("Open issue for this pane's branch")
+        .popover(isPresented: $isOpen, arrowEdge: .bottom) {
+            let windowSize = NSApp.keyWindow?.frame.size ?? CGSize(width: 640, height: 550)
+            let popoverSize = CGSize(width: windowSize.width * 0.5, height: windowSize.height * 0.8)
+            if let issueNumber {
+                GitHubIssueSidebar(issueNumber: issueNumber, repoPath: repoPath) { isOpen = false }
+                    .frame(width: popoverSize.width, height: popoverSize.height)
+            } else {
+                Text(statusMessage ?? "Checking…")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .frame(width: popoverSize.width, height: popoverSize.height)
+                    .padding(12)
+            }
+        }
+    }
+
+    private func toggle() {
+        issueNumber = nil
+        statusMessage = "Checking…"
+        isOpen = true
+        Task { await detectIssue() }
+    }
+
+    private func detectIssue() async {
+        guard let path = cwd, !path.isEmpty else {
+            statusMessage = "Issue not found"
+            return
+        }
+        let branch = await Task.detached { runGit(["-C", path, "rev-parse", "--abbrev-ref", "HEAD"]) }.value
+        guard let branch, let number = extractIssueNumber(fromBranch: branch) else {
+            statusMessage = "Issue not found"
+            return
+        }
+        repoPath = path
+        issueNumber = number
     }
 }
 
