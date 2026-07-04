@@ -533,21 +533,38 @@ final class WorkspaceFolder: Identifiable, ObservableObject {
     let id = UUID()
     @Published var name: String
     @Published var tag: String = ""
-    @Published var workspaces: [Workspace] = []
+    @Published var workspaces: [Workspace] = [] {
+        didSet { rebindWorkspaceSinks() }
+    }
     @Published var isExpanded: Bool = true
     init(name: String, tag: String = "") { self.name = name; self.tag = tag }
+
+    private var workspaceSinks: [AnyCancellable] = []
+
+    private func rebindWorkspaceSinks() {
+        // Forwards e.g. isPinned toggles so folder/manager list filters (pinned section,
+        // per-folder counts) refresh immediately instead of on the next unrelated redraw.
+        workspaceSinks = workspaces.map { ws in
+            ws.objectWillChange.sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+        }
+    }
 }
 
 @MainActor
 final class TerminalManager: ObservableObject {
     var daemon: DaemonConnection? = nil
-    @Published var workspaces: [Workspace] = []   // unfiled
+    @Published var workspaces: [Workspace] = [] {   // unfiled
+        didSet { rebindWorkspaceSinks() }
+    }
     @Published var folders: [WorkspaceFolder] = [] {
         didSet { rebindFolderSinks() }
     }
     @Published var selectedWorkspaceID: UUID?
 
     private var folderSinks: [AnyCancellable] = []
+    private var workspaceSinks: [AnyCancellable] = []
 
     private func rebindFolderSinks() {
         folderSinks = folders.map { folder in
@@ -557,7 +574,16 @@ final class TerminalManager: ObservableObject {
         }
     }
 
+    private func rebindWorkspaceSinks() {
+        workspaceSinks = workspaces.map { ws in
+            ws.objectWillChange.sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+        }
+    }
+
     var allWorkspaces: [Workspace] { workspaces + folders.flatMap(\.workspaces) }
+    var pinnedWorkspaces: [Workspace] { allWorkspaces.filter(\.isPinned) }
 
     var selectedWorkspace: Workspace? {
         allWorkspaces.first { $0.id == selectedWorkspaceID }
@@ -1548,6 +1574,8 @@ private struct SidebarView: View {
     let onShowAllAgents: () -> Void
     @State private var newFolderID: UUID? = nil
     @State private var isDragTargetUnfiled = false
+    @State private var pinnedExpanded = true
+    @State private var workspacesExpanded = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1579,44 +1607,92 @@ private struct SidebarView: View {
                 .help("New Folder")
             }
 
-            HStack(alignment: .firstTextBaseline, spacing: 0) {
-                Text("WORKSPACES")
-                    .font(.system(size: 11, weight: .medium))
-                    .tracking(0.8)
-                    .foregroundStyle(isDragTargetUnfiled ? Color.accentOrange : Color.sectionHeader)
-                Spacer()
-                Text("\(manager.allWorkspaces.count)")
-                    .font(.system(size: 11, weight: .regular).monospacedDigit())
-                    .foregroundStyle(Color.sectionHeader.opacity(0.7))
-            }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 5)
-            .background(isDragTargetUnfiled ? Color.accentOrange.opacity(0.08) : Color.clear)
-            .onDrop(of: [UTType.plainText], isTargeted: $isDragTargetUnfiled) { providers in
-                dropWorkspace(providers, toFolder: nil, manager: manager)
-            }
-
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(spacing: 0) {
-                    ForEach(manager.workspaces) { ws in
+                    if !manager.pinnedWorkspaces.isEmpty {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Image(systemName: pinnedExpanded ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(Color.sectionHeader)
+                            Image(systemName: "pin.fill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(Color.accentOrange.opacity(0.7))
+                            Text("PINNED")
+                                .font(.system(size: 11, weight: .medium))
+                                .tracking(0.8)
+                                .foregroundStyle(Color.sectionHeader)
+                            Spacer()
+                            Text("\(manager.pinnedWorkspaces.count)")
+                                .font(.system(size: 11, weight: .regular).monospacedDigit())
+                                .foregroundStyle(Color.sectionHeader.opacity(0.7))
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 5)
+                        .contentShape(Rectangle())
+                        .onTapGesture { pinnedExpanded.toggle() }
+
+                        if pinnedExpanded {
+                            ForEach(manager.pinnedWorkspaces) { ws in
+                                WorkspaceSidebarItem(
+                                    workspace: ws,
+                                    manager: manager,
+                                    isSelected: manager.selectedWorkspaceID == ws.id,
+                                    isKeyboardFocused: keyboardFocusedWorkspaceID == ws.id,
+                                    onSelect: { onSelectWorkspace(ws.id) },
+                                    onClose:  { manager.closeWorkspace(id: ws.id) },
+                                    folderTag: manager.folders.first { $0.workspaces.contains { $0.id == ws.id } }?.name
+                                )
+                            }
+                        }
+
+                        Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 6)
+                    }
+
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: workspacesExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(Color.sectionHeader)
+                        Text("WORKSPACES")
+                            .font(.system(size: 11, weight: .medium))
+                            .tracking(0.8)
+                            .foregroundStyle(isDragTargetUnfiled ? Color.accentOrange : Color.sectionHeader)
+                        Spacer()
+                        Text("\(manager.allWorkspaces.count)")
+                            .font(.system(size: 11, weight: .regular).monospacedDigit())
+                            .foregroundStyle(Color.sectionHeader.opacity(0.7))
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 5)
+                    .background(isDragTargetUnfiled ? Color.accentOrange.opacity(0.08) : Color.clear)
+                    .contentShape(Rectangle())
+                    .onTapGesture { workspacesExpanded.toggle() }
+                    .onDrop(of: [UTType.plainText], isTargeted: $isDragTargetUnfiled) { providers in
+                        dropWorkspace(providers, toFolder: nil, manager: manager)
+                    }
+
+                    if workspacesExpanded {
+                        ForEach(manager.workspaces.filter { !$0.isPinned }) { ws in
 WorkspaceSidebarItem(
-                            workspace: ws,
-                            manager: manager,
+                                workspace: ws,
+                                manager: manager,
                     isSelected: manager.selectedWorkspaceID == ws.id,
                     isKeyboardFocused: keyboardFocusedWorkspaceID == ws.id,
                     onSelect: { onSelectWorkspace(ws.id) },
-                            onClose:  { manager.closeWorkspace(id: ws.id) }
-                        )
-                    }
-                    ForEach(manager.folders) { folder in
-                        FolderRow(
-                            folder: folder,
+                                onClose:  { manager.closeWorkspace(id: ws.id) }
+                            )
+                        }
+                        ForEach(manager.folders) { folder in
+                            FolderRow(
+                                folder: folder,
                     manager: manager,
                     keyboardFocusedWorkspaceID: keyboardFocusedWorkspaceID,
                     onSelectWorkspace: onSelectWorkspace,
                     startRenaming: newFolderID == folder.id,
-                            onRenameHandled: { newFolderID = nil }
-                        )
+                                onRenameHandled: { newFolderID = nil }
+                            )
+                        }
                     }
                 }
             }
@@ -1734,7 +1810,7 @@ private struct FolderRow: View {
                         .buttonStyle(.plain)
                         .help("Add workspace to folder")
                     } else {
-                        Text("\(folder.workspaces.count)")
+                        Text("\(folder.workspaces.filter { !$0.isPinned }.count)")
                             .font(.system(size: 10).monospacedDigit())
                             .foregroundStyle(Color.sectionHeader.opacity(0.7))
                     }
@@ -1768,7 +1844,7 @@ private struct FolderRow: View {
             }
 
             if folder.isExpanded {
-                ForEach(folder.workspaces) { ws in
+                ForEach(folder.workspaces.filter { !$0.isPinned }) { ws in
                     WorkspaceSidebarItem(
                         workspace: ws,
                         manager: manager,
@@ -1818,6 +1894,7 @@ private struct WorkspaceRow: View {
     var indented: Bool = false
     var isExpanded: Bool? = nil
     var onToggleExpand: (() -> Void)? = nil
+    var folderTag: String? = nil
 
     @Environment(WorkspaceDB.self) private var db
     @State private var isHovered = false
@@ -1886,9 +1963,17 @@ private struct WorkspaceRow: View {
                                     .foregroundStyle(Color.accentOrange.opacity(0.7))
                             }
                         }
-                        Text("\(workspace.tabs.count) tab\(workspace.tabs.count == 1 ? "" : "s")")
-                            .font(.system(size: 10))
-                            .foregroundStyle(Color.sectionHeader)
+                        HStack(spacing: 4) {
+                            Text("\(workspace.tabs.count) tab\(workspace.tabs.count == 1 ? "" : "s")")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color.sectionHeader)
+                            if let folderTag, !folderTag.isEmpty {
+                                Text("· \(folderTag)")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(Color.accentOrange.opacity(0.7))
+                                    .lineLimit(1)
+                            }
+                        }
                     }
                 }
 
@@ -1964,6 +2049,7 @@ private struct WorkspaceSidebarItem: View {
     let onSelect: () -> Void
     let onClose: () -> Void
     var indented: Bool = false
+    var folderTag: String? = nil
 
     var body: some View {
         WorkspaceRow(
@@ -1975,7 +2061,8 @@ private struct WorkspaceSidebarItem: View {
             onClose: onClose,
             indented: indented,
             isExpanded: nil,
-            onToggleExpand: nil
+            onToggleExpand: nil,
+            folderTag: folderTag
         )
     }
 }
