@@ -28,7 +28,7 @@ private func makeToolLauncher(name: String, command: String) -> String {
 /// Smart tab/pane title from CWD:
 ///   - git repo  → "reponame/branch"
 ///   - otherwise → "…/parent/dir"
-private func smartTitle(for path: String?) -> String {
+func smartTitle(for path: String?) -> String {
     guard let path, !path.isEmpty else { return "Terminal" }
     var url = URL(fileURLWithPath: path)
     while url.path != "/" {
@@ -1920,7 +1920,7 @@ private struct SidebarView: View {
                                     })
                                 }
                             }
-                            VStack(spacing: 0) {
+                            VStack(spacing: 5) {
                                 ForEach(manager.folders) { folder in
                                     FolderRow(
                                         folder: folder,

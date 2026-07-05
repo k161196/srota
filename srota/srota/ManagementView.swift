@@ -316,7 +316,7 @@ private struct AgentsPanel: View {
             .compactMap { pane -> DaemonAgentRow? in
                 let state = states[pane.stableID]
                 guard showAllProcesses || (state?.status != nil && state?.status != .done) else { return nil }
-                let fallbackTitle = pane.cwd.isEmpty ? "Terminal" : URL(fileURLWithPath: pane.cwd).lastPathComponent
+                let fallbackTitle = smartTitle(for: pane.cwd)
                 return DaemonAgentRow(
                     stableID: pane.stableID, cwd: pane.cwd,
                     title: openTitles[pane.stableID] ?? fallbackTitle,
@@ -496,11 +496,9 @@ private struct DaemonAgentRowView: View {
     @State private var isHovered = false
 
     var body: some View {
+        let statusColor = row.status?.color ?? Color.mgMuted
         Button(action: onSelect) {
             HStack(spacing: 8) {
-                Circle()
-                    .fill(row.status?.color ?? Color.mgMuted.opacity(0.4))
-                    .frame(width: 7, height: 7)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(row.title)
                         .font(.system(size: 13, weight: .medium))
@@ -519,13 +517,20 @@ private struct DaemonAgentRowView: View {
                     }
                 }
                 Spacer(minLength: 0)
+                Circle()
+                    .fill(row.status?.color ?? Color.mgMuted.opacity(0.4))
+                    .frame(width: 7, height: 7)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .background(isSelected ? Color.mgAccent.opacity(0.14) : (isHovered ? Color.mgRowHover : Color.clear))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
+        .glassCard(
+            fill: isSelected ? Color.mgAccent.opacity(0.14) : statusColor.opacity(isHovered ? 0.1 : 0.06),
+            borderTop: statusColor.opacity(0.35),
+            borderBottom: statusColor.opacity(0.18),
+            radius: 6
+        )
         .onHover { isHovered = $0 }
     }
 }
