@@ -283,6 +283,9 @@ private struct DaemonAgentRow: Identifiable {
     let status: AgentRunStatus?
     let agentName: String
     let updatedAt: Double
+    let workspaceID: UUID?
+    let folderName: String?
+    let folderTag: String?
     var id: String { stableID }
 }
 
@@ -311,16 +314,22 @@ private struct AgentsPanel: View {
                 }
             }
         })
+        let workspaceIDsByStableID = Dictionary(uniqueKeysWithValues: manager.allWorkspaces.flatMap { ws in
+            ws.tabs.flatMap { tab in tab.panes.map { ($0.daemonStableID, ws.id) } }
+        })
         return allPanes
             .filter { $0.exitCode == nil }
             .compactMap { pane -> DaemonAgentRow? in
                 let state = states[pane.stableID]
                 guard showAllProcesses || (state?.status != nil && state?.status != .done) else { return nil }
                 let fallbackTitle = smartTitle(for: pane.cwd)
+                let workspaceID = workspaceIDsByStableID[pane.stableID]
+                let folder = workspaceID.flatMap { wsID in manager.folders.first { $0.workspaces.contains { $0.id == wsID } } }
                 return DaemonAgentRow(
                     stableID: pane.stableID, cwd: pane.cwd,
                     title: openTitles[pane.stableID] ?? fallbackTitle,
-                    status: state?.status, agentName: state?.agent ?? "", updatedAt: state?.updatedAt ?? 0
+                    status: state?.status, agentName: state?.agent ?? "", updatedAt: state?.updatedAt ?? 0,
+                    workspaceID: workspaceID, folderName: folder?.name, folderTag: folder?.tag
                 )
             }
             .sorted { $0.updatedAt > $1.updatedAt }
@@ -349,7 +358,10 @@ private struct AgentsPanel: View {
                     ScrollView {
                         VStack(spacing: 2) {
                             ForEach(rows) { row in
-                                DaemonAgentRowView(row: row, isSelected: row.stableID == selectedStableID) {
+                                DaemonAgentRowView(
+                                    row: row,
+                                    isSelected: row.stableID == selectedStableID
+                                ) {
                                     selectedStableID = row.stableID
                                     attachment = nil
                                 }
@@ -384,7 +396,7 @@ private struct AgentsPanel: View {
             } else if claimedElsewhereStableIDs.contains(row.stableID) {
                 PaneStartOverlay(cwd: row.cwd, label: "Use Here") { attach(row) }
             } else {
-                Color.clear.onAppear { attach(row) }
+                Color.clear.id(row.stableID).onAppear { attach(row) }
             }
         } else {
             VStack {
@@ -500,10 +512,17 @@ private struct DaemonAgentRowView: View {
         Button(action: onSelect) {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(row.title)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.mgLabel)
-                        .lineLimit(1)
+                    HStack(spacing: 5) {
+                        Text(row.title)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.mgLabel)
+                            .lineLimit(1)
+                        if isSelected {
+                            Image(systemName: "bolt.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color.mgAccent)
+                        }
+                    }
                     if let status = row.status {
                         Text("\(status.label.lowercased()) · \(row.agentName)")
                             .font(.system(size: 11))
@@ -515,6 +534,18 @@ private struct DaemonAgentRowView: View {
                             .foregroundStyle(Color.mgMuted)
                             .lineLimit(1)
                     }
+                    if let folderName = row.folderName, !folderName.isEmpty {
+                        HStack(spacing: 4) {
+                            Text(folderName)
+                            if let folderTag = row.folderTag, !folderTag.isEmpty {
+                                Text("· \(folderTag)")
+                                    .truncationMode(.tail)
+                            }
+                        }
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.mgMuted)
+                        .lineLimit(1)
+                    }
                 }
                 Spacer(minLength: 0)
                 Circle()
@@ -523,6 +554,7 @@ private struct DaemonAgentRowView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .glassCard(

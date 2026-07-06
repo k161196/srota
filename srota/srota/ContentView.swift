@@ -1740,6 +1740,9 @@ func collectRunningAgents(_ manager: TerminalManager) -> [RunningAgent] {
 
 struct AgentRow: View {
     let agent: RunningAgent
+    let isWorkspaceOpen: Bool
+    let folderName: String?
+    let folderTag: String?
     let onSelect: () -> Void
     @State private var isHovered = false
     @State private var isPulsing = false
@@ -1756,14 +1759,33 @@ struct AgentRow: View {
                     .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(agent.status.color.opacity(0.3), lineWidth: 1))
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(agent.title)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Color.labelPrimary.opacity(0.9))
-                        .lineLimit(1)
+                    HStack(spacing: 5) {
+                        Text(agent.title)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.labelPrimary.opacity(0.9))
+                            .lineLimit(1)
+                        if isWorkspaceOpen {
+                            Image(systemName: "bolt.fill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(Color.accentOrange)
+                        }
+                    }
                     Text("\(agent.status.label.lowercased()) · \(agent.agentName)")
                         .font(.system(size: 10))
                         .foregroundStyle(agent.status.color)
                         .lineLimit(1)
+                    if let folderName, !folderName.isEmpty {
+                        HStack(spacing: 4) {
+                            Text(folderName)
+                            if let folderTag, !folderTag.isEmpty {
+                                Text("· \(folderTag)")
+                                    .truncationMode(.tail)
+                            }
+                        }
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.sectionHeader)
+                        .lineLimit(1)
+                    }
                 }
                 Spacer(minLength: 4)
                 Circle()
@@ -1990,7 +2012,13 @@ private struct AgentsSidebarSection: View {
 
                 VStack(spacing: 6) {
                     ForEach(agents.prefix(Self.cap)) { agent in
-                        AgentRow(agent: agent) {
+                        let folder = manager.folders.first { $0.workspaces.contains { $0.id == agent.workspaceID } }
+                        AgentRow(
+                            agent: agent,
+                            isWorkspaceOpen: manager.selectedWorkspaceID == agent.workspaceID,
+                            folderName: folder?.name,
+                            folderTag: folder?.tag
+                        ) {
                             onSelect(agent.workspaceID, agent.tabID, agent.paneID)
                         }
                     }
