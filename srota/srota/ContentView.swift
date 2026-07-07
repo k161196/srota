@@ -1290,9 +1290,11 @@ struct ContentView: View {
     private func launchAgent(agent: AgentItem, systemPrompt: String, firstMessage: String, preset: TerminalPreset?) {
         // sheet preset wins; fall back to agent's saved presetID so it applies even if user didn't touch the picker
         let resolvedPreset = preset ?? presetsStore.presets.first { $0.id == agent.presetID }
-        let base = resolvedPreset?.commands.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        let commandBase = resolvedPreset?.commands.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
                          .joined(separator: " ")
             ?? (agent.name.localizedCaseInsensitiveContains("codex") ? "codex" : "claude")
+        let presetArgs = resolvedPreset?.arguments.trimmingCharacters(in: .whitespaces) ?? ""
+        let base = presetArgs.isEmpty ? commandBase : "\(commandBase) \(presetArgs)"
         // Empty flag = agent takes prompt positionally (e.g. codex) — no separate system-prompt flag,
         // so fold the system prompt into the user prompt instead of dropping it.
         let flag = resolvedPreset?.systemPromptFlag ?? "--system-prompt"

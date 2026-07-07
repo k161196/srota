@@ -10,6 +10,13 @@ struct AgentItem: Codable, Identifiable {
     var presetID: UUID?
     var runInTempDir: Bool = false
     var isBuiltIn: Bool = false
+    // Snapshot of the built-in default text last written to disk for this agent.
+    // If the file on disk still matches this, the user hasn't edited it, so app
+    // updates can safely roll the new default in. Nil means unknown (pre-existing
+    // install from before this tracking existed) — treated as "adopt current file
+    // as baseline" rather than risking an overwrite of a possible edit.
+    var syncedSystemPrompt: String? = nil
+    var syncedFirstMessage: String? = nil
 }
 
 @Observable @MainActor
@@ -141,6 +148,10 @@ Review the pull request:
 
 Summarize what changed, call out risks/bugs/missing tests, and report whether CI is passing. Cite file/line where relevant.
 
+Explicitly flag, in their own section:
+- **API changes**: any request or response structure/schema changes (new/removed/renamed fields, type changes, endpoint changes).
+- **DB changes**: any database column changes (added/removed/renamed columns, type changes, migrations).
+
 Do not approve, merge, or request changes (`gh pr review`, `gh pr merge`) without the user explicitly asking you to.
 """
 
@@ -204,16 +215,24 @@ Do not approve, merge, or request changes (`gh pr review`, `gh pr merge`) withou
     }
 
     func resetToDefault(agent: AgentItem) {
-        guard agent.isBuiltIn else { return }
-        if agent.name == "Github Issues Agent" {
-            saveSystemPrompt(Self.githubIssuesSystemPrompt, to: agent.instructionsPath)
-            if let path = agent.firstMessagePath { saveFirstMessage(Self.githubIssuesFirstMessage, to: path) }
-        } else if agent.name == "Jira Issues Agent" {
-            saveSystemPrompt(Self.jiraIssuesSystemPrompt, to: agent.instructionsPath)
-            if let path = agent.firstMessagePath { saveFirstMessage(Self.jiraIssuesFirstMessage, to: path) }
-        } else if agent.name == "GitHub PR Review Agent" {
-            saveSystemPrompt(Self.reviewPRSystemPrompt, to: agent.instructionsPath)
-            if let path = agent.firstMessagePath { saveFirstMessage(Self.reviewPRFirstMessage, to: path) }
+        guard agent.isBuiltIn, let idx = agents.firstIndex(where: { $0.id == agent.id }) else { return }
+        let (systemPrompt, firstMessage) = Self.defaults(for: agent.name)
+        guard let systemPrompt else { return }
+        saveSystemPrompt(systemPrompt, to: agent.instructionsPath)
+        agents[idx].syncedSystemPrompt = systemPrompt
+        if let path = agent.firstMessagePath {
+            saveFirstMessage(firstMessage, to: path)
+            agents[idx].syncedFirstMessage = firstMessage
+        }
+        save()
+    }
+
+    private static func defaults(for name: String) -> (String?, String) {
+        switch name {
+        case "Github Issues Agent":     return (githubIssuesSystemPrompt, githubIssuesFirstMessage)
+        case "Jira Issues Agent":       return (jiraIssuesSystemPrompt, jiraIssuesFirstMessage)
+        case "GitHub PR Review Agent":  return (reviewPRSystemPrompt, reviewPRFirstMessage)
+        default:                        return (nil, "")
         }
     }
 
@@ -230,6 +249,42 @@ Do not approve, merge, or request changes (`gh pr review`, `gh pr merge`) withou
         if !agents.contains(where: { $0.name == "GitHub PR Review Agent" && $0.isBuiltIn }) {
             seedReviewPR()
         }
+        syncBuiltInDefaults()
+    }
+
+    // Rolls the current shipped default into a built-in agent's prompt file, but only if
+    // the file still matches the default that was synced last time — i.e. the user hasn't
+    // edited it. Runs on every launch so an app update can push prompt changes to agents
+    // nobody has customized.
+    private func syncBuiltInDefaults() {
+        var didChange = false
+        for idx in agents.indices where agents[idx].isBuiltIn {
+            let (systemPrompt, firstMessage) = Self.defaults(for: agents[idx].name)
+            guard let systemPrompt else { continue }
+
+            let currentSystem = (try? String(contentsOfFile: agents[idx].instructionsPath, encoding: .utf8)) ?? ""
+            if agents[idx].syncedSystemPrompt == nil {
+                agents[idx].syncedSystemPrompt = currentSystem
+                didChange = true
+            } else if agents[idx].syncedSystemPrompt == currentSystem && currentSystem != systemPrompt {
+                saveSystemPrompt(systemPrompt, to: agents[idx].instructionsPath)
+                agents[idx].syncedSystemPrompt = systemPrompt
+                didChange = true
+            }
+
+            if let path = agents[idx].firstMessagePath {
+                let currentFirst = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+                if agents[idx].syncedFirstMessage == nil {
+                    agents[idx].syncedFirstMessage = currentFirst
+                    didChange = true
+                } else if agents[idx].syncedFirstMessage == currentFirst && currentFirst != firstMessage {
+                    saveFirstMessage(firstMessage, to: path)
+                    agents[idx].syncedFirstMessage = firstMessage
+                    didChange = true
+                }
+            }
+        }
+        if didChange { save() }
     }
 
     private func seedGitHub() {
@@ -243,7 +298,9 @@ Do not approve, merge, or request changes (`gh pr review`, `gh pr merge`) withou
             instructionsPath: sysPath,
             firstMessagePath: firstPath,
             runInTempDir: false,
-            isBuiltIn: true
+            isBuiltIn: true,
+            syncedSystemPrompt: Self.githubIssuesSystemPrompt,
+            syncedFirstMessage: Self.githubIssuesFirstMessage
         ), at: 0)
         save()
     }
@@ -261,7 +318,9 @@ Do not approve, merge, or request changes (`gh pr review`, `gh pr merge`) withou
             instructionsPath: sysPath,
             firstMessagePath: firstPath,
             runInTempDir: false,
-            isBuiltIn: true
+            isBuiltIn: true,
+            syncedSystemPrompt: Self.jiraIssuesSystemPrompt,
+            syncedFirstMessage: Self.jiraIssuesFirstMessage
         ), at: insertIdx)
         save()
     }
@@ -278,7 +337,9 @@ Do not approve, merge, or request changes (`gh pr review`, `gh pr merge`) withou
             instructionsPath: sysPath,
             firstMessagePath: firstPath,
             runInTempDir: false,
-            isBuiltIn: true
+            isBuiltIn: true,
+            syncedSystemPrompt: Self.reviewPRSystemPrompt,
+            syncedFirstMessage: Self.reviewPRFirstMessage
         ), at: insertIdx)
         save()
     }
