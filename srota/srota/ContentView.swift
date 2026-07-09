@@ -349,6 +349,14 @@ self.removePane(id: entryID, closeDaemon: false)
         }
     }
 
+    // Same effect as tapping the pane's "Start"/"Use Here" overlay, minus the manual step —
+    // used by hydrateIfNeeded to resume panes that were already attached before dehydrate().
+    func resumePane(id: UUID) {
+        guard let entry = panes.first(where: { $0.id == id }), !entry.isStarted else { return }
+        entry.startAction?()
+        entry.isStarted = true
+    }
+
     func swapLayouts(_ a: UUID, _ b: UUID) {
         guard a != b else { return }
         let la = paneLayouts[a] ?? PaneLayout()
@@ -461,6 +469,15 @@ final class Workspace: Identifiable, ObservableObject {
     private var lastColorScheme: ColorScheme = .dark
     private var tabSinks: [AnyCancellable] = []
 
+    // Tabs/panes restored from the DB for a workspace that hasn't been selected yet — deferred
+    // here instead of materialized immediately, since each pane is a live Ghostty (Metal) surface
+    // and most persisted workspaces are never revisited in a given session. See hydrateIfNeeded.
+    var pendingRestore: [(TabRecord, [PaneRecord])]?
+    var tabCount: Int { pendingRestore?.count ?? tabs.count }
+    // Last-saved cwd from the DB, kept for workspaces still awaiting hydration — currentWorkingDirectory
+    // reads the live selectedTab, which doesn't exist yet for those, so this is the fallback saveLayout uses.
+    var lastCWD: String = ""
+
     private func rebindTabSinks() {
         tabSinks = tabs.map { tab in
             tab.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
@@ -511,6 +528,98 @@ final class Workspace: Identifiable, ObservableObject {
         if record.isSelected { selectedTabID = tab.id }
     }
 
+    /// Materializes tabs/panes deferred by restoreSessionsFromDB — called once, the first time
+    /// this workspace is actually selected. No-op if already hydrated or never had pending data.
+    /// Restored panes default to the manual "Start" overlay (see TerminalTab.init/restorePane) —
+    /// safe for a cold DB restore where the daemon session may be long gone. dehydratedActiveStableIDs
+    /// overrides that default for panes we know are still attached (see dehydrate), auto-resuming
+    /// them instead of showing "Start" again.
+    func hydrateIfNeeded(colorScheme: ColorScheme) {
+        guard let pending = pendingRestore else { return }
+        pendingRestore = nil
+        let activeIDs = dehydratedActiveStableIDs
+        dehydratedActiveStableIDs = []
+        for (tabRecord, sortedPanes) in pending {
+            addRestoredTab(record: tabRecord, colorScheme: colorScheme, firstPaneStableID: sortedPanes.first?.id)
+            guard let tab = tabs.last else { continue }
+            if let firstRecord = sortedPanes.first, !tab.panes.isEmpty {
+                tab.paneLayouts[tab.panes[0].id] = PaneLayout(
+                    x: CGFloat(firstRecord.lx), y: CGFloat(firstRecord.ly),
+                    w: CGFloat(firstRecord.lw), h: CGFloat(firstRecord.lh))
+                if firstRecord.lw == 0 || firstRecord.lh == 0 {
+                    tab.removePane(id: tab.panes[0].id)
+                } else if activeIDs.contains(firstRecord.id) {
+                    tab.resumePane(id: tab.panes[0].id)
+                }
+            }
+            for record in sortedPanes.dropFirst() {
+                tab.restorePane(record: record, colorScheme: colorScheme)
+                if activeIDs.contains(record.id), let restored = tab.panes.last {
+                    tab.resumePane(id: restored.id)
+                }
+            }
+        }
+        if selectedTabID == nil { selectedTabID = tabs.first?.id }
+    }
+
+    // Stable IDs of panes that were already attached (past the manual Start/"Use Here" step)
+    // the last time dehydrate() ran — consumed once by hydrateIfNeeded above.
+    private var dehydratedActiveStableIDs: Set<String> = []
+
+    /// Builds this workspace's (tab, panes) records from its live state and saves them to `db`.
+    /// No-op / returns nil if not yet hydrated this session — see hydrateIfNeeded's comment for
+    /// why untouched persisted state is left alone. Shared by saveLayout() and dehydrate() so
+    /// there's one place that knows how to turn live tabs/panes into persistable records.
+    @discardableResult
+    func snapshotTabsAndPanes(db: WorkspaceDB?) -> [(TabRecord, [PaneRecord])]? {
+        guard pendingRestore == nil else { return nil }
+        db?.deleteTabs(workspaceID: id.uuidString)
+        return tabs.enumerated().map { ti, tab in
+            let tabRecord = TabRecord(
+                id: tab.id.uuidString, workspaceID: id.uuidString,
+                position: ti,
+                initialCWD: tab.initialWorkingDirectory ?? "",
+                isSelected: tab.id == selectedTabID)
+            db?.saveTab(tabRecord)
+            let paneRecords = tab.panes.enumerated().compactMap { i, pane -> PaneRecord? in
+                guard let layout = tab.paneLayouts[pane.id] else { return nil }
+                let record = PaneRecord(
+                    id: pane.daemonStableID, tabID: tab.id.uuidString,
+                    isPrimary: i == 0,
+                    lx: Double(layout.x), ly: Double(layout.y),
+                    lw: Double(layout.w), lh: Double(layout.h),
+                    initialCWD: resolveCWD(pane.viewState.workingDirectory) ?? pane.initialCWD ?? "",
+                    position: i)
+                db?.savePane(record)
+                return record
+            }
+            return (tabRecord, paneRecords)
+        }
+    }
+
+    // Inverse of hydrateIfNeeded — releases this workspace's live Metal-backed panes back to
+    // lightweight pendingRestore records, so at most one workspace holds GPU terminal surfaces
+    // at a time. Persists first so nothing since the last save is lost. Daemon PTYs are left
+    // running (removePane/onClose already default to closeDaemon: false-equivalent teardown
+    // paths) — reselecting reattaches to the same sessions via hydrateIfNeeded/attachWithReclaim.
+    func dehydrate(db: WorkspaceDB?) {
+        guard !tabs.isEmpty, let pending = snapshotTabsAndPanes(db: db) else { return }
+        dehydratedActiveStableIDs = Set(tabs.flatMap(\.panes).filter(\.isStarted).map(\.daemonStableID))
+        lastCWD = currentWorkingDirectory ?? lastCWD
+        tabs = []
+        pendingRestore = pending
+    }
+
+    // Closing a workspace that was never selected has nothing in `tabs` to shut down — its panes
+    // only exist as `pendingRestore` records, so close their daemon sessions directly by stableID
+    // instead of silently orphaning those PTYs.
+    func shutdownAll() {
+        for tab in tabs { tab.shutdown() }
+        for pane in pendingRestore?.flatMap(\.1) ?? [] {
+            daemon?.closeSession(stableID: pane.id)
+        }
+    }
+
 func closeTab(id: UUID) {
  if let tab = tabs.first(where: { $0.id == id }) {
  tab.shutdown()
@@ -555,13 +664,27 @@ final class WorkspaceFolder: Identifiable, ObservableObject {
 @MainActor
 final class TerminalManager: ObservableObject {
     var daemon: DaemonConnection? = nil
+    var db: WorkspaceDB? = nil
     @Published var workspaces: [Workspace] = [] {   // unfiled
         didSet { rebindWorkspaceSinks() }
     }
     @Published var folders: [WorkspaceFolder] = [] {
         didSet { rebindFolderSinks() }
     }
-    @Published var selectedWorkspaceID: UUID?
+    @Published var selectedWorkspaceID: UUID? {
+        didSet {
+            // Only the just-selected workspace needs its terminals live — dehydrate whatever was
+            // showing before so at most one workspace holds GPU-backed Metal surfaces at a time.
+            if let previousID = oldValue, previousID != selectedWorkspaceID {
+                allWorkspaces.first { $0.id == previousID }?.dehydrate(db: db)
+            }
+            selectedWorkspace?.hydrateIfNeeded(colorScheme: launchColorScheme)
+        }
+    }
+    // Captured once at startup restore — existing panes never re-apply color scheme
+    // dynamically anyway (see TerminalTab.init), so a single captured value is consistent
+    // with current behavior for panes hydrated later in the session.
+    var launchColorScheme: ColorScheme = .dark
 
     // Transient (unpersisted) drag-reorder UI state, shared across rows so exactly one
     // row is ever "the" insertion target — a per-row @State bool let two adjacent rows
@@ -678,7 +801,7 @@ final class TerminalManager: ObservableObject {
 
 func closeWorkspace(id: UUID) {
 if let workspace = allWorkspaces.first(where: { $0.id == id }) {
-for tab in workspace.tabs { tab.shutdown() }
+workspace.shutdownAll()
 }
 if selectedWorkspaceID == id {
 let all = allWorkspaces
@@ -1562,30 +1685,16 @@ struct ContentView: View {
             db.saveWorkspaceSession(WorkspaceSession(
                 id: ws.id.uuidString, name: ws.name,
                 folderName: folderName, folderTag: folderTag, position: position,
-                lastCWD: ws.currentWorkingDirectory ?? "",
+                lastCWD: ws.currentWorkingDirectory ?? ws.lastCWD,
                 lastAccessed: Int(Date().timeIntervalSince1970),
                 isPinned: ws.isPinned,
                 directory: ws.directory,
                 folderPosition: folderPosition))
-            db.deleteTabs(workspaceID: ws.id.uuidString)
-            for (ti, tab) in ws.tabs.enumerated() {
-                db.saveTab(TabRecord(
-                    id: tab.id.uuidString, workspaceID: ws.id.uuidString,
-                    position: ti,
-                    initialCWD: tab.initialWorkingDirectory ?? "",
-                    isSelected: tab.id == ws.selectedTabID))
-                for (i, pane) in tab.panes.enumerated() {
-                    if let layout = tab.paneLayouts[pane.id] {
-                        db.savePane(PaneRecord(
-                            id: pane.daemonStableID, tabID: tab.id.uuidString,
-                            isPrimary: i == 0,
-                            lx: Double(layout.x), ly: Double(layout.y),
-                            lw: Double(layout.w), lh: Double(layout.h),
-                            initialCWD: resolveCWD(pane.viewState.workingDirectory) ?? pane.initialCWD ?? "",
-                            position: i))
-                    }
-                }
-            }
+            // Never hydrated this session (see Workspace.hydrateIfNeeded), or already dehydrated
+            // (see Workspace.dehydrate, which persists its own snapshot before releasing tabs) —
+            // either way ws.tabs is empty but its persisted tabs/panes are already correct, so
+            // leave them untouched instead of deleting them out from under it.
+            ws.snapshotTabsAndPanes(db: db)
         }
         for (i, ws) in unfiledWSes.enumerated() { save(ws: ws, folderName: "", folderTag: "", position: i, folderPosition: -1) }
         for (fi, folder) in allFolders.enumerated() {
@@ -1597,6 +1706,8 @@ struct ContentView: View {
 
     private func restoreSessionsFromDB(colorScheme: ColorScheme) {
         manager.daemon = daemon
+        manager.db = db
+        manager.launchColorScheme = colorScheme
         let saved = db.loadWorkspaceSessions()
         guard !saved.isEmpty else { return }
         for session in saved {
@@ -1609,31 +1720,17 @@ struct ContentView: View {
             ws.isPinned = session.isPinned
             ws.directory = session.directory
             ws.lastAccessed = Date(timeIntervalSince1970: TimeInterval(session.lastAccessed))
+            ws.lastCWD = session.lastCWD
             let cwd = session.lastCWD.isEmpty ? nil : session.lastCWD
             let tabs = db.loadTabs(workspaceID: session.id)
             if tabs.isEmpty {
                 ws.addTab(colorScheme: colorScheme, workingDirectory: cwd)
             } else {
-                for tabRecord in tabs.sorted(by: { $0.position < $1.position }) {
-                    let sortedPanes = db.loadPanes(tabID: tabRecord.id)
-                        .sorted(by: { $0.position < $1.position })
-                    ws.addRestoredTab(record: tabRecord, colorScheme: colorScheme,
-                                      firstPaneStableID: sortedPanes.first?.id)
-                    if let tab = ws.tabs.last {
-                        if let firstRecord = sortedPanes.first, !tab.panes.isEmpty {
-                            tab.paneLayouts[tab.panes[0].id] = PaneLayout(
-                                x: CGFloat(firstRecord.lx), y: CGFloat(firstRecord.ly),
-                                w: CGFloat(firstRecord.lw), h: CGFloat(firstRecord.lh))
-                            if firstRecord.lw == 0 || firstRecord.lh == 0 {
-                                tab.removePane(id: tab.panes[0].id)
-                            }
-                        }
-                        for record in sortedPanes.dropFirst() {
-                            tab.restorePane(record: record, colorScheme: colorScheme)
-                        }
-                    }
+                // Only the workspace about to be shown needs its panes materialized right away —
+                // see Workspace.hydrateIfNeeded for why every other one stays deferred.
+                ws.pendingRestore = tabs.sorted(by: { $0.position < $1.position }).map { tabRecord in
+                    (tabRecord, db.loadPanes(tabID: tabRecord.id).sorted { $0.position < $1.position })
                 }
-                if ws.selectedTabID == nil { ws.selectedTabID = ws.tabs.first?.id }
             }
             if let folder {
                 folder.workspaces.append(ws)
@@ -1644,6 +1741,9 @@ struct ContentView: View {
         if manager.selectedWorkspaceID == nil {
             manager.selectedWorkspaceID = manager.allWorkspaces.first?.id
         }
+        // Covers the case where selectedWorkspaceID was already set before this restore ran
+        // (didSet above would've fired too early, before pendingRestore existed).
+        manager.selectedWorkspace?.hydrateIfNeeded(colorScheme: colorScheme)
     }
 }
 
@@ -2376,7 +2476,7 @@ private struct PinnedWorkspaceCard: View {
                     }
                     .buttonStyle(.plain)
                 } else {
-                    Text("\(workspace.tabs.count)")
+                    Text("\(workspace.tabCount)")
                         .font(.system(size: 10).monospacedDigit())
                         .foregroundStyle(Color.sectionHeader.opacity(0.7))
                 }
@@ -2498,7 +2598,7 @@ private struct WorkspaceRow: View {
                 }
                 .buttonStyle(.plain)
             } else {
-                Text("\(workspace.tabs.count)")
+                Text("\(workspace.tabCount)")
                     .font(.system(size: 10).monospacedDigit())
                     .foregroundStyle(Color.sectionHeader.opacity(0.7))
             }
