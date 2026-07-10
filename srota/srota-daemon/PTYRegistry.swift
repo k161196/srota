@@ -113,6 +113,21 @@ final class PTYRegistry {
         lock.unlock()
 
         proc?.markExited(code: exitCode)
+        // Only markExited's subscribers learn the pane died; every other client
+        // (e.g. the Agents tab, if not attached to this exact pane) still has a
+        // stale entry in its agentStatesByStableID. Broadcasting a nil-status
+        // update reuses the client's existing "agent_status with no status ->
+        // remove" path (DaemonConnection.swift) to prune it everywhere at once.
+        if let proc {
+            broadcast(.agentStatus(AgentStatusPayload(
+                paneID: proc.paneID,
+                stableID: proc.stableID,
+                status: nil,
+                agent: nil,
+                summary: nil,
+                updatedAt: nil
+            )))
+        }
     }
 
     private func withProcess(paneID: String) -> PTYProcess? {

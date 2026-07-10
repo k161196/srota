@@ -2578,9 +2578,11 @@ private struct RepoDetailView: View {
         let repoID = repo.id
         let headRef = pr.headRefName
         Task.detached {
+            // Fetch into FETCH_HEAD rather than directly into the branch ref: if headRef
+            // is already checked out in another worktree, git refuses to update it directly.
             let fetchP = Process(); let fetchErrPipe = Pipe()
             fetchP.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            fetchP.arguments = ["-C", mainPath, "fetch", "origin", "pull/\(pr.number)/head:\(headRef)"]
+            fetchP.arguments = ["-C", mainPath, "fetch", "origin", "pull/\(pr.number)/head"]
             fetchP.standardError = fetchErrPipe
             do { try fetchP.run() } catch {
                 await MainActor.run { checkingOutPR = nil; checkoutError = error.localizedDescription }
@@ -2593,9 +2595,18 @@ private struct RepoDetailView: View {
                 await MainActor.run { checkingOutPR = nil; checkoutError = msg.isEmpty ? "git fetch failed" : msg }
                 return
             }
+            let branchExistsP = Process()
+            branchExistsP.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            branchExistsP.arguments = ["-C", mainPath, "show-ref", "--verify", "--quiet", "refs/heads/\(headRef)"]
+            try? branchExistsP.run()
+            branchExistsP.waitUntilExit()
+            let branchExists = branchExistsP.terminationStatus == 0
+
             let worktreeP = Process(); let worktreeErrPipe = Pipe()
             worktreeP.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            worktreeP.arguments = ["-C", mainPath, "worktree", "add", path, headRef]
+            worktreeP.arguments = branchExists
+                ? ["-C", mainPath, "worktree", "add", path, headRef]
+                : ["-C", mainPath, "worktree", "add", path, "-b", headRef, "FETCH_HEAD"]
             worktreeP.standardError = worktreeErrPipe
             do { try worktreeP.run() } catch {
                 await MainActor.run { checkingOutPR = nil; checkoutError = error.localizedDescription }

@@ -8,8 +8,10 @@ enum AgentRunStatus: String, Codable {
 
     init?(event: String) {
         switch event {
-        case "Start", "SessionStart":
+        case "Start":
             self = .working
+        case "SessionStart":
+            self = .idle
         case "PermissionRequest":
             self = .blocked
         case "Stop":

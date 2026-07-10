@@ -318,8 +318,10 @@ final class PTYProcess {
 
     private static func status(for event: String) -> String? {
         switch event {
-        case "Start", "SessionStart":
+        case "Start":
             return "working"
+        case "SessionStart":
+            return "idle"
         case "PermissionRequest":
             return "blocked"
         case "Stop":
