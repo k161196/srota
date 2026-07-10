@@ -105,6 +105,16 @@ final class PTYProcess {
             throw NSError(domain: "PTY", code: Int(errno), userInfo: [NSLocalizedDescriptionKey: "forkpty failed"])
         }
 
+        // Kernel-echo off: the terminal engine answers OSC/DSR queries (bg color, cursor
+        // position) by writing the response back through this same fd. With ECHO on (the
+        // forkpty default before the child sets its own raw mode), that write loops straight
+        // back into the read side and shows up as literal garbage in the pane.
+        var attrs = termios()
+        if tcgetattr(newMasterFD, &attrs) == 0 {
+            attrs.c_lflag &= ~tcflag_t(ECHO)
+            tcsetattr(newMasterFD, TCSANOW, &attrs)
+        }
+
         if childPID == 0 {
             _ = chdir(cwd)
             execve(argv[0], argv, envp)

@@ -81,6 +81,19 @@ final class PTYRegistry {
             let proc = withProcess(paneID: paneID)
             if proc?.terminate() == false {
                 removeProcess(paneID: paneID, pid: proc?.pid)
+                // proc was already gone (ESRCH) — terminate() never fired a .dead/.agentStatus
+                // update, so other clients' agentStatesByStableID would keep a stale entry
+                // (see reapExited's identical broadcast for the same reason).
+                if let proc {
+                    broadcast(.agentStatus(AgentStatusPayload(
+                        paneID: proc.paneID,
+                        stableID: proc.stableID,
+                        status: nil,
+                        agent: nil,
+                        summary: nil,
+                        updatedAt: nil
+                    )))
+                }
             }
             client.send(.ok)
         }
