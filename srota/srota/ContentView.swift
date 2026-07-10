@@ -1012,7 +1012,7 @@ private struct ResizableSidebar: View {
     let keyboardFocusedWorkspaceID: UUID?
     let onAdd: () -> Void
     let onSelectWorkspace: (UUID) -> Void
-    let onSelectAgentTab: (UUID, UUID, UUID) -> Void
+    let onSelectAgentTab: (UUID, String) -> Void
     let onShowAllAgents: () -> Void
 
     @State private var width: CGFloat = 220
@@ -1112,9 +1112,9 @@ struct ContentView: View {
                         clearSidebarKeyboardFocus()
                         manager.selectWorkspace(id: id)
                     },
-                    onSelectAgentTab: { workspaceID, tabID, paneID in
+                    onSelectAgentTab: { workspaceID, stableID in
                         clearSidebarKeyboardFocus()
-                        focusAgentPane(workspaceID: workspaceID, tabID: tabID, paneID: paneID)
+                        focusAgentPane(workspaceID: workspaceID, stableID: stableID)
                     },
                     onShowAllAgents: { managementTab = .agents }
                 )
@@ -1629,12 +1629,16 @@ struct ContentView: View {
         }
     }
 
-    private func focusAgentPane(workspaceID: UUID, tabID: UUID, paneID: UUID) {
+    private func focusAgentPane(workspaceID: UUID, stableID: String) {
         guard let ws = manager.allWorkspaces.first(where: { $0.id == workspaceID }) else { return }
+        // Selecting hydrates the workspace synchronously (see selectedWorkspaceID's didSet),
+        // so ws.tabs is populated by the time we search it below even if it was dehydrated.
         manager.selectWorkspace(id: workspaceID)
-        ws.selectedTabID = tabID
-        if let tab = ws.tabs.first(where: { $0.id == tabID }), tab.panes.contains(where: { $0.id == paneID }) {
-            tab.focusedPaneID = paneID
+        if let tab = ws.tabs.first(where: { tab in tab.panes.contains { $0.daemonStableID == stableID } }) {
+            ws.selectedTabID = tab.id
+            if let pane = tab.panes.first(where: { $0.daemonStableID == stableID }) {
+                tab.focusedPaneID = pane.id
+            }
         }
         managementTab = .workspaces
     }
@@ -1809,8 +1813,6 @@ struct AgentStatusBadge: View {
 // its own agent shows up as two separate agents here.
 struct RunningAgent: Identifiable {
     let workspaceID: UUID
-    let tabID: UUID
-    let paneID: UUID
     let stableID: String
     let title: String
     let status: AgentRunStatus
@@ -1819,19 +1821,36 @@ struct RunningAgent: Identifiable {
     var id: String { stableID }
 }
 
+// Reads status straight from the daemon's stableID-keyed state rather than walking
+// ws.tabs/panes — those are only materialized for the currently-hydrated workspace
+// (see Workspace.dehydrate), so a tabs-based walk would silently drop every agent
+// belonging to a workspace that isn't the one currently open. PaneRecord.id doubles
+// as its daemonStableID (see restorePane), so pendingRestore alone is enough here.
 func collectRunningAgents(_ manager: TerminalManager) -> [RunningAgent] {
     let states = manager.daemon?.agentStatesByStableID ?? [:]
     return manager.allWorkspaces
-        .flatMap { ws in
-            ws.tabs.flatMap { tab in
+        .flatMap { ws -> [RunningAgent] in
+            if let pending = ws.pendingRestore {
+                return pending.flatMap { _, paneRecords in
+                    paneRecords.compactMap { record -> RunningAgent? in
+                        guard let state = states[record.id], let status = state.status, status != .done else { return nil }
+                        return RunningAgent(
+                            workspaceID: ws.id, stableID: record.id,
+                            title: smartTitle(for: record.initialCWD),
+                            status: status, agentName: state.agent, updatedAt: state.updatedAt
+                        )
+                    }
+                }
+            }
+            return ws.tabs.flatMap { tab in
                 tab.panes.compactMap { pane -> RunningAgent? in
                     guard let state = states[pane.daemonStableID],
-                          let status = state.status else { return nil }
+                          let status = state.status, status != .done else { return nil }
                     let paneCWD = resolveCWD(pane.viewState.workingDirectory) ?? pane.initialCWD
                     let title = tab.paneNames[pane.id].flatMap { $0.isEmpty ? nil : $0 }
                         ?? smartTitle(for: paneCWD)
                     return RunningAgent(
-                        workspaceID: ws.id, tabID: tab.id, paneID: pane.id, stableID: pane.daemonStableID,
+                        workspaceID: ws.id, stableID: pane.daemonStableID,
                         title: title, status: status, agentName: state.agent, updatedAt: state.updatedAt
                     )
                 }
@@ -1919,7 +1938,7 @@ private struct SidebarView: View {
     let keyboardFocusedWorkspaceID: UUID?
     let onAdd: () -> Void
     let onSelectWorkspace: (UUID) -> Void
-    let onSelectAgentTab: (UUID, UUID, UUID) -> Void
+    let onSelectAgentTab: (UUID, String) -> Void
     let onShowAllAgents: () -> Void
     @State private var newFolderID: UUID? = nil
     @State private var isDragTargetUnfiled = false
@@ -2083,7 +2102,7 @@ private struct SidebarView: View {
 
 private struct AgentsSidebarSection: View {
     @ObservedObject var manager: TerminalManager
-    let onSelect: (UUID, UUID, UUID) -> Void
+    let onSelect: (UUID, String) -> Void
     let onShowAll: () -> Void
 
     private static let cap = 5
@@ -2121,7 +2140,7 @@ private struct AgentsSidebarSection: View {
                             folderName: folder?.name,
                             folderTag: folder?.tag
                         ) {
-                            onSelect(agent.workspaceID, agent.tabID, agent.paneID)
+                            onSelect(agent.workspaceID, agent.stableID)
                         }
                     }
                 }
