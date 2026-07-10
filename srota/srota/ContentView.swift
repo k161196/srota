@@ -265,6 +265,7 @@ final class TerminalTab: Identifiable, ObservableObject {
         panes.removeAll { $0.id == id }
         paneLayouts.removeValue(forKey: id)
 paneNames.removeValue(forKey: id)
+NSLog("PANEBUG removePane id=%@ tab=%@ panes.count now=%d", id.uuidString, self.id.uuidString, panes.count)
 if panes.isEmpty {
 closeTabCallback?()
 } else if wasFocused {
@@ -572,7 +573,11 @@ final class Workspace: Identifiable, ObservableObject {
     /// there's one place that knows how to turn live tabs/panes into persistable records.
     @discardableResult
     func snapshotTabsAndPanes(db: WorkspaceDB?) -> [(TabRecord, [PaneRecord])]? {
-        guard pendingRestore == nil else { return nil }
+        guard pendingRestore == nil else {
+            NSLog("PANEBUG snapshotTabsAndPanes SKIPPED (pendingRestore != nil) ws=%@ name=%@", id.uuidString, name)
+            return nil
+        }
+        NSLog("PANEBUG snapshotTabsAndPanes ws=%@ name=%@ tabs=%d panesPerTab=%@", id.uuidString, name, tabs.count, tabs.map { $0.panes.count }.description)
         db?.deleteTabs(workspaceID: id.uuidString)
         return tabs.enumerated().map { ti, tab in
             let tabRecord = TabRecord(
@@ -1733,7 +1738,9 @@ struct ContentView: View {
                 // Only the workspace about to be shown needs its panes materialized right away —
                 // see Workspace.hydrateIfNeeded for why every other one stays deferred.
                 ws.pendingRestore = tabs.sorted(by: { $0.position < $1.position }).map { tabRecord in
-                    (tabRecord, db.loadPanes(tabID: tabRecord.id).sorted { $0.position < $1.position })
+                    let panes = db.loadPanes(tabID: tabRecord.id).sorted { $0.position < $1.position }
+                    NSLog("PANEBUG restore ws=%@ name=%@ tab=%@ paneCount=%d", session.id, session.name, tabRecord.id, panes.count)
+                    return (tabRecord, panes)
                 }
             }
             if let folder {

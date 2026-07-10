@@ -545,6 +545,7 @@ final class WorkspaceDB {
         let tabIDs = rows(sql("SELECT id", sqlFrom, "ws_tabs", sqlWhere, "workspace_id = ?"), bind: [workspaceID]) {
             col($0, 0)
         }
+        NSLog("PANEBUG deleteTabs ws=%@ tabIDs=%@", workspaceID, tabIDs)
         for tabID in tabIDs {
             exec(sql("DELETE", sqlFrom, "ws_panes", sqlWhere, "tab_id = ?"), [tabID])
         }
@@ -564,6 +565,7 @@ final class WorkspaceDB {
     }
 
     func savePane(_ pane: PaneRecord) {
+        NSLog("PANEBUG savePane id=%@ tab=%@ pos=%d", pane.id, pane.tabID, pane.position)
         upsert("ws_panes", [
             "id": pane.id,
             "tab_id": pane.tabID,
