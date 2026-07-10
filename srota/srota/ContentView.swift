@@ -1048,7 +1048,6 @@ struct ContentView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(DaemonConnection.self) private var daemon
     @Environment(WorkspaceDB.self) private var db
-    @Environment(FeatureAgentFocus.self) private var agentFocus
     @Environment(KeyboardShortcutManager.self) private var shortcuts
     @Environment(PresetsStore.self) private var presetsStore
     @Environment(AgentsStore.self) private var agentsStore
@@ -1093,11 +1092,7 @@ struct ContentView: View {
                 } else {
                     cmd = (filtered.dropLast() + [lastCmd]).joined(separator: "\n") + "\n"
                 }
-                if let featureState = agentFocus.activeViewState, managementTab == .features {
-                    featureState.send(cmd)
-                } else {
-                    manager.selectedWorkspace?.selectedTab?.focusedViewState.send(cmd)
-                }
+                manager.selectedWorkspace?.selectedTab?.focusedViewState.send(cmd)
             },
             onAgentSelected: { agentToLaunch = $0 }
         )
@@ -1261,7 +1256,6 @@ struct ContentView: View {
                             directory: path))
                         managementTab = .workspaces
                         saveLayout()
-                        if let baseDir = settings.baseWorkingDirectory { db.scan(baseDir: baseDir) }
                         launchAgentIfRequested()
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                             manager.selectedWorkspace?.selectedTab?.focusedViewState.send("pwd\n")
@@ -1312,7 +1306,6 @@ struct ContentView: View {
             BaseDirectorySheet { url in
                 settings.baseWorkingDirectory = url.path
                 settings.save()
-                db.scan(baseDir: url.path)
                 showBaseDirectoryPicker = false
             }
         }

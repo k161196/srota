@@ -8,8 +8,6 @@ struct srotaApp: App {
     @State private var editorsStore = EditorsStore()
     @State private var promptsStore = PromptsStore()
     @State private var agentsStore  = AgentsStore()
-    @State private var agentFocus = FeatureAgentFocus()
-    @State private var issueAgentFocus = IssueAgentFocus()
     @State private var shortcuts = KeyboardShortcutManager()
     @State private var daemonConnection = DaemonConnection()
     @State private var hookSetupResult: HookSetupResult? = nil
@@ -24,14 +22,11 @@ struct srotaApp: App {
                 .environment(editorsStore)
                 .environment(promptsStore)
                 .environment(agentsStore)
-                .environment(agentFocus)
-                .environment(issueAgentFocus)
                 .environment(shortcuts)
                 .environment(daemonConnection)
                 .onAppear {
                     shortcuts.prefixKey = settings.shortcutPrefix
                     setupShellIntegration()
-                    if let dir = settings.baseWorkingDirectory { db.scan(baseDir: dir) }
                     Task { await startHookHealthLoop() }
                     Task.detached { installMCPServer() }
                     Task.detached { installDaemonLaunchAgent() }
