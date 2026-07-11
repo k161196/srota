@@ -46,13 +46,6 @@ struct RepoEntry: Identifiable, Hashable {
     var defaultBranch: String
 }
 
-struct RepoBranch: Identifiable, Hashable {
-    var id: String
-    var repoID: String
-    var name: String
-    var baseBranch: String
-}
-
 @Observable
 @MainActor
 final class WorkspaceDB {
@@ -61,7 +54,6 @@ final class WorkspaceDB {
     private var dbWatcher: DispatchSourceFileSystemObject?
 
     var repos: [RepoEntry] = []
-    var repoBranches: [RepoBranch] = []
 
     private var sqlFrom: String { "FR" + "OM" }
     private var sqlWhere: String { "WH" + "ERE" }
@@ -93,7 +85,6 @@ final class WorkspaceDB {
     func addRepo(name: String, url: String = "", defaultBranch: String = "main") {
         let id = UUID().uuidString
         upsert("repos", ["id": id, "name": name, "url": url, "default_branch": defaultBranch])
-        upsert("repo_branches", ["id": UUID().uuidString, "repo_id": id, "name": defaultBranch])
         refresh()
     }
 
@@ -104,22 +95,6 @@ final class WorkspaceDB {
 
     func deleteRepo(id: String) {
         exec(sql("DELETE", sqlFrom, "repos", sqlWhere, "id = ?"), [id])
-        exec(sql("DELETE", sqlFrom, "repo_branches", sqlWhere, "repo_id = ?"), [id])
-        refresh()
-    }
-
-    func addRepoBranch(repoID: String, name: String, baseBranch: String = "") {
-        upsert("repo_branches", ["id": UUID().uuidString, "repo_id": repoID, "name": name, "base_branch": baseBranch])
-        refresh()
-    }
-
-    func updateRepoBranch(_ branch: RepoBranch) {
-        upsert("repo_branches", ["id": branch.id, "repo_id": branch.repoID, "name": branch.name, "base_branch": branch.baseBranch])
-        refresh()
-    }
-
-    func deleteRepoBranch(id: String) {
-        exec(sql("DELETE", sqlFrom, "repo_branches", sqlWhere, "id = ?"), [id])
         refresh()
     }
 
@@ -127,14 +102,10 @@ final class WorkspaceDB {
         repos = rows(sql("SELECT id, name, url, default_branch", sqlFrom, "repos", "ORDER BY name")) {
             RepoEntry(id: col($0, 0), name: col($0, 1), url: col($0, 2), defaultBranch: col($0, 3))
         }
-        repoBranches = rows(sql("SELECT id, repo_id, name, base_branch", sqlFrom, "repo_branches", "ORDER BY name")) {
-            RepoBranch(id: col($0, 0), repoID: col($0, 1), name: col($0, 2), baseBranch: col($0, 3))
-        }
     }
 
     private func createTables() {
         execRaw("ALTER TABLE repos ADD COLUMN default_branch TEXT NOT NULL DEFAULT 'main'")
-        execRaw("ALTER TABLE repo_branches ADD COLUMN base_branch TEXT NOT NULL DEFAULT ''")
         execRaw("ALTER TABLE ws_workspaces ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")
         execRaw("ALTER TABLE ws_workspaces ADD COLUMN directory TEXT NOT NULL DEFAULT ''")
         execRaw("DROP TABLE IF EXISTS organizations")
@@ -144,12 +115,11 @@ final class WorkspaceDB {
         execRaw("DROP TABLE IF EXISTS feature_repos")
         execRaw("DROP TABLE IF EXISTS issues")
         execRaw("DROP TABLE IF EXISTS issue_repos")
+        execRaw("DROP TABLE IF EXISTS repo_branches")
         execRaw("""
         CREATE TABLE IF NOT EXISTS repos
         (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL DEFAULT '',
          local_path TEXT NOT NULL DEFAULT '', default_branch TEXT NOT NULL DEFAULT 'main');
-        CREATE TABLE IF NOT EXISTS repo_branches
-        (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', base_branch TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS ws_workspaces (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,

@@ -740,6 +740,7 @@ private struct SplitPanel<T: Identifiable & Hashable, Row: View, Detail: View, F
     let emptyHint: String
     let onDelete: (T) -> Void
     var onRefresh: (() -> Void)? = nil
+    var onImport: (() -> Void)? = nil
     @ViewBuilder var rowContent: (T) -> Row
     @ViewBuilder var detail: (T) -> Detail
     @ViewBuilder var addForm: (Binding<Bool>) -> Form
@@ -770,6 +771,17 @@ private struct SplitPanel<T: Identifiable & Hashable, Row: View, Detail: View, F
                         }
                         .buttonStyle(.plain)
                         .help("Refresh")
+                    }
+                    if let onImport {
+                        Button { onImport() } label: {
+                            Image(systemName: "arrow.down.circle")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Color.mgAccent)
+                                .frame(width: 28, height: 28)
+                                .glassCard(fill: Color.mgAccent.opacity(0.12), borderTop: Color.mgAccent.opacity(0.4), borderBottom: Color.mgAccent.opacity(0.22), radius: 6)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Import from GitHub")
                     }
                     Button { showAdd = true } label: {
                         Image(systemName: "plus")
@@ -935,6 +947,7 @@ private struct PullRequestEntry: Identifiable, Decodable {
     let title: String
     let headRefName: String
     let author: Author
+    let state: String  // "OPEN", "CLOSED", or "MERGED"
     struct Author: Decodable { let login: String }
     var id: Int { number }
 }
@@ -953,19 +966,45 @@ private struct IssueEntry: Identifiable, Decodable {
 
 // MARK: - Repos panel
 
+// Per-repo fetched data (branches/PRs/issues), kept only while the Repos tab stays
+// mounted. `ManagementPanel` tears the whole subtree down on tab switch, so the
+// @State store below is released then — no explicit cache-clearing needed.
+@Observable
+private final class RepoCache {
+    var hasFetchedBranches = false
+    var branches: [String] = []
+    var remoteBranchNames: Set<String> = []
+    var localBranchNames: Set<String> = []
+    var pullRequests: [PullRequestEntry] = []
+    var issueEntries: [IssueEntry] = []
+}
+
+private final class RepoCacheStore {
+    private var entries: [String: RepoCache] = [:]
+    func cache(for repoID: String) -> RepoCache {
+        if let existing = entries[repoID] { return existing }
+        let created = RepoCache()
+        entries[repoID] = created
+        return created
+    }
+}
+
 private struct ReposPanel: View {
     @Environment(WorkspaceDB.self) var db
     @State private var newName          = ""
     @State private var newURL           = ""
     @State private var newDefaultBranch = "main"
+    @State private var cacheStore = RepoCacheStore()
+    @State private var showGitHubImport = false
 
     var body: some View {
         SplitPanel(
             title: "Repos",
             items: db.repos,
-            emptyHint: "No repos — press +",
+            emptyHint: "No repos — press + or import from GitHub",
             onDelete: { db.deleteRepo(id: $0.id) },
-            onRefresh: { db.refresh() }
+            onRefresh: { db.refresh() },
+            onImport: { showGitHubImport = true }
         ) { repo in
             VStack(alignment: .leading, spacing: 2) {
                 RowPrimary(text: repo.name)
@@ -973,7 +1012,7 @@ private struct ReposPanel: View {
                 if !sub.isEmpty { RowSecondary(text: sub) }
             }
         } detail: { repo in
-            RepoDetailView(repo: repo, db: db)
+            RepoDetailView(repo: repo, db: db, cache: cacheStore.cache(for: repo.id))
         } addForm: { isPresented in
             AddSheet(title: "New Repo", isPresented: isPresented) {
                 db.addRepo(name: newName, url: newURL, defaultBranch: newDefaultBranch)
@@ -984,12 +1023,204 @@ private struct ReposPanel: View {
                 MGField(label: "Default branch", text: $newDefaultBranch)
             }
         }
+        .sheet(isPresented: $showGitHubImport) {
+            GitHubRepoImportSheet(db: db, isPresented: $showGitHubImport)
+        }
+    }
+}
+
+private struct GHRepoListing: Identifiable, Decodable, Hashable {
+    struct DefaultBranchRef: Decodable, Hashable { let name: String }
+    let nameWithOwner: String
+    let url: String
+    let isPrivate: Bool
+    let defaultBranchRef: DefaultBranchRef?
+    var id: String { nameWithOwner }
+}
+
+private struct GitHubRepoImportSheet: View {
+    let db: WorkspaceDB
+    @Binding var isPresented: Bool
+    @State private var owner = ""
+    @State private var orgs: [String] = []
+    @State private var repos: [GHRepoListing] = []
+    @State private var repoSearch = ""
+    @State private var fetching = false
+    @State private var fetchError: String? = nil
+
+    private func isAdded(_ listing: GHRepoListing) -> Bool {
+        guard let listingParts = gitURLComponents(listing.url) else {
+            return db.repos.contains { $0.url == listing.url }
+        }
+        return db.repos.contains { gitURLComponents($0.url).map { $0 == listingParts } ?? false }
+    }
+
+    private var filteredRepos: [GHRepoListing] {
+        repoSearch.isEmpty ? repos : repos.filter { $0.nameWithOwner.localizedCaseInsensitiveContains(repoSearch) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Import from GitHub")
+                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.mgLabel)
+                Spacer()
+                if fetching {
+                    ProgressView().scaleEffect(0.6)
+                } else {
+                    Button("Fetch") { fetchRepos() }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium)).foregroundStyle(Color.mgAccent)
+                }
+            }
+
+            Menu {
+                Button("Your repos") { owner = "" }
+                ForEach(orgs, id: \.self) { org in
+                    Button(org) { owner = org }
+                }
+            } label: {
+                HStack {
+                    Text(owner.isEmpty ? "Your repos" : owner)
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.mgLabel)
+                    Spacer()
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.mgMuted)
+                }
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                .background(Color.mgSurface)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .buttonStyle(.plain)
+            .menuStyle(.borderlessButton)
+
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11)).foregroundStyle(Color.mgMuted)
+                TextField("Filter repos…", text: $repoSearch)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.mgLabel)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            .background(Color.mgSurface)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            if let fetchError {
+                Text(fetchError).font(.system(size: 12)).foregroundStyle(Color.mgMuted)
+            } else if repos.isEmpty && !fetching {
+                Text("No repos fetched yet — press Fetch")
+                    .font(.system(size: 12)).foregroundStyle(Color.mgMuted)
+            } else if filteredRepos.isEmpty {
+                Text("No repos match “\(repoSearch)”")
+                    .font(.system(size: 12)).foregroundStyle(Color.mgMuted)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(filteredRepos) { listing in
+                            HStack(spacing: 8) {
+                                Text(listing.nameWithOwner)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(Color.mgLabel).lineLimit(1)
+                                if listing.isPrivate {
+                                    Text("private")
+                                        .font(.system(size: 9, weight: .medium)).foregroundStyle(Color.mgMuted)
+                                }
+                                Spacer()
+                                if isAdded(listing) {
+                                    Text("Added").font(.system(size: 11)).foregroundStyle(Color.mgMuted)
+                                } else {
+                                    Button("Add") {
+                                        let name = listing.nameWithOwner.split(separator: "/").last.map(String.init) ?? listing.nameWithOwner
+                                        db.addRepo(name: name, url: listing.url, defaultBranch: listing.defaultBranchRef?.name ?? "main")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .font(.system(size: 11, weight: .medium)).foregroundStyle(Color.mgAccent)
+                                }
+                            }
+                            .padding(.horizontal, 8).padding(.vertical, 6)
+                            .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
+                        }
+                    }
+                }
+                .frame(maxHeight: 320)
+            }
+
+            HStack {
+                Spacer()
+                Button("Done") { isPresented = false }
+                    .buttonStyle(.plain).foregroundStyle(.black)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(Color.mgAccent)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+            }
+        }
+        .padding(28).frame(width: 460)
+        .background(Color.mgBg)
+        .onAppear { fetchOrgs() }
+        .onChange(of: owner) { fetchRepos() }
+    }
+
+    private func fetchOrgs() {
+        Task.detached {
+            guard let ghPath = resolveGHPath() else { return }
+            let p = Process(); let outPipe = Pipe(); let errPipe = Pipe()
+            p.executableURL = URL(fileURLWithPath: ghPath)
+            p.arguments = ["api", "user/orgs", "--jq", ".[].login"]
+            p.standardOutput = outPipe; p.standardError = errPipe
+            try? p.run(); p.waitUntilExit()
+            guard p.terminationStatus == 0 else { return }
+            let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let names = out.split(separator: "\n").map(String.init)
+            await MainActor.run { orgs = names }
+        }
+    }
+
+    private func fetchRepos() {
+        fetching = true
+        fetchError = nil
+        let ownerArg = owner
+        Task.detached {
+            guard let ghPath = resolveGHPath() else {
+                await MainActor.run {
+                    fetchError = "gh CLI not found — install from https://cli.github.com"
+                    fetching = false
+                }
+                return
+            }
+            let p = Process(); let outPipe = Pipe(); let errPipe = Pipe()
+            p.executableURL = URL(fileURLWithPath: ghPath)
+            var arguments = ["repo", "list"]
+            if !ownerArg.isEmpty { arguments.append(ownerArg) }
+            arguments += ["--json", "nameWithOwner,url,isPrivate,defaultBranchRef", "--limit", "200"]
+            p.arguments = arguments
+            p.standardOutput = outPipe; p.standardError = errPipe
+            do { try p.run() } catch {
+                await MainActor.run { fetchError = error.localizedDescription; fetching = false }
+                return
+            }
+            p.waitUntilExit()
+            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            if p.terminationStatus != 0 {
+                let msg = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                await MainActor.run { fetchError = msg.isEmpty ? "gh repo list failed" : msg; fetching = false }
+                return
+            }
+            let decoded = (try? JSONDecoder().decode([GHRepoListing].self, from: outData)) ?? []
+            await MainActor.run { repos = decoded; fetching = false }
+        }
     }
 }
 
 private struct RepoDetailView: View {
     let repo: RepoEntry
     let db: WorkspaceDB
+    let cache: RepoCache
     @Environment(AppSettings.self) var settings
     @Environment(PresetsStore.self) var presetsStore
     @State private var agentPickerPRNumber: Int? = nil
@@ -1000,20 +1231,17 @@ private struct RepoDetailView: View {
     @State private var showAddBranch = false
     @State private var cloningBranch: String? = nil
     @State private var branchSearch = ""
-    @State private var remoteBranchNames: Set<String> = []
-    @State private var localBranchNames: Set<String> = []
     @State private var showBasePicker = false
     @State private var pendingBranch = ""
     @State private var pendingPath = ""
     @State private var checkoutError: String? = nil
     @State private var fetchingBranches = false
     @State private var detailTab: RepoDetailTab = .branches
-    @State private var pullRequests: [PullRequestEntry] = []
     @State private var prSearch = ""
+    @State private var showClosedPRs = false
     @State private var fetchingPRs = false
     @State private var prError: String? = nil
     @State private var checkingOutPR: Int? = nil
-    @State private var issueEntries: [IssueEntry] = []
     @State private var issueSearch = ""
     @State private var fetchingIssues = false
     @State private var issueError: String? = nil
@@ -1023,7 +1251,32 @@ private struct RepoDetailView: View {
 
     enum RepoDetailTab { case branches, prs, issues }
 
-    var branches: [RepoBranch] { db.repoBranches.filter { $0.repoID == repo.id } }
+    // Proxies onto the per-repo cache so the rest of this view's code (and the
+    // async fetch callbacks) can read/write `branches`/`pullRequests`/etc. as before.
+    private var hasFetchedBranches: Bool {
+        get { cache.hasFetchedBranches }
+        nonmutating set { cache.hasFetchedBranches = newValue }
+    }
+    private var branches: [String] {
+        get { cache.branches }
+        nonmutating set { cache.branches = newValue }
+    }
+    private var remoteBranchNames: Set<String> {
+        get { cache.remoteBranchNames }
+        nonmutating set { cache.remoteBranchNames = newValue }
+    }
+    private var localBranchNames: Set<String> {
+        get { cache.localBranchNames }
+        nonmutating set { cache.localBranchNames = newValue }
+    }
+    private var pullRequests: [PullRequestEntry] {
+        get { cache.pullRequests }
+        nonmutating set { cache.pullRequests = newValue }
+    }
+    private var issueEntries: [IssueEntry] {
+        get { cache.issueEntries }
+        nonmutating set { cache.issueEntries = newValue }
+    }
 
     var githubComponents: (org: String, repo: String)? { gitURLComponents(repoURL) }
 
@@ -1044,18 +1297,19 @@ private struct RepoDetailView: View {
         }
     }
 
-    var sortedFilteredBranches: [RepoBranch] {
+    var sortedFilteredBranches: [String] {
         let filtered = branchSearch.isEmpty ? branches
-            : branches.filter { $0.name.localizedCaseInsensitiveContains(branchSearch) }
-        func rank(_ branch: RepoBranch) -> Int {
-            let cloned = branchPath(branch.name).map { FileManager.default.fileExists(atPath: $0) } ?? false
-            if cloned { return 0 }                              // workspace
-            if localBranchNames.contains(branch.name) { return 1 } // local
-            return 2                                            // remote only
+            : branches.filter { $0.localizedCaseInsensitiveContains(branchSearch) }
+        func rank(_ branch: String) -> Int {
+            if branch == defaultBranch { return 0 }             // main/default branch
+            let cloned = branchPath(branch).map { FileManager.default.fileExists(atPath: $0) } ?? false
+            if cloned { return 1 }                              // workspace
+            if localBranchNames.contains(branch) { return 2 }   // local
+            return 3                                            // remote only
         }
         return filtered.sorted { a, b in
             let ra = rank(a), rb = rank(b)
-            return ra != rb ? ra < rb : a.name < b.name
+            return ra != rb ? ra < rb : a < b
         }
     }
 
@@ -1072,7 +1326,10 @@ private struct RepoDetailView: View {
             if githubComponents != nil {
                 HStack(spacing: 4) {
                     FeatureTabChip(label: "Branches", isActive: detailTab == .branches, isCloseable: false,
-                                   onSelect: { detailTab = .branches }, onClose: {})
+                                   onSelect: {
+                                       detailTab = .branches
+                                       if !hasFetchedBranches && !fetchingBranches { fetchBranches() }
+                                   }, onClose: {})
                     FeatureTabChip(label: "PRs", isActive: detailTab == .prs, isCloseable: false,
                                    onSelect: {
                                        detailTab = .prs
@@ -1134,12 +1391,12 @@ private struct RepoDetailView: View {
                         .font(.system(size: 12)).foregroundStyle(Color.mgMuted)
                 } else {
                     VStack(spacing: 0) {
-                        ForEach(sortedFilteredBranches) { branch in
-                            let clonePath = branchPath(branch.name)
+                        ForEach(sortedFilteredBranches, id: \.self) { branch in
+                            let clonePath = branchPath(branch)
                             let isCloned = clonePath.map { FileManager.default.fileExists(atPath: $0) } ?? false
                             HStack(spacing: 8) {
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(branch.name)
+                                    Text(branch)
                                         .font(.system(size: 12, design: .monospaced))
                                         .foregroundStyle(Color.mgLabel).lineLimit(1)
                                     if let p = clonePath {
@@ -1151,11 +1408,10 @@ private struct RepoDetailView: View {
                                 }
                                 Spacer()
                                 HStack(spacing: 4) {
-                                    BranchTag(kind: .db)
-                                    if isCloned || localBranchNames.contains(branch.name) { BranchTag(kind: .local) }
-                                    if remoteBranchNames.contains(branch.name) { BranchTag(kind: .remote) }
+                                    if isCloned || localBranchNames.contains(branch) { BranchTag(kind: .local) }
+                                    if remoteBranchNames.contains(branch) { BranchTag(kind: .remote) }
                                 }
-                                if cloningBranch == branch.name {
+                                if cloningBranch == branch {
                                     ProgressView().scaleEffect(0.6).frame(width: 28)
                                 } else if isCloned {
                                     Button {
@@ -1164,12 +1420,12 @@ private struct RepoDetailView: View {
                                             object: nil,
                                             userInfo: [
                                                 "path":           clonePath!,
-                                                "name":           branch.name,
+                                                "name":           branch,
                                                 "folderName":     repo.name,
                                                 "folderTag":      "",
                                                 "createWorktree": false,
                                                 "projectPath":    clonePath!,
-                                                "branchRef":      branch.name
+                                                "branchRef":      branch
                                             ]
                                         )
                                     } label: {
@@ -1182,13 +1438,13 @@ private struct RepoDetailView: View {
                                     .buttonStyle(.plain)
                                     .help("Open in workspace")
                                 } else if clonePath != nil {
-                                    let isDefault = branch.name == defaultBranch
+                                    let isDefault = branch == defaultBranch
                                     let canCheckout = isDefault || isMainCloned
                                     Button(isDefault ? "Clone" : "Worktree") {
-                                        if isDefault || remoteBranchNames.contains(branch.name) || localBranchNames.contains(branch.name) {
-                                            checkout(branch: branch.name, into: clonePath!)
+                                        if isDefault || remoteBranchNames.contains(branch) || localBranchNames.contains(branch) {
+                                            checkout(branch: branch, into: clonePath!)
                                         } else {
-                                            pendingBranch = branch.name
+                                            pendingBranch = branch
                                             pendingPath = clonePath!
                                             showBasePicker = true
                                         }
@@ -1202,9 +1458,9 @@ private struct RepoDetailView: View {
                                 }
                                 Button {
                                     if isCloned, let path = clonePath {
-                                        removeBranch(id: branch.id, worktreePath: path)
+                                        removeBranch(name: branch, worktreePath: path)
                                     } else {
-                                        db.deleteRepoBranch(id: branch.id)
+                                        branches.removeAll { $0 == branch }
                                     }
                                 } label: {
                                     Image(systemName: "trash")
@@ -1226,7 +1482,9 @@ private struct RepoDetailView: View {
             }
         }
         .sheet(isPresented: $showAddBranch) {
-            RepoBranchSheet(repoID: repo.id, existing: nil, db: db, isPresented: $showAddBranch)
+            RepoBranchSheet(isPresented: $showAddBranch) { name in
+                if !branches.contains(name) { branches.append(name) }
+            }
         }
         .sheet(isPresented: $showBasePicker) {
             BaseBranchPicker(
@@ -1247,11 +1505,13 @@ private struct RepoDetailView: View {
         }
         .onAppear { load() }
         .onChange(of: repo.id) { load() }
+        .onChange(of: showClosedPRs) { fetchPRs() }
     }
 
     private func load() {
         name = repo.name; repoURL = repo.url; defaultBranch = repo.defaultBranch
-        detailTab = .branches; pullRequests = []; prError = nil; issueEntries = []; issueError = nil
+        detailTab = .branches; prError = nil; issueError = nil
+        if !hasFetchedBranches && !fetchingBranches { fetchBranches() }
     }
 
     private func branchPath(_ branchName: String) -> String? {
@@ -1309,7 +1569,7 @@ private struct RepoDetailView: View {
         }
     }
 
-    private func removeBranch(id: String, worktreePath: String) {
+    private func removeBranch(name: String, worktreePath: String) {
         let runFrom = mainClonePath ?? worktreePath  // fall back to the worktree itself
         Task.detached {
             let p = Process()
@@ -1327,7 +1587,7 @@ private struct RepoDetailView: View {
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 await MainActor.run { checkoutError = msg.isEmpty ? "git worktree remove failed" : msg }
             } else {
-                await MainActor.run { db.deleteRepoBranch(id: id) }
+                await MainActor.run { branches.removeAll { $0 == name } }
             }
         }
     }
@@ -1335,7 +1595,6 @@ private struct RepoDetailView: View {
     private func fetchBranches() {
         fetchingBranches = true
         let url = repoURL
-        let repoID = repo.id
         let localRoot = mainClonePath
         Task.detached {
             // remote branches via ls-remote
@@ -1365,17 +1624,16 @@ private struct RepoDetailView: View {
                     .map { String($0).trimmingCharacters(in: .whitespaces) }
                     .filter { !$0.isEmpty })
             }
-            let allNames = remoteNames.union(localNames)
             let resolvedRemoteNames = remoteNames
             let resolvedLocalNames = localNames
             await MainActor.run {
                 remoteBranchNames = resolvedRemoteNames
                 localBranchNames = resolvedLocalNames
-                let existing = Set(db.repoBranches.filter { $0.repoID == repoID }.map { $0.name })
-                for n in allNames where !existing.contains(n) {
-                    db.addRepoBranch(repoID: repoID, name: n)
-                }
+                // Union with what's already there so a just-created (not-yet-pushed) branch
+                // or a manually-added placeholder name doesn't disappear on refetch.
+                branches = Array(Set(branches).union(resolvedRemoteNames).union(resolvedLocalNames))
                 fetchingBranches = false
+                hasFetchedBranches = true
             }
         }
     }
@@ -1384,6 +1642,7 @@ private struct RepoDetailView: View {
         guard let (org, repoName) = githubComponents else { return }
         fetchingPRs = true
         prError = nil
+        let state = showClosedPRs ? "all" : "open"
         Task.detached {
             guard let ghPath = resolveGHPath() else {
                 await MainActor.run {
@@ -1394,8 +1653,8 @@ private struct RepoDetailView: View {
             }
             let p = Process(); let outPipe = Pipe(); let errPipe = Pipe()
             p.executableURL = URL(fileURLWithPath: ghPath)
-            p.arguments = ["pr", "list", "--repo", "\(org)/\(repoName)", "--state", "open",
-                           "--json", "number,title,headRefName,author", "--limit", "100"]
+            p.arguments = ["pr", "list", "--repo", "\(org)/\(repoName)", "--state", state,
+                           "--json", "number,title,headRefName,author,state", "--limit", "100"]
             p.standardOutput = outPipe; p.standardError = errPipe
             do { try p.run() } catch {
                 await MainActor.run { prError = error.localizedDescription; fetchingPRs = false }
@@ -1483,7 +1742,6 @@ private struct RepoDetailView: View {
     private func checkoutPR(_ pr: PullRequestEntry) {
         guard let path = branchPath(pr.headRefName), let mainPath = mainClonePath, isMainCloned else { return }
         checkingOutPR = pr.number
-        let repoID = repo.id
         let headRef = pr.headRefName
         Task.detached {
             // Fetch into FETCH_HEAD rather than directly into the branch ref: if headRef
@@ -1510,6 +1768,29 @@ private struct RepoDetailView: View {
             branchExistsP.waitUntilExit()
             let branchExists = branchExistsP.terminationStatus == 0
 
+            // A same-named local branch can be left dangling (e.g. its worktree was
+            // removed via the trash button, which never deletes the branch ref itself).
+            // Force it to what we just fetched so re-checkout always reflects the PR's
+            // latest commits rather than silently reusing a stale pointer. Safe to force:
+            // this button only shows when the branch has no live worktree (see !isCloned above).
+            if branchExists {
+                let moveP = Process(); let moveErrPipe = Pipe()
+                moveP.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                moveP.arguments = ["-C", mainPath, "branch", "-f", headRef, "FETCH_HEAD"]
+                moveP.standardError = moveErrPipe
+                do { try moveP.run() } catch {
+                    await MainActor.run { checkingOutPR = nil; checkoutError = error.localizedDescription }
+                    return
+                }
+                moveP.waitUntilExit()
+                if moveP.terminationStatus != 0 {
+                    let msg = String(data: moveErrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    await MainActor.run { checkingOutPR = nil; checkoutError = msg.isEmpty ? "git branch update failed" : msg }
+                    return
+                }
+            }
+
             let worktreeP = Process(); let worktreeErrPipe = Pipe()
             worktreeP.executableURL = URL(fileURLWithPath: "/usr/bin/git")
             worktreeP.arguments = branchExists
@@ -1527,7 +1808,7 @@ private struct RepoDetailView: View {
                 await MainActor.run { checkingOutPR = nil; checkoutError = msg.isEmpty ? "git worktree add failed" : msg }
             } else {
                 await MainActor.run {
-                    db.addRepoBranch(repoID: repoID, name: headRef)
+                    if !branches.contains(headRef) { branches.append(headRef) }
                     checkingOutPR = nil
                 }
             }
@@ -1538,7 +1819,6 @@ private struct RepoDetailView: View {
         let branchName = "issue/\(issue.number)"
         guard let path = branchPath(branchName), let mainPath = mainClonePath, isMainCloned else { return }
         checkingOutIssue = issue.number
-        let repoID = repo.id
         let base = defaultBranch
         Task.detached {
             let worktreeP = Process(); let errPipe = Pipe()
@@ -1556,7 +1836,7 @@ private struct RepoDetailView: View {
                 await MainActor.run { checkingOutIssue = nil; checkoutError = msg.isEmpty ? "git worktree add failed" : msg }
             } else {
                 await MainActor.run {
-                    db.addRepoBranch(repoID: repoID, name: branchName)
+                    if !branches.contains(branchName) { branches.append(branchName) }
                     checkingOutIssue = nil
                 }
             }
@@ -1610,13 +1890,16 @@ private struct RepoDetailView: View {
                     .font(.system(size: 10, weight: .medium)).tracking(0.8)
                     .foregroundStyle(Color.mgMuted)
                 Spacer()
+                Toggle("Show closed", isOn: $showClosedPRs)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 11)).foregroundStyle(Color.mgMuted)
                 if fetchingPRs {
                     ProgressView().scaleEffect(0.6).frame(width: 32)
                 } else {
                     Button("Fetch") { fetchPRs() }
                         .buttonStyle(.plain)
                         .font(.system(size: 11)).foregroundStyle(Color.mgAccent)
-                        .help("Fetch open PRs from GitHub")
+                        .help("Fetch PRs from GitHub")
                 }
             }
             HStack(spacing: 6) {
@@ -1636,7 +1919,7 @@ private struct RepoDetailView: View {
                 Text(prError)
                     .font(.system(size: 12)).foregroundStyle(Color.mgMuted)
             } else if filteredPRs.isEmpty {
-                Text(fetchingPRs ? "Loading…" : "No open PRs")
+                Text(fetchingPRs ? "Loading…" : (showClosedPRs ? "No PRs" : "No open PRs"))
                     .font(.system(size: 12)).foregroundStyle(Color.mgMuted)
             } else {
                 VStack(spacing: 0) {
@@ -1654,6 +1937,13 @@ private struct RepoDetailView: View {
                                     .lineLimit(1)
                             }
                             Spacer()
+                            if pr.state != "OPEN" {
+                                Text(pr.state.capitalized)
+                                    .font(.system(size: 9, weight: .medium)).foregroundStyle(Color.mgMuted)
+                                    .padding(.horizontal, 6).padding(.vertical, 2)
+                                    .background(Color.mgMuted.opacity(0.15))
+                                    .clipShape(Capsule())
+                            }
                             if isCloned { BranchTag(kind: .local) }
                             Button {
                                 if let (org, repoName) = githubComponents,
@@ -2025,17 +2315,13 @@ private struct BaseBranchPicker: View {
 }
 
 private struct RepoBranchSheet: View {
-    let repoID: String
-    let existing: RepoBranch?
-    let db: WorkspaceDB
     @Binding var isPresented: Bool
+    let onAdd: (String) -> Void
     @State private var branchName = ""
-
-    var isEditing: Bool { existing != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text(isEditing ? "Edit Branch" : "Add Branch")
+            Text("Add Branch")
                 .font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.mgLabel)
 
             MGField(label: "Branch name", text: $branchName)
@@ -2045,13 +2331,8 @@ private struct RepoBranchSheet: View {
                 Button("Cancel") { isPresented = false }
                     .buttonStyle(.plain).foregroundStyle(Color.mgMuted)
                     .padding(.horizontal, 14).padding(.vertical, 8)
-                Button(isEditing ? "Save" : "Add") {
-                    if let b = existing {
-                        var updated = b; updated.name = branchName
-                        db.updateRepoBranch(updated)
-                    } else {
-                        db.addRepoBranch(repoID: repoID, name: branchName)
-                    }
+                Button("Add") {
+                    onAdd(branchName)
                     isPresented = false
                 }
                 .buttonStyle(.plain).foregroundStyle(.black)
@@ -2062,7 +2343,6 @@ private struct RepoBranchSheet: View {
             }
         }
         .padding(28).frame(width: 360).background(Color.mgBg)
-        .onAppear { branchName = existing?.name ?? "" }
     }
 }
 
