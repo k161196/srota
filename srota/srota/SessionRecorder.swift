@@ -121,7 +121,7 @@ final class SessionRecorder {
         // captured is noise) — but agent-tagged ones still get a step even with an empty
         // summary, same as before: generateStep already falls back to a generic label.
         guard tag != "user" || !event.summary.isEmpty else { return }
-        let note = await StepNoteGenerator.generateStep(hookEvent: hookEvent, rawSummary: event.summary)
+        let note = await StepNoteGenerator.generateStep(hookEvent: hookEvent, tag: tag, rawSummary: event.summary)
         let step = SessionStepRecord(
             id: UUID().uuidString,
             sessionID: record.id,

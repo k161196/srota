@@ -1,19 +1,31 @@
 import SwiftUI
 
 // Right-side docked panel showing the current pane's session as a vertical timeline —
-// opened via the "list.bullet.clipboard" icon in PaneHeader (ContentView.swift). Follows
-// the same collapsible-width convention as the left ResizableSidebar (ContentView.swift),
-// not a fixed width divider — this one isn't resizable, just shown/hidden.
+// opened via the "list.bullet.clipboard" icon in PaneHeader (ContentView.swift). Owns its
+// width and renders its own resize divider, same shape as ContentView.swift's ResizableSidebar
+// on the left — reuses that file's SidebarDivider/SidebarResizeLogic (mirrored: true, since
+// dragging left should grow a right-docked sidebar, the opposite sign from the left one).
 struct SessionTimelineSidebar: View {
     @Environment(SessionRecorder.self) private var sessionRecorder
-
-    static let width: CGFloat = 280
+    @State private var width: CGFloat = 280
 
     var body: some View {
+        let visible = sessionRecorder.timelinePaneID != nil
+
+        SidebarDivider(sidebarVisible: visible, width: $width, mirrored: true)
+
+        content
+            .frame(width: width, alignment: .leading) // pin inner layout so it doesn't reflow every animation frame
+            .frame(width: visible ? width : 0, alignment: .leading)
+            .clipped()
+            .allowsHitTesting(visible)
+    }
+
+    private var content: some View {
         let paneID = sessionRecorder.timelinePaneID
         let steps = paneID.map { sessionRecorder.stepsByPaneID[$0] ?? [] } ?? []
 
-        VStack(spacing: 0) {
+        return VStack(spacing: 0) {
             header
             Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1)
             if steps.isEmpty {
@@ -98,6 +110,7 @@ private struct TimelineRow: View {
                     Text(step.title)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(Color.timelineLabel)
+                        .textSelection(.enabled)
                     TagBadge(tag: step.tag)
                     Spacer(minLength: 8)
                     Text(formattedTime(step.createdAt))
@@ -110,6 +123,7 @@ private struct TimelineRow: View {
                         .font(.system(size: 11))
                         .foregroundStyle(Color.timelineMuted)
                         .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                 }
             }
             .padding(.bottom, isLast ? 0 : 16)

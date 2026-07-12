@@ -972,9 +972,14 @@ private struct SidebarResizeHandle: NSViewRepresentable {
 
 // MARK: - Sidebar divider
 
-private struct SidebarDivider: View {
+// internal (not private) — SessionTimelineSidebar.swift reuses this for the right-docked
+// timeline sidebar via `mirrored: true`, rather than duplicating the AppKit drag-handle plumbing.
+struct SidebarDivider: View {
     let sidebarVisible: Bool
     @Binding var width: CGFloat
+    // true for a sidebar docked on the right: dragging left should grow it (translation sign
+    // flips relative to the left sidebar, where dragging right grows it).
+    var mirrored: Bool = false
     @State private var isHovered = false
     @State private var dragStartWidth: CGFloat? = nil
 
@@ -996,7 +1001,8 @@ private struct SidebarDivider: View {
                 onDragChanged: { dx in
                     let startWidth = dragStartWidth ?? width
                     dragStartWidth = startWidth
-                    width = SidebarResizeLogic.updatedWidth(startWidth: startWidth, translationWidth: dx)
+                    let translation = mirrored ? -dx : dx
+                    width = SidebarResizeLogic.updatedWidth(startWidth: startWidth, translationWidth: translation)
                 },
                 onDragEnded: { dragStartWidth = nil },
                 onHoverChanged: { isHovered = $0 }
@@ -1172,8 +1178,6 @@ struct ContentView: View {
             }
 
                 SessionTimelineSidebar()
-                    .frame(width: sessionRecorder.timelinePaneID != nil ? SessionTimelineSidebar.width : 0)
-                    .clipped()
         }
         .animation(.spring(duration: 0.22, bounce: 0.0), value: sidebarVisible)
         .animation(.spring(duration: 0.22, bounce: 0.0), value: sessionRecorder.timelinePaneID)
