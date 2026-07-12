@@ -168,6 +168,7 @@ final class TerminalTab: Identifiable, ObservableObject {
             }
         )
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: workingDirectory)
+        state.setTheme(.default)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
         let stableID = firstPaneStableID ?? UUID().uuidString
         let first = PaneEntry(
@@ -296,6 +297,7 @@ private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirect
             }
         )
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: workingDirectory)
+        state.setTheme(.default)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
 let stableID = UUID().uuidString
 let entry = PaneEntry(hookPaneID: stableID, daemonStableID: stableID, viewState: state, initialCWD: workingDirectory)
@@ -330,6 +332,7 @@ self.removePane(id: entryID, closeDaemon: false)
             }
         )
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: cwd)
+        state.setTheme(.default)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
  let entry = PaneEntry(hookPaneID: record.id, daemonStableID: record.id, viewState: state, initialCWD: cwd)
  let entryID = entry.id
@@ -1110,8 +1113,7 @@ struct ContentView: View {
                     keyboardFocusedWorkspaceID: sidebarKeyboardFocus ? sidebarHighlightedWorkspaceID : nil,
                     onAdd: {
                         clearSidebarKeyboardFocus()
-                        let fid = manager.selectedWorkspaceID.flatMap { manager.folderID(containingWorkspace: $0) }
-                        manager.addWorkspace(colorScheme: colorScheme, inFolder: fid)
+                        manager.addWorkspace(colorScheme: colorScheme)
                         saveLayout()
                     },
                     onAddMultiRepo: {
@@ -1202,14 +1204,13 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .srotaOpenWorkspace)) { note in
             guard let path     = note.userInfo?["path"]       as? String else { return }
             let wsName         = note.userInfo?["name"]        as? String
-            let folderName     = note.userInfo?["folderName"]  as? String
             let needsWorktree  = note.userInfo?["createWorktree"] as? Bool ?? false
             let projectPath    = note.userInfo?["projectPath"] as? String ?? ""
             let branchRef      = note.userInfo?["branchRef"]   as? String ?? (wsName ?? "")
 
-            let folderTag  = note.userInfo?["folderTag"] as? String ?? ""
-            let folder = folderName.map { manager.folder(named: $0, tag: folderTag) }
-            let folderID = folder?.id
+            // New workspaces always land at the top level, regardless of which repo they came from.
+            let folderTag: String = ""
+            let folderID: UUID? = nil
 
             let launchAgentName     = note.userInfo?["launchAgentName"] as? String
             let launchAgentContext  = note.userInfo?["launchAgentContext"] as? String
@@ -1223,8 +1224,8 @@ struct ContentView: View {
                 launchAgent(agent: agent, systemPrompt: systemPrompt, firstMessage: firstMessage, preset: preset)
             }
 
-            // if workspace with same name already exists in that folder, just select it
-            let candidatePool = folder?.workspaces ?? manager.workspaces
+            // if a top-level workspace with the same name already exists, just select it
+            let candidatePool = manager.workspaces
             if let existing = candidatePool.first(where: { $0.name == wsName }) {
                 manager.selectWorkspace(id: existing.id)
                 managementTab = .workspaces
@@ -1258,7 +1259,7 @@ struct ContentView: View {
                                              workingDirectory: path, name: wsName)
                         db.saveWorkspaceSession(WorkspaceSession(
                             id: manager.allWorkspaces.last?.id.uuidString ?? UUID().uuidString,
-                            name: wsName ?? "", folderName: folderName ?? "",
+                            name: wsName ?? "", folderName: "",
                             folderTag: folderTag, position: 0,
                             lastCWD: path,
                             lastAccessed: Int(Date().timeIntervalSince1970),
@@ -1278,7 +1279,7 @@ struct ContentView: View {
                 if let ws = manager.allWorkspaces.last {
                     db.saveWorkspaceSession(WorkspaceSession(
                         id: ws.id.uuidString, name: ws.name,
-                        folderName: folderName ?? "", folderTag: folderTag,
+                        folderName: "", folderTag: folderTag,
                         position: candidatePool.count,
                         lastCWD: path, lastAccessed: Int(Date().timeIntervalSince1970),
                         isPinned: false, directory: path))

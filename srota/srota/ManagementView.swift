@@ -427,6 +427,7 @@ private final class AgentAttachment {
             }
         )
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: cwd.isEmpty ? nil : cwd)
+        state.setTheme(.default)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
         viewState = state
         daemon.spawnOrAttach(
