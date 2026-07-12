@@ -26,10 +26,13 @@ struct srotaApp: App {
                 .environment(daemonConnection)
                 .onAppear {
                     shortcuts.prefixKey = settings.shortcutPrefix
-                    setupShellIntegration()
                     Task { await startHookHealthLoop() }
-                    Task.detached { installMCPServer() }
-                    Task.detached { installDaemonLaunchAgent() }
+                    Task {
+                        await Task.yield()
+                        Task.detached { setupShellIntegration() }
+                        Task.detached { installMCPServer() }
+                        Task.detached { await installDaemonLaunchAgent() }
+                    }
                     Task { await daemonConnection.connectWithRetry() }
                 }
                 .onChange(of: settings.shortcutPrefix) { _, new in
@@ -97,7 +100,7 @@ struct srotaApp: App {
 
 /// Writes ~/.srota/.zshrc + ~/.srota/zsh-launcher.sh so every terminal
 /// gets OSC 7 working-directory reporting without user setup.
-private func setupShellIntegration() {
+nonisolated private func setupShellIntegration() {
     let home = NSHomeDirectory()
     let dir = "\(home)/\(Srota.dir)"
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -127,7 +130,7 @@ _srota_osc7
 /// Copies the srota-mcp files to ~/.srota/srota-mcp/ and runs
 /// `bun install` if node_modules is missing or package.json changed.
 /// Source: app bundle (production) or scripts/srota-mcp/ via #filePath (dev).
-private func installMCPServer() {
+nonisolated private func installMCPServer() {
     let fm = FileManager.default
 
     // Resolve source directory — bundle first, then dev source tree

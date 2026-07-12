@@ -15,7 +15,7 @@ private extension Color {
 // entry point — it's per-pane since each pane can have its own cwd/branch, unlike a single
 // workspace-level toggle. See PaneIssueButton for the "issue/<n>" branch detection.
 
-private struct GHIssueDetail: Decodable {
+private struct GHIssueDetail: Decodable, Sendable {
     let title: String
     let body: String
     let state: String
@@ -23,16 +23,16 @@ private struct GHIssueDetail: Decodable {
     let labels: [Label]
     let author: Author
     let comments: [GHComment]
-    struct Label: Decodable { let name: String }
-    struct Author: Decodable { let login: String }
+    struct Label: Decodable, Sendable { let name: String }
+    struct Author: Decodable, Sendable { let login: String }
 }
 
-private struct GHComment: Identifiable, Decodable {
+private struct GHComment: Identifiable, Decodable, Sendable {
     let id: String
     let author: Author
     let body: String
     let createdAt: String
-    struct Author: Decodable { let login: String }
+    struct Author: Decodable, Sendable { let login: String }
 }
 
 private func relativeTime(_ iso: String) -> String {
@@ -191,9 +191,9 @@ struct GitHubIssueSidebar: View {
                 return
             }
             let (org2, repo) = org
-            let (fetchedDetail, fetchError) = await Task.detached { fetchIssueDetail(number: issueNumber, org: org2, repo: repo) }.value
+            let (detailData, fetchError) = await Task.detached { fetchIssueDetailData(number: issueNumber, org: org2, repo: repo) }.value
             loading = false
-            if let fetchedDetail {
+            if let detailData, let fetchedDetail = try? JSONDecoder().decode(GHIssueDetail.self, from: detailData) {
                 detail = fetchedDetail
                 GHIssueCache.details[issueNumber] = fetchedDetail
             } else {
@@ -225,7 +225,7 @@ struct GitHubIssueSidebar: View {
     }
 }
 
-private func fetchIssueDetail(number: Int, org: String, repo: String) -> (GHIssueDetail?, String?) {
+nonisolated private func fetchIssueDetailData(number: Int, org: String, repo: String) -> (Data?, String?) {
     guard let ghPath = resolveGHPath() else {
         return (nil, "gh CLI not found — install from https://cli.github.com")
     }
@@ -242,13 +242,10 @@ private func fetchIssueDetail(number: Int, org: String, repo: String) -> (GHIssu
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return (nil, msg.isEmpty ? "gh issue view failed" : msg)
     }
-    guard let decoded = try? JSONDecoder().decode(GHIssueDetail.self, from: outData) else {
-        return (nil, "Could not parse issue")
-    }
-    return (decoded, nil)
+    return (outData, nil)
 }
 
-private func postComment(number: Int, org: String, repo: String, body: String) -> Bool {
+nonisolated private func postComment(number: Int, org: String, repo: String, body: String) -> Bool {
     guard let ghPath = resolveGHPath() else { return false }
     let p = Process(); let errPipe = Pipe()
     p.executableURL = URL(fileURLWithPath: ghPath)

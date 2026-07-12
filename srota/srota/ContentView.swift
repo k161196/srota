@@ -151,7 +151,6 @@ final class TerminalTab: Identifiable, ObservableObject {
     init(colorScheme: ColorScheme, workingDirectory: String? = nil, daemon: DaemonConnection? = nil, firstPaneStableID: String? = nil, autoStart: Bool = true) {
         self.initialWorkingDirectory = workingDirectory
         self.daemon = daemon
-        let paneHookID = UUID().uuidString
         let state = TerminalViewState(terminalConfiguration: TerminalConfiguration())
         let ref = DaemonPaneRef()
         let session = InMemoryTerminalSession(
@@ -583,14 +582,12 @@ final class Workspace: Identifiable, ObservableObject {
             return nil
         }
         NSLog("PANEBUG snapshotTabsAndPanes ws=%@ name=%@ tabs=%d panesPerTab=%@", id.uuidString, name, tabs.count, tabs.map { $0.panes.count }.description)
-        db?.deleteTabs(workspaceID: id.uuidString)
-        return tabs.enumerated().map { ti, tab in
+        let records = tabs.enumerated().map { ti, tab in
             let tabRecord = TabRecord(
                 id: tab.id.uuidString, workspaceID: id.uuidString,
                 position: ti,
                 initialCWD: tab.initialWorkingDirectory ?? "",
                 isSelected: tab.id == selectedTabID)
-            db?.saveTab(tabRecord)
             let paneRecords = tab.panes.enumerated().compactMap { i, pane -> PaneRecord? in
                 guard let layout = tab.paneLayouts[pane.id] else { return nil }
                 let record = PaneRecord(
@@ -600,11 +597,12 @@ final class Workspace: Identifiable, ObservableObject {
                     lw: Double(layout.w), lh: Double(layout.h),
                     initialCWD: resolveCWD(pane.viewState.workingDirectory) ?? pane.initialCWD ?? "",
                     position: i)
-                db?.savePane(record)
                 return record
             }
             return (tabRecord, paneRecords)
         }
+        db?.saveTabsAndPanes(workspaceID: id.uuidString, records: records)
+        return records
     }
 
     // Inverse of hydrateIfNeeded — releases this workspace's live Metal-backed panes back to
@@ -1197,7 +1195,7 @@ struct ContentView: View {
         .onAppear {
             if !restoredSessions {
                 restoredSessions = true
-                restoreSessionsFromDB(colorScheme: colorScheme)
+                Task { await restoreSessionsFromDB(colorScheme: colorScheme) }
             }
             if settings.baseWorkingDirectory == nil { showBaseDirectoryPicker = true }
         }
@@ -1305,6 +1303,7 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             saveLayout()
+            db.flushWritesBlocking()
         }
         .onReceive(NotificationCenter.default.publisher(for: .srotaWorkspaceClosed)) { note in
             guard let wsID = note.userInfo?["id"] as? String else { return }
@@ -1715,8 +1714,9 @@ struct ContentView: View {
     private func saveLayout() {
         let allFolders  = manager.folders
         let unfiledWSes = manager.workspaces
+        var snapshots: [WorkspaceLayoutSnapshot] = []
         func save(ws: Workspace, folderName: String, folderTag: String, position: Int, folderPosition: Int) {
-            db.saveWorkspaceSession(WorkspaceSession(
+            let session = WorkspaceSession(
                 id: ws.id.uuidString, name: ws.name,
                 folderName: folderName, folderTag: folderTag, position: position,
                 lastCWD: ws.currentWorkingDirectory ?? ws.lastCWD,
@@ -1724,12 +1724,12 @@ struct ContentView: View {
                 isPinned: ws.isPinned,
                 directory: ws.directory,
                 folderPosition: folderPosition,
-                additionalDirectories: ws.additionalDirectories))
+                additionalDirectories: ws.additionalDirectories)
             // Never hydrated this session (see Workspace.hydrateIfNeeded), or already dehydrated
             // (see Workspace.dehydrate, which persists its own snapshot before releasing tabs) —
             // either way ws.tabs is empty but its persisted tabs/panes are already correct, so
             // leave them untouched instead of deleting them out from under it.
-            ws.snapshotTabsAndPanes(db: db)
+            snapshots.append(WorkspaceLayoutSnapshot(session: session, tabsAndPanes: ws.snapshotTabsAndPanes(db: nil)))
         }
         for (i, ws) in unfiledWSes.enumerated() { save(ws: ws, folderName: "", folderTag: "", position: i, folderPosition: -1) }
         for (fi, folder) in allFolders.enumerated() {
@@ -1737,15 +1737,16 @@ struct ContentView: View {
                 save(ws: ws, folderName: folder.name, folderTag: folder.tag, position: i, folderPosition: fi)
             }
         }
+        db.saveLayoutSnapshot(snapshots)
     }
 
-    private func restoreSessionsFromDB(colorScheme: ColorScheme) {
+    private func restoreSessionsFromDB(colorScheme: ColorScheme) async {
         manager.daemon = daemon
         manager.db = db
         manager.launchColorScheme = colorScheme
-        let saved = db.loadWorkspaceSessions()
+        let saved = await db.loadWorkspaceRestoreRecords()
         guard !saved.isEmpty else { return }
-        for session in saved {
+        for (session, tabs) in saved {
             let folder = session.folderName.isEmpty
                 ? nil
                 : manager.folder(named: session.folderName, tag: session.folderTag)
@@ -1758,14 +1759,13 @@ struct ContentView: View {
             ws.lastAccessed = Date(timeIntervalSince1970: TimeInterval(session.lastAccessed))
             ws.lastCWD = session.lastCWD
             let cwd = session.lastCWD.isEmpty ? nil : session.lastCWD
-            let tabs = db.loadTabs(workspaceID: session.id)
             if tabs.isEmpty {
                 ws.addTab(colorScheme: colorScheme, workingDirectory: cwd)
             } else {
                 // Only the workspace about to be shown needs its panes materialized right away —
                 // see Workspace.hydrateIfNeeded for why every other one stays deferred.
-                ws.pendingRestore = tabs.sorted(by: { $0.position < $1.position }).map { tabRecord in
-                    let panes = db.loadPanes(tabID: tabRecord.id).sorted { $0.position < $1.position }
+                ws.pendingRestore = tabs.sorted(by: { $0.0.position < $1.0.position }).map { tabRecord, panes in
+                    let panes = panes.sorted { $0.position < $1.position }
                     NSLog("PANEBUG restore ws=%@ name=%@ tab=%@ paneCount=%d", session.id, session.name, tabRecord.id, panes.count)
                     return (tabRecord, panes)
                 }

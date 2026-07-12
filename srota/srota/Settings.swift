@@ -2,9 +2,9 @@ import Foundation
 import Observation
 
 #if DEBUG
-enum Srota { static let dir = ".srota-debug" }
+enum Srota { nonisolated static let dir = ".srota-debug" }
 #else
-enum Srota { static let dir = ".srota" }
+enum Srota { nonisolated static let dir = ".srota" }
 #endif
 
 @Observable @MainActor

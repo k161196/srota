@@ -46,7 +46,7 @@ private struct GHProjectItemListResponse: Decodable {
 
 private struct GHCommandError: Error { let message: String }
 
-private func runGHProjectCommand(_ arguments: [String]) -> Result<Data, GHCommandError> {
+nonisolated private func runGHProjectCommand(_ arguments: [String]) -> Result<Data, GHCommandError> {
     guard let ghPath = resolveGHPath() else {
         return .failure(GHCommandError(message: "gh CLI not found — install from https://cli.github.com"))
     }

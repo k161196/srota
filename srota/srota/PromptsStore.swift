@@ -15,6 +15,7 @@ struct PromptItem: Codable, Identifiable {
 @Observable @MainActor
 final class PromptsStore {
     var items: [PromptItem] = []
+    private var savedData: Data? = nil
 
     private static let path = NSHomeDirectory() + "/\(Srota.dir)/prompts.json"
 
@@ -25,13 +26,18 @@ final class PromptsStore {
               let decoded = try? JSONDecoder().decode([PromptItem].self, from: data)
         else { return }
         items = decoded
+        savedData = data
     }
 
     func save() {
         let dir = NSHomeDirectory() + "/\(Srota.dir)"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         guard let data = try? JSONEncoder().encode(items) else { return }
-        try? data.write(to: URL(fileURLWithPath: Self.path))
+        guard data != savedData else { return }
+        do {
+            try data.write(to: URL(fileURLWithPath: Self.path))
+            savedData = data
+        } catch {}
     }
 
     func add(_ item: PromptItem) { items.append(item); save() }

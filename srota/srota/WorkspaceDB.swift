@@ -2,14 +2,9 @@ import Foundation
 import Observation
 import SQLite3
 
-private let SQLITE_TRANSIENT_FN = unsafeBitCast(-1 as Int, to: sqlite3_destructor_type.self)
+nonisolated(unsafe) private let SQLITE_TRANSIENT_FN = unsafeBitCast(-1 as Int, to: sqlite3_destructor_type.self)
 
-private final class DBHandle {
-    var ptr: OpaquePointer?
-    deinit { sqlite3_close(ptr) }
-}
-
-struct WorkspaceSession: Identifiable {
+struct WorkspaceSession: Identifiable, Sendable {
     var id: String
     var name: String
     var folderName: String
@@ -19,11 +14,11 @@ struct WorkspaceSession: Identifiable {
     var lastAccessed: Int
     var isPinned: Bool
     var directory: String = ""
-    var folderPosition: Int = -1   // order of this workspace's folder among all folders; -1 for unfiled
-    var additionalDirectories: [String] = []   // extra repo checkouts a single agent session can --add-dir into
+    var folderPosition: Int = -1
+    var additionalDirectories: [String] = []
 }
 
-struct TabRecord: Identifiable {
+struct TabRecord: Identifiable, Sendable {
     var id: String
     var workspaceID: String
     var position: Int
@@ -31,30 +26,139 @@ struct TabRecord: Identifiable {
     var isSelected: Bool
 }
 
-struct PaneRecord: Identifiable {
+struct PaneRecord: Identifiable, Sendable {
     var id: String
     var tabID: String
-    var isPrimary: Bool      // kept for legacy migration read
+    var isPrimary: Bool
     var lx, ly, lw, lh: Double
     var initialCWD: String
-    var position: Int = 0    // new: order in panes array
+    var position: Int = 0
 }
 
-struct RepoEntry: Identifiable, Hashable {
+struct RepoEntry: Identifiable, Hashable, Sendable {
     var id: String
     var name: String
     var url: String
     var defaultBranch: String
 }
 
+struct WorkspaceLayoutSnapshot: Sendable {
+    var session: WorkspaceSession
+    var tabsAndPanes: [(TabRecord, [PaneRecord])]?
+}
+
 @Observable
 @MainActor
 final class WorkspaceDB {
-    private let handle = DBHandle()
-    private var db: OpaquePointer? { handle.ptr }
+    private let storage = WorkspaceStorage()
     private var dbWatcher: DispatchSourceFileSystemObject?
-
+    private var writeTail: Task<Void, Never>?
+    private var writeID = 0
     var repos: [RepoEntry] = []
+
+    init() {
+        Task {
+            await storage.open()
+            startDBWatcher(dbPath: storage.dbPath)
+            await refresh()
+        }
+    }
+
+    private func startDBWatcher(dbPath: String) {
+        let fd = open(dbPath, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .extend, .attrib], queue: .main)
+        src.setEventHandler { [weak self] in Task { await self?.refresh() } }
+        src.setCancelHandler { close(fd) }
+        src.resume()
+        dbWatcher = src
+    }
+
+    func refresh() async {
+        await writeTail?.value
+        repos = await storage.loadRepos()
+    }
+
+    func addRepo(name: String, url: String = "", defaultBranch: String = "main") {
+        enqueueWrite { await $0.addRepo(name: name, url: url, defaultBranch: defaultBranch) }
+        Task { await refresh() }
+    }
+
+    func updateRepo(_ repo: RepoEntry) {
+        enqueueWrite { await $0.updateRepo(repo) }
+        Task { await refresh() }
+    }
+
+    func deleteRepo(id: String) {
+        enqueueWrite { await $0.deleteRepo(id: id) }
+        Task { await refresh() }
+    }
+
+    private func enqueueWrite(_ operation: @escaping @Sendable (WorkspaceStorage) async -> Void) {
+        let previous = writeTail
+        let storage = storage
+        writeID += 1
+        let id = writeID
+        let task = Task {
+            await previous?.value
+            await operation(storage)
+        }
+        writeTail = task
+        Task {
+            await task.value
+            if writeID == id {
+                writeTail = nil
+            }
+        }
+    }
+
+    func saveWorkspaceSession(_ session: WorkspaceSession) {
+        enqueueWrite { await $0.saveWorkspaceSession(session) }
+    }
+
+    func updateWorkspaceDirectory(id: String, directory: String) {
+        enqueueWrite { await $0.updateWorkspaceDirectory(id: id, directory: directory) }
+    }
+
+    func toggleWorkspacePin(id: String) {
+        enqueueWrite { await $0.toggleWorkspacePin(id: id) }
+    }
+
+    func touchWorkspaceSession(id: String, cwd: String) {
+        enqueueWrite { await $0.touchWorkspaceSession(id: id, cwd: cwd) }
+    }
+
+    func deleteWorkspaceSession(id: String) {
+        enqueueWrite { await $0.deleteWorkspaceSession(id: id) }
+    }
+
+    func saveTabsAndPanes(workspaceID: String, records: [(TabRecord, [PaneRecord])]) {
+        enqueueWrite { await $0.saveTabsAndPanes(workspaceID: workspaceID, records: records) }
+    }
+
+    func saveLayoutSnapshot(_ snapshots: [WorkspaceLayoutSnapshot]) {
+        enqueueWrite { await $0.saveLayoutSnapshot(snapshots) }
+    }
+
+    func flushWritesBlocking() {
+        let tail = writeTail
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached {
+            await tail?.value
+            semaphore.signal()
+        }
+        semaphore.wait()
+    }
+
+    func loadWorkspaceRestoreRecords() async -> [(WorkspaceSession, [(TabRecord, [PaneRecord])])] {
+        await storage.loadWorkspaceRestoreRecords()
+    }
+}
+
+private actor WorkspaceStorage {
+    nonisolated let dbPath: String
+    private var db: OpaquePointer?
+    private var didLogOpenFailure = false
 
     private var sqlFrom: String { "FR" + "OM" }
     private var sqlWhere: String { "WH" + "ERE" }
@@ -67,42 +171,48 @@ final class WorkspaceDB {
         #else
         let dbName = "srota.db"
         #endif
-        guard sqlite3_open(dir + "/" + dbName, &handle.ptr) == SQLITE_OK else { return }
-        createTables()
-        refresh()
-        startDBWatcher(dbPath: dir + "/" + dbName)
+        dbPath = dir + "/" + dbName
     }
 
-    private func startDBWatcher(dbPath: String) {
-        let fd = open(dbPath, O_EVTONLY)
-        guard fd >= 0 else { return }
-        let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .extend, .attrib], queue: .main)
-        src.setEventHandler { [weak self] in self?.refresh() }
-        src.setCancelHandler { close(fd) }
-        src.resume()
-        dbWatcher = src
+    deinit {
+        sqlite3_close(db)
+    }
+
+    func open() {
+        guard db == nil else { return }
+        guard sqlite3_open(dbPath, &db) == SQLITE_OK else {
+            if !didLogOpenFailure {
+                didLogOpenFailure = true
+                NSLog("Srota WorkspaceDB: sqlite3_open failed for %@", dbPath)
+            }
+            sqlite3_close(db)
+            db = nil
+            return
+        }
+        createTables()
+    }
+
+    func loadRepos() -> [RepoEntry] {
+        open()
+        return rows(sql("SELECT id, name, url, default_branch", sqlFrom, "repos", "ORDER BY name")) {
+            RepoEntry(id: col($0, 0), name: col($0, 1), url: col($0, 2), defaultBranch: col($0, 3))
+        }
     }
 
     func addRepo(name: String, url: String = "", defaultBranch: String = "main") {
+        open()
         let id = UUID().uuidString
         upsert("repos", ["id": id, "name": name, "url": url, "default_branch": defaultBranch])
-        refresh()
     }
 
     func updateRepo(_ repo: RepoEntry) {
+        open()
         upsert("repos", ["id": repo.id, "name": repo.name, "url": repo.url, "default_branch": repo.defaultBranch])
-        refresh()
     }
 
     func deleteRepo(id: String) {
+        open()
         exec(sql("DELETE", sqlFrom, "repos", sqlWhere, "id = ?"), [id])
-        refresh()
-    }
-
-    func refresh() {
-        repos = rows(sql("SELECT id, name, url, default_branch", sqlFrom, "repos", "ORDER BY name")) {
-            RepoEntry(id: col($0, 0), name: col($0, 1), url: col($0, 2), defaultBranch: col($0, 3))
-        }
     }
 
     private func createTables() {
@@ -119,9 +229,13 @@ final class WorkspaceDB {
         execRaw("DROP TABLE IF EXISTS issue_repos")
         execRaw("DROP TABLE IF EXISTS repo_branches")
         execRaw("""
-        CREATE TABLE IF NOT EXISTS repos
-        (id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL DEFAULT '',
-         local_path TEXT NOT NULL DEFAULT '', default_branch TEXT NOT NULL DEFAULT 'main');
+        CREATE TABLE IF NOT EXISTS repos (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL DEFAULT '',
+            local_path TEXT NOT NULL DEFAULT '',
+            default_branch TEXT NOT NULL DEFAULT 'main'
+        );
         CREATE TABLE IF NOT EXISTS ws_workspaces (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -133,7 +247,9 @@ final class WorkspaceDB {
             tmux_name TEXT,
             last_cwd TEXT NOT NULL DEFAULT '',
             last_accessed INTEGER NOT NULL DEFAULT 0,
-            is_pinned INTEGER NOT NULL DEFAULT 0
+            is_pinned INTEGER NOT NULL DEFAULT 0,
+            directory TEXT NOT NULL DEFAULT '',
+            additional_directories TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS ws_tabs (
             id TEXT PRIMARY KEY,
@@ -163,38 +279,26 @@ final class WorkspaceDB {
     }
 
     private func migrateFolderPositionIfNeeded() {
-        // Add folder_position column if missing, backfilling from the previous
-        // alphabetical folder_name ordering so existing folder order doesn't jumble on upgrade.
-        let cols = rows("PRAGMA table_info(ws_workspaces)", bind: []) { stmt -> String in
-            col(stmt, 1)
-        }
+        let cols = rows("PRAGMA table_info(ws_workspaces)", bind: []) { col($0, 1) }
         guard !cols.contains("folder_position") else { return }
         exec("ALTER TABLE ws_workspaces ADD COLUMN folder_position INTEGER NOT NULL DEFAULT -1")
         let folderNames = rows(
             "SELECT DISTINCT folder_name FROM ws_workspaces WHERE folder_name != '' ORDER BY folder_name",
             bind: []
-        ) { stmt -> String in col(stmt, 0) }
+        ) { col($0, 0) }
         for (i, name) in folderNames.enumerated() {
             exec("UPDATE ws_workspaces SET folder_position = ? WHERE folder_name = ?", [String(i), name])
         }
     }
 
     private func migratePanesIfNeeded() {
-        // Add position column if missing (SQLite 3.x safe — no DROP COLUMN needed)
-        let cols = rows("PRAGMA table_info(ws_panes)", bind: []) { stmt -> String in
-            col(stmt, 1)
-        }
+        let cols = rows("PRAGMA table_info(ws_panes)", bind: []) { col($0, 1) }
         guard !cols.contains("position") else { return }
         exec("ALTER TABLE ws_panes ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
-        // Seed position from insert order so restored panes stay deterministic.
-        // Legacy rows did not persist exact secondary ordering, but rowid preserves the old insert sequence.
-        let rowsToMigrate = rows(
-            "SELECT id, tab_id FROM ws_panes ORDER BY tab_id, rowid",
-            bind: []
-        ) { stmt -> (String, String) in
-            (col(stmt, 0), col(stmt, 1))
+        let rowsToMigrate = rows("SELECT id, tab_id FROM ws_panes ORDER BY tab_id, rowid", bind: []) {
+            (col($0, 0), col($0, 1))
         }
-        var currentTabID: String? = nil
+        var currentTabID: String?
         var position = 0
         for (id, tabID) in rowsToMigrate {
             if tabID != currentTabID {
@@ -207,6 +311,7 @@ final class WorkspaceDB {
     }
 
     func saveWorkspaceSession(_ session: WorkspaceSession) {
+        open()
         upsert("ws_workspaces", [
             "id": session.id,
             "name": session.name,
@@ -223,14 +328,17 @@ final class WorkspaceDB {
     }
 
     func updateWorkspaceDirectory(id: String, directory: String) {
+        open()
         exec("UPDATE ws_workspaces SET directory = ? WHERE id = ?", [directory, id])
     }
 
     func toggleWorkspacePin(id: String) {
+        open()
         exec("UPDATE ws_workspaces SET is_pinned = 1 - is_pinned WHERE id = ?", [id])
     }
 
     func touchWorkspaceSession(id: String, cwd: String) {
+        open()
         exec("UPDATE ws_workspaces SET last_cwd = ?, last_accessed = ? WHERE id = ?", [
             cwd,
             String(Int(Date().timeIntervalSince1970)),
@@ -239,11 +347,12 @@ final class WorkspaceDB {
     }
 
     func deleteWorkspaceSession(id: String) {
+        open()
         deleteTabs(workspaceID: id)
         exec(sql("DELETE", sqlFrom, "ws_workspaces", sqlWhere, "id = ?"), [id])
     }
 
-    func saveTab(_ tab: TabRecord) {
+    private func saveTab(_ tab: TabRecord) {
         upsert("ws_tabs", [
             "id": tab.id,
             "workspace_id": tab.workspaceID,
@@ -253,7 +362,7 @@ final class WorkspaceDB {
         ])
     }
 
-    func deleteTabs(workspaceID: String) {
+    private func deleteTabs(workspaceID: String) {
         let tabIDs = rows(sql("SELECT id", sqlFrom, "ws_tabs", sqlWhere, "workspace_id = ?"), bind: [workspaceID]) {
             col($0, 0)
         }
@@ -264,7 +373,7 @@ final class WorkspaceDB {
         exec(sql("DELETE", sqlFrom, "ws_tabs", sqlWhere, "workspace_id = ?"), [workspaceID])
     }
 
-    func loadTabs(workspaceID: String) -> [TabRecord] {
+    private func loadTabs(workspaceID: String) -> [TabRecord] {
         rows(sql("SELECT id,workspace_id,position,initial_cwd,is_selected", sqlFrom, "ws_tabs", sqlWhere, "workspace_id=?", "ORDER BY position"), bind: [workspaceID]) { stmt in
             TabRecord(
                 id: col(stmt, 0),
@@ -276,7 +385,7 @@ final class WorkspaceDB {
         }
     }
 
-    func savePane(_ pane: PaneRecord) {
+    private func savePane(_ pane: PaneRecord) {
         NSLog("PANEBUG savePane id=%@ tab=%@ pos=%d", pane.id, pane.tabID, pane.position)
         upsert("ws_panes", [
             "id": pane.id,
@@ -291,11 +400,7 @@ final class WorkspaceDB {
         ])
     }
 
-    func deletePanes(tabID: String) {
-        exec(sql("DELETE", sqlFrom, "ws_panes", sqlWhere, "tab_id = ?"), [tabID])
-    }
-
-    func loadPanes(tabID: String) -> [PaneRecord] {
+    private func loadPanes(tabID: String) -> [PaneRecord] {
         rows(sql("SELECT id,tab_id,is_primary,lx,ly,lw,lh,initial_cwd,position", sqlFrom, "ws_panes", sqlWhere, "tab_id=?", "ORDER BY position ASC"), bind: [tabID]) { stmt in
             PaneRecord(
                 id: col(stmt, 0),
@@ -311,7 +416,46 @@ final class WorkspaceDB {
         }
     }
 
-    func loadWorkspaceSessions() -> [WorkspaceSession] {
+    func saveTabsAndPanes(workspaceID: String, records: [(TabRecord, [PaneRecord])]) {
+        open()
+        execRaw("BEGIN IMMEDIATE TRANSACTION")
+        deleteTabs(workspaceID: workspaceID)
+        for (tab, panes) in records {
+            saveTab(tab)
+            for pane in panes {
+                savePane(pane)
+            }
+        }
+        execRaw("COMMIT")
+    }
+
+    func saveLayoutSnapshot(_ snapshots: [WorkspaceLayoutSnapshot]) {
+        open()
+        execRaw("BEGIN IMMEDIATE TRANSACTION")
+        for snapshot in snapshots {
+            saveWorkspaceSession(snapshot.session)
+            if let records = snapshot.tabsAndPanes {
+                deleteTabs(workspaceID: snapshot.session.id)
+                for (tab, panes) in records {
+                    saveTab(tab)
+                    for pane in panes {
+                        savePane(pane)
+                    }
+                }
+            }
+        }
+        execRaw("COMMIT")
+    }
+
+    func loadWorkspaceRestoreRecords() -> [(WorkspaceSession, [(TabRecord, [PaneRecord])])] {
+        open()
+        return loadWorkspaceSessions().map { session in
+            let tabs = loadTabs(workspaceID: session.id)
+            return (session, tabs.map { ($0, loadPanes(tabID: $0.id)) })
+        }
+    }
+
+    private func loadWorkspaceSessions() -> [WorkspaceSession] {
         let all = rows("""
         SELECT id, name, folder_name, folder_tag, position,
                last_cwd, last_accessed, is_pinned, directory, folder_position, additional_directories
@@ -348,8 +492,8 @@ final class WorkspaceDB {
 
         return best.values.sorted {
             $0.folderPosition != $1.folderPosition
-                ? $0.folderPosition < $1.folderPosition
-                : $0.position < $1.position
+            ? $0.folderPosition < $1.folderPosition
+            : $0.position < $1.position
         }
     }
 
@@ -383,10 +527,10 @@ final class WorkspaceDB {
     }
 
     private func execRaw(_ sqlText: String) {
-        sqlite3_exec(db, sqlText, nil, nil, nil)
+        _ = sqlite3_exec(db, sqlText, nil, nil, nil)
     }
 
-    private func rows<T>(_ sqlText: String, bind: [String] = [], map: (OpaquePointer) -> T) -> [T] {
+    private func rows<T>(_ sqlText: String, bind: [String] = [], _ map: (OpaquePointer) -> T) -> [T] {
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sqlText, -1, &stmt, nil) == SQLITE_OK else { return [] }
         for (index, value) in bind.enumerated() {

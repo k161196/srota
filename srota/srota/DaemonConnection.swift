@@ -51,7 +51,7 @@ struct PTYInfo {
     let agentSummary: String
     let agentUpdatedAt: Double?
 
-    init?(json: [String: Any]) {
+    nonisolated init?(json: [String: Any]) {
         guard let paneID = json["paneID"] as? String,
               let stableID = json["stableID"] as? String else { return nil }
         self.paneID = paneID
@@ -549,7 +549,7 @@ final class DaemonConnection {
         guard let rebound = bind(paneID: paneID, stableID: stableID) else {
             // Pane was closed while createPTY was in-flight — kill the orphaned daemon process
             killPane(paneID: paneID)
-            stateLock.withLock { managedSessions.removeValue(forKey: stableID) }
+            _ = stateLock.withLock { managedSessions.removeValue(forKey: stableID) }
             return
         }
         applyPendingResize(for: rebound, paneID: paneID)
@@ -567,7 +567,7 @@ final class DaemonConnection {
     }
 
     private func endRestore(stableID: String) {
-        stateLock.withLock {
+        _ = stateLock.withLock {
             restoringStableIDs.remove(stableID)
         }
     }

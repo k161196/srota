@@ -1,7 +1,7 @@
 import Foundation
 
 // Locates the gh CLI binary; GUI apps don't inherit the login shell's PATH.
-func resolveGHPath() -> String? {
+nonisolated func resolveGHPath() -> String? {
     for path in ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"] {
         if FileManager.default.fileExists(atPath: path) { return path }
     }
@@ -16,7 +16,7 @@ func resolveGHPath() -> String? {
 }
 
 // Parses git@github.com:org/repo.git or https://github.com/org/repo[.git]
-func gitURLComponents(_ url: String) -> (org: String, repo: String)? {
+nonisolated func gitURLComponents(_ url: String) -> (org: String, repo: String)? {
     var s = url
     for prefix in ["git@github.com:", "https://github.com/", "http://github.com/"] {
         if s.hasPrefix(prefix) { s = String(s.dropFirst(prefix.count)); break }
@@ -29,7 +29,7 @@ func gitURLComponents(_ url: String) -> (org: String, repo: String)? {
 
 // Canonical on-disk checkout location for a (repo, branch) pair — shared by RepoDetailView.branchPath
 // and the multi-repo workspace flow, so both agree on where an existing checkout lives.
-func repoBranchPath(base: String, repoURL: String, repoName: String, branch: String) -> String {
+nonisolated func repoBranchPath(base: String, repoURL: String, repoName: String, branch: String) -> String {
     let safeName = branch.replacingOccurrences(of: "/", with: "-")
     if let (org, repo) = gitURLComponents(repoURL) {
         let safeOrg = org.replacingOccurrences(of: "/", with: "-")
@@ -49,7 +49,7 @@ func extractIssueNumber(fromBranch branch: String) -> Int? {
     return Int(branch[range])
 }
 
-func runGit(_ arguments: [String]) -> String? {
+nonisolated func runGit(_ arguments: [String]) -> String? {
     let p = Process(); let outPipe = Pipe(); let errPipe = Pipe()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
     p.arguments = arguments

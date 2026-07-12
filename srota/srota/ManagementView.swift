@@ -1004,7 +1004,7 @@ private struct ReposPanel: View {
             items: db.repos,
             emptyHint: "No repos — press + or import from GitHub",
             onDelete: { db.deleteRepo(id: $0.id) },
-            onRefresh: { db.refresh() },
+            onRefresh: { Task { await db.refresh() } },
             onImport: { showGitHubImport = true }
         ) { repo in
             VStack(alignment: .leading, spacing: 2) {

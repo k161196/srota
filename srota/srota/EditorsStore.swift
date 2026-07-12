@@ -18,6 +18,7 @@ private struct EditorsData: Codable {
 final class EditorsStore {
     var editors: [EditorItem] = []
     var lastUsedID: UUID? = nil
+    private var savedData: Data? = nil
 
     /// The editor a bare click on the Open button should launch.
     var defaultEditor: EditorItem? {
@@ -30,6 +31,7 @@ final class EditorsStore {
 
     func load() {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: Self.path)) else { return }
+        savedData = data
         if let decoded = try? JSONDecoder().decode(EditorsData.self, from: data) {
             editors = decoded.editors
             lastUsedID = decoded.lastUsedID
@@ -42,7 +44,11 @@ final class EditorsStore {
         let dir = NSHomeDirectory() + "/\(Srota.dir)"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         guard let data = try? JSONEncoder().encode(EditorsData(editors: editors, lastUsedID: lastUsedID)) else { return }
-        try? data.write(to: URL(fileURLWithPath: Self.path))
+        guard data != savedData else { return }
+        do {
+            try data.write(to: URL(fileURLWithPath: Self.path))
+            savedData = data
+        } catch {}
     }
 
     func add(_ editor: EditorItem) {

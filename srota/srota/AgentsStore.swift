@@ -22,6 +22,7 @@ struct AgentItem: Codable, Identifiable {
 @Observable @MainActor
 final class AgentsStore {
     var agents: [AgentItem] = []
+    private var savedData: Data? = nil
 
     private static let agentsPath  = NSHomeDirectory() + "/\(Srota.dir)/agents.json"
     private static let promptsDir  = NSHomeDirectory() + "/\(Srota.dir)/agent-prompts"
@@ -69,13 +70,18 @@ Do not approve, merge, or request changes (`gh pr review`, `gh pr merge`) withou
               let decoded = try? JSONDecoder().decode([AgentItem].self, from: data)
         else { return }
         agents = decoded
+        savedData = data
     }
 
     func save() {
         let dir = NSHomeDirectory() + "/\(Srota.dir)"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         guard let data = try? JSONEncoder().encode(agents) else { return }
-        try? data.write(to: URL(fileURLWithPath: Self.agentsPath))
+        guard data != savedData else { return }
+        do {
+            try data.write(to: URL(fileURLWithPath: Self.agentsPath))
+            savedData = data
+        } catch {}
     }
 
     func add(_ item: AgentItem) { agents.append(item); save() }
@@ -100,11 +106,21 @@ Do not approve, merge, or request changes (`gh pr review`, `gh pr merge`) withou
     }
 
     func saveSystemPrompt(_ text: String, to path: String) {
-        try? text.write(toFile: path, atomically: true, encoding: .utf8)
+        if fileContents(at: path, matches: text) { return }
+        do { try text.write(toFile: path, atomically: true, encoding: .utf8) } catch {}
     }
 
     func saveFirstMessage(_ text: String, to path: String) {
-        try? text.write(toFile: path, atomically: true, encoding: .utf8)
+        if fileContents(at: path, matches: text) { return }
+        do { try text.write(toFile: path, atomically: true, encoding: .utf8) } catch {}
+    }
+
+    private func fileContents(at path: String, matches text: String) -> Bool {
+        guard let size = try? FileManager.default.attributesOfItem(atPath: path)[.size] as? NSNumber else {
+            return false
+        }
+        guard size.intValue == text.utf8.count else { return false }
+        return (try? String(contentsOfFile: path, encoding: .utf8)) == text
     }
 
     func newSystemPromptPath(for name: String) -> String {

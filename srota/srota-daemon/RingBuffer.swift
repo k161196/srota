@@ -1,13 +1,13 @@
 import Foundation
 
-// ponytail: fixed 512KB in-memory ring per PTY — secrets stay in RAM, never hit disk
+// ponytail: fixed 256KB in-memory ring per PTY; add per-session capacity if replay depth matters.
 final class RingBuffer {
     private var buf: [UInt8]
     private var writeHead = 0
     private var count = 0
     let capacity: Int
 
-    init(capacity: Int = 512 * 1024) {
+    init(capacity: Int = 256 * 1024) {
         self.capacity = capacity
         buf = [UInt8](repeating: 0, count: capacity)
     }

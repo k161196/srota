@@ -7,7 +7,7 @@ let daemonLabel = "com.kiran.srota.daemon"
 #endif
 
 /// Writes the LaunchAgent plist and bootstraps it if needed. Safe to call on every launch.
-func installDaemonLaunchAgent() {
+func installDaemonLaunchAgent() async {
     guard let binaryPath = findDaemonBinary() else { return }
 
     let home = NSHomeDirectory()
@@ -53,23 +53,25 @@ func installDaemonLaunchAgent() {
         try? plist.write(toFile: plistPath, atomically: true, encoding: .utf8)
         // Re-bootstrap whenever the plist changes (new binary path, new socket path, etc.)
         let domain = "gui/\(getuid())"
-        launchctl("bootout", "\(domain)/\(daemonLabel)")
-        launchctl("bootstrap", domain, plistPath)
+        await launchctl("bootout", "\(domain)/\(daemonLabel)")
+        await launchctl("bootstrap", domain, plistPath)
     } else {
         // Plist unchanged — make sure it's running (first launch after boot, or first install)
         let domain = "gui/\(getuid())"
-        launchctl("bootstrap", domain, plistPath)
+        await launchctl("bootstrap", domain, plistPath)
     }
 }
 
 // MARK: - Helpers
 
-private func launchctl(_ args: String...) {
-    let task = Process()
-    task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-    task.arguments = Array(args)
-    try? task.run()
-    task.waitUntilExit()
+private func launchctl(_ args: String...) async {
+    await Task.detached {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        task.arguments = Array(args)
+        try? task.run()
+        task.waitUntilExit()
+    }.value
 }
 
 private func findDaemonBinary() -> String? {
