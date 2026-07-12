@@ -460,6 +460,8 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var name: String
     @Published var isPinned: Bool = false
     @Published var directory: String = ""
+    // Other repo checkouts this workspace's agent can reach via --add-dir, for cross-repo work.
+    @Published var additionalDirectories: [String] = []
     var daemon: DaemonConnection? = nil
     var lastAccessed: Date = Date()
     var isActive: Bool { isPinned || lastAccessed > Date(timeIntervalSinceNow: -172800) }
@@ -774,10 +776,11 @@ final class TerminalManager: ObservableObject {
         folders.first { $0.workspaces.contains { $0.id == wsID } }?.id
     }
 
-    func addWorkspace(colorScheme: ColorScheme, inFolder folderID: UUID? = nil, workingDirectory: String? = nil, name: String? = nil) {
+    func addWorkspace(colorScheme: ColorScheme, inFolder folderID: UUID? = nil, workingDirectory: String? = nil, name: String? = nil, additionalDirectories: [String] = []) {
         let wsName = name ?? "Workspace \(allWorkspaces.count + 1)"
         let ws = Workspace(name: wsName)
         ws.directory = workingDirectory ?? ""
+        ws.additionalDirectories = additionalDirectories
         ws.daemon = daemon
         ws.addTab(colorScheme: colorScheme, workingDirectory: workingDirectory)
         if let folderID, let folder = folders.first(where: { $0.id == folderID }) {
@@ -1016,6 +1019,7 @@ private struct ResizableSidebar: View {
     let sidebarVisible: Bool
     let keyboardFocusedWorkspaceID: UUID?
     let onAdd: () -> Void
+    let onAddMultiRepo: () -> Void
     let onSelectWorkspace: (UUID) -> Void
     let onSelectAgentTab: (UUID, String) -> Void
     let onShowAllAgents: () -> Void
@@ -1027,6 +1031,7 @@ private struct ResizableSidebar: View {
             manager: manager,
             keyboardFocusedWorkspaceID: keyboardFocusedWorkspaceID,
             onAdd: onAdd,
+            onAddMultiRepo: onAddMultiRepo,
             onSelectWorkspace: onSelectWorkspace,
             onSelectAgentTab: onSelectAgentTab,
             onShowAllAgents: onShowAllAgents
@@ -1057,6 +1062,7 @@ struct ContentView: View {
     @State private var restoredSessions = false
     @State private var showSettings = false
     @State private var showPrompts = false
+    @State private var showMultiRepoSheet = false
     @State private var agentToLaunch: AgentItem? = nil
     @State private var worktreeError: String? = nil
     @State private var workspaceSwitcherModel: SwitcherModel? = nil
@@ -1107,6 +1113,10 @@ struct ContentView: View {
                         let fid = manager.selectedWorkspaceID.flatMap { manager.folderID(containingWorkspace: $0) }
                         manager.addWorkspace(colorScheme: colorScheme, inFolder: fid)
                         saveLayout()
+                    },
+                    onAddMultiRepo: {
+                        clearSidebarKeyboardFocus()
+                        showMultiRepoSheet = true
                     },
                     onSelectWorkspace: { id in
                         clearSidebarKeyboardFocus()
@@ -1406,6 +1416,21 @@ struct ContentView: View {
                 launchAgent(agent: agent, systemPrompt: systemPrompt, firstMessage: firstMessage, preset: preset)
             }
         }
+        .sheet(isPresented: $showMultiRepoSheet) {
+            MultiRepoWorkspaceSheet(repos: db.repos, baseWorkingDirectory: settings.baseWorkingDirectory) { name, primaryPath, additionalPaths in
+                manager.addWorkspace(colorScheme: colorScheme, workingDirectory: primaryPath, name: name, additionalDirectories: additionalPaths)
+                if let ws = manager.allWorkspaces.last {
+                    db.saveWorkspaceSession(WorkspaceSession(
+                        id: ws.id.uuidString, name: ws.name,
+                        folderName: "", folderTag: "", position: manager.workspaces.count,
+                        lastCWD: primaryPath, lastAccessed: Int(Date().timeIntervalSince1970),
+                        isPinned: false, directory: primaryPath,
+                        additionalDirectories: additionalPaths))
+                }
+                managementTab = .workspaces
+                saveLayout()
+            }
+        }
     }
 
     private func launchAgent(agent: AgentItem, systemPrompt: String, firstMessage: String, preset: TerminalPreset?) {
@@ -1415,7 +1440,13 @@ struct ContentView: View {
                          .joined(separator: " ")
             ?? (agent.name.localizedCaseInsensitiveContains("codex") ? "codex" : "claude")
         let presetArgs = resolvedPreset?.arguments.trimmingCharacters(in: .whitespaces) ?? ""
-        let base = presetArgs.isEmpty ? commandBase : "\(commandBase) \(presetArgs)"
+        // Temp-dir agent sessions are isolated by design — only splice in the launch
+        // workspace's additional repos when actually launching into that workspace.
+        let additionalDirs = agent.runInTempDir ? [] : (manager.selectedWorkspace?.additionalDirectories ?? [])
+        let addDirFlags = additionalDirs.map {
+            "--add-dir \"\($0.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\""
+        }
+        let base = ([commandBase] + addDirFlags + (presetArgs.isEmpty ? [] : [presetArgs])).joined(separator: " ")
         // Empty flag = agent takes prompt positionally (e.g. codex) — no separate system-prompt flag,
         // so fold the system prompt into the user prompt instead of dropping it.
         let flag = resolvedPreset?.systemPromptFlag ?? "--system-prompt"
@@ -1691,7 +1722,8 @@ struct ContentView: View {
                 lastAccessed: Int(Date().timeIntervalSince1970),
                 isPinned: ws.isPinned,
                 directory: ws.directory,
-                folderPosition: folderPosition))
+                folderPosition: folderPosition,
+                additionalDirectories: ws.additionalDirectories))
             // Never hydrated this session (see Workspace.hydrateIfNeeded), or already dehydrated
             // (see Workspace.dehydrate, which persists its own snapshot before releasing tabs) —
             // either way ws.tabs is empty but its persisted tabs/panes are already correct, so
@@ -1721,6 +1753,7 @@ struct ContentView: View {
             ws.daemon = daemon
             ws.isPinned = session.isPinned
             ws.directory = session.directory
+            ws.additionalDirectories = session.additionalDirectories
             ws.lastAccessed = Date(timeIntervalSince1970: TimeInterval(session.lastAccessed))
             ws.lastCWD = session.lastCWD
             let cwd = session.lastCWD.isEmpty ? nil : session.lastCWD
@@ -1937,6 +1970,7 @@ private struct SidebarView: View {
     @ObservedObject var manager: TerminalManager
     let keyboardFocusedWorkspaceID: UUID?
     let onAdd: () -> Void
+    let onAddMultiRepo: () -> Void
     let onSelectWorkspace: (UUID) -> Void
     let onSelectAgentTab: (UUID, String) -> Void
     let onShowAllAgents: () -> Void
@@ -1963,6 +1997,15 @@ private struct SidebarView: View {
                 }
                 .buttonStyle(.plain)
                 Spacer()
+                Button(action: onAddMultiRepo) {
+                    Image(systemName: "point.3.connected.trianglepath.dotted")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.labelSecondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+                .help("New Cross-Repo Workspace")
                 Button {
                     let f = manager.addFolder(name: "New Folder")
                     newFolderID = f.id

@@ -1516,14 +1516,7 @@ private struct RepoDetailView: View {
 
     private func branchPath(_ branchName: String) -> String? {
         guard let base = settings.baseWorkingDirectory else { return nil }
-        let safeName = branchName.replacingOccurrences(of: "/", with: "-")
-        if let (org, repoName) = gitURLComponents(repoURL) {
-            let safeOrg = org.replacingOccurrences(of: "/", with: "-")
-            let safeRepo = repoName.replacingOccurrences(of: "/", with: "-")
-            return "\(base)/organizations/\(safeOrg)/projects/\(safeRepo)/branches/\(safeName)"
-        }
-        let safeRepo = repo.name.replacingOccurrences(of: "/", with: "-")
-        return "\(base)/repos/\(safeRepo)/branches/\(safeName)"
+        return repoBranchPath(base: base, repoURL: repoURL, repoName: repo.name, branch: branchName)
     }
 
     private var mainClonePath: String? { branchPath(defaultBranch) }

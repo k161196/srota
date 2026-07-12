@@ -27,6 +27,19 @@ func gitURLComponents(_ url: String) -> (org: String, repo: String)? {
     return (parts[0], parts[1])
 }
 
+// Canonical on-disk checkout location for a (repo, branch) pair — shared by RepoDetailView.branchPath
+// and the multi-repo workspace flow, so both agree on where an existing checkout lives.
+func repoBranchPath(base: String, repoURL: String, repoName: String, branch: String) -> String {
+    let safeName = branch.replacingOccurrences(of: "/", with: "-")
+    if let (org, repo) = gitURLComponents(repoURL) {
+        let safeOrg = org.replacingOccurrences(of: "/", with: "-")
+        let safeRepo = repo.replacingOccurrences(of: "/", with: "-")
+        return "\(base)/organizations/\(safeOrg)/projects/\(safeRepo)/branches/\(safeName)"
+    }
+    let safeRepo = repoName.replacingOccurrences(of: "/", with: "-")
+    return "\(base)/repos/\(safeRepo)/branches/\(safeName)"
+}
+
 // Extracts the issue number from branch names like "issue/508-fix-login-crash" or "issue-508-fix-login-crash".
 func extractIssueNumber(fromBranch branch: String) -> Int? {
     guard let regex = try? NSRegularExpression(pattern: #"issue[/-](\d+)"#),

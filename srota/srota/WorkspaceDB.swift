@@ -20,6 +20,7 @@ struct WorkspaceSession: Identifiable {
     var isPinned: Bool
     var directory: String = ""
     var folderPosition: Int = -1   // order of this workspace's folder among all folders; -1 for unfiled
+    var additionalDirectories: [String] = []   // extra repo checkouts a single agent session can --add-dir into
 }
 
 struct TabRecord: Identifiable {
@@ -108,6 +109,7 @@ final class WorkspaceDB {
         execRaw("ALTER TABLE repos ADD COLUMN default_branch TEXT NOT NULL DEFAULT 'main'")
         execRaw("ALTER TABLE ws_workspaces ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")
         execRaw("ALTER TABLE ws_workspaces ADD COLUMN directory TEXT NOT NULL DEFAULT ''")
+        execRaw("ALTER TABLE ws_workspaces ADD COLUMN additional_directories TEXT NOT NULL DEFAULT ''")
         execRaw("DROP TABLE IF EXISTS organizations")
         execRaw("DROP TABLE IF EXISTS projects")
         execRaw("DROP TABLE IF EXISTS branches")
@@ -215,7 +217,8 @@ final class WorkspaceDB {
             "last_cwd": session.lastCWD,
             "last_accessed": String(session.lastAccessed),
             "is_pinned": session.isPinned ? "1" : "0",
-            "directory": session.directory
+            "directory": session.directory,
+            "additional_directories": session.additionalDirectories.joined(separator: "\n")
         ])
     }
 
@@ -311,10 +314,11 @@ final class WorkspaceDB {
     func loadWorkspaceSessions() -> [WorkspaceSession] {
         let all = rows("""
         SELECT id, name, folder_name, folder_tag, position,
-               last_cwd, last_accessed, is_pinned, directory, folder_position
+               last_cwd, last_accessed, is_pinned, directory, folder_position, additional_directories
         FROM ws_workspaces ORDER BY folder_position, folder_name, position
         """) { stmt in
-            WorkspaceSession(
+            let extraDirs = col(stmt, 10)
+            return WorkspaceSession(
                 id: col(stmt, 0),
                 name: col(stmt, 1),
                 folderName: col(stmt, 2),
@@ -324,7 +328,8 @@ final class WorkspaceDB {
                 lastAccessed: Int(sqlite3_column_int(stmt, 6)),
                 isPinned: sqlite3_column_int(stmt, 7) != 0,
                 directory: col(stmt, 8),
-                folderPosition: Int(sqlite3_column_int(stmt, 9))
+                folderPosition: Int(sqlite3_column_int(stmt, 9)),
+                additionalDirectories: extraDirs.isEmpty ? [] : extraDirs.split(separator: "\n").map(String.init)
             )
         }
 
