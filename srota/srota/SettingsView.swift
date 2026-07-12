@@ -1115,7 +1115,7 @@ private struct DaemonSettingsView: View {
                     VStack(spacing: 1) {
                         ForEach(panes, id: \.paneID) { pane in
                             PTYProcessRow(pane: pane) {
-                                daemon.killPane(paneID: pane.paneID)
+                                daemon.killPane(paneID: pane.paneID, stableID: pane.stableID)
                                 Task { try? await Task.sleep(nanoseconds: 1_200_000_000); await refresh() }
                             }
                         }

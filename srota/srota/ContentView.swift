@@ -1438,7 +1438,7 @@ struct ContentView: View {
         let resolvedPreset = preset ?? presetsStore.presets.first { $0.id == agent.presetID }
         let commandBase = resolvedPreset?.commands.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
                          .joined(separator: " ")
-            ?? (agent.name.localizedCaseInsensitiveContains("codex") ? "codex" : "claude")
+            ?? (agent.providerID ?? (agent.name.localizedCaseInsensitiveContains("codex") ? "codex" : "claude"))
         let presetArgs = resolvedPreset?.arguments.trimmingCharacters(in: .whitespaces) ?? ""
         // Temp-dir agent sessions are isolated by design — only splice in the launch
         // workspace's additional repos when actually launching into that workspace.

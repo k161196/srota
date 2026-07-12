@@ -11,6 +11,7 @@ struct srotaApp: App {
     @State private var shortcuts = KeyboardShortcutManager()
     @State private var daemonConnection = DaemonConnection()
     @State private var hookSetupResult: HookSetupResult? = nil
+    @State private var sessionRecorder: SessionRecorder?
 
     var body: some Scene {
         WindowGroup("Srota - स्रोत") {
@@ -26,6 +27,17 @@ struct srotaApp: App {
                 .environment(daemonConnection)
                 .onAppear {
                     shortcuts.prefixKey = settings.shortcutPrefix
+                    // Cascade-delete a pane's sessions only when it's genuinely, permanently
+                    // closed (closeSession/killPane) — never on ws_panes' own delete/reinsert
+                    // churn from saveTabsAndPanes/saveLayoutSnapshot (ticket 07).
+                    daemonConnection.onPaneClosed = { stableID in
+                        Task { @MainActor in db.deleteSessions(paneID: stableID) }
+                    }
+                    let recorder = SessionRecorder(db: db)
+                    sessionRecorder = recorder
+                    daemonConnection.onAgentEvent = { event in
+                        Task { @MainActor in recorder.handle(event) }
+                    }
                     Task { await startHookHealthLoop() }
                     Task {
                         await Task.yield()

@@ -42,6 +42,29 @@ struct RepoEntry: Identifiable, Hashable, Sendable {
     var defaultBranch: String
 }
 
+// A single run of a coding agent inside a pane — see CONTEXT.md.
+struct SessionRecord: Identifiable, Sendable {
+    var id: String
+    var paneID: String
+    var provider: String
+    var externalSessionID: String
+    var title: String = ""
+    var summary: String = ""
+    var createdAt: Int
+    var endedAt: Int?
+}
+
+// A summarized record of one content-bearing hook event within a session — see CONTEXT.md.
+struct SessionStepRecord: Identifiable, Sendable {
+    var id: String
+    var sessionID: String
+    var hookEvent: String
+    var title: String
+    var description: String
+    var source: String
+    var createdAt: Int
+}
+
 struct WorkspaceLayoutSnapshot: Sendable {
     var session: WorkspaceSession
     var tabsAndPanes: [(TabRecord, [PaneRecord])]?
@@ -138,6 +161,31 @@ final class WorkspaceDB {
 
     func saveLayoutSnapshot(_ snapshots: [WorkspaceLayoutSnapshot]) {
         enqueueWrite { await $0.saveLayoutSnapshot(snapshots) }
+    }
+
+    func upsertSession(_ record: SessionRecord) {
+        enqueueWrite { await $0.upsertSession(record) }
+    }
+
+    func findSession(paneID: String, externalSessionID: String) async -> SessionRecord? {
+        await writeTail?.value
+        return await storage.findSession(paneID: paneID, externalSessionID: externalSessionID)
+    }
+
+    func appendSessionStep(_ record: SessionStepRecord) {
+        enqueueWrite { await $0.appendSessionStep(record) }
+    }
+
+    // Cascade: deletes session_steps before the session itself (ticket 06).
+    func deleteSession(id: String) {
+        enqueueWrite { await $0.deleteSession(id: id) }
+    }
+
+    // Cascade on real pane close only — never wire this to ws_panes' own delete/reinsert
+    // churn from saveTabsAndPanes/saveLayoutSnapshot, which fires on every routine layout
+    // save, not just when a pane is actually closed (ticket 07).
+    func deleteSessions(paneID: String) {
+        enqueueWrite { await $0.deleteSessions(paneID: paneID) }
     }
 
     func flushWritesBlocking() {
@@ -272,6 +320,25 @@ private actor WorkspaceStorage {
             tmux_id TEXT,
             tmux_name TEXT,
             initial_cwd TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            pane_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            external_session_id TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            ended_at INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS session_steps (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            hook_event TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'raw',
+            created_at INTEGER NOT NULL
         );
         """)
         migratePanesIfNeeded()
@@ -494,6 +561,80 @@ private actor WorkspaceStorage {
             $0.folderPosition != $1.folderPosition
             ? $0.folderPosition < $1.folderPosition
             : $0.position < $1.position
+        }
+    }
+
+    // ended_at needs a real SQL NULL while a session is active (not '' — that would defeat
+    // "ended_at IS NULL means active"), so this binds manually instead of going through the
+    // generic all-TEXT upsert() below.
+    func upsertSession(_ record: SessionRecord) {
+        open()
+        let sqlText = """
+        INSERT OR REPLACE INTO sessions (id, pane_id, provider, external_session_id, title, summary, created_at, ended_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sqlText, -1, &stmt, nil) == SQLITE_OK else { return }
+        sqlite3_bind_text(stmt, 1, record.id, -1, SQLITE_TRANSIENT_FN)
+        sqlite3_bind_text(stmt, 2, record.paneID, -1, SQLITE_TRANSIENT_FN)
+        sqlite3_bind_text(stmt, 3, record.provider, -1, SQLITE_TRANSIENT_FN)
+        sqlite3_bind_text(stmt, 4, record.externalSessionID, -1, SQLITE_TRANSIENT_FN)
+        sqlite3_bind_text(stmt, 5, record.title, -1, SQLITE_TRANSIENT_FN)
+        sqlite3_bind_text(stmt, 6, record.summary, -1, SQLITE_TRANSIENT_FN)
+        sqlite3_bind_int64(stmt, 7, Int64(record.createdAt))
+        if let endedAt = record.endedAt {
+            sqlite3_bind_int64(stmt, 8, Int64(endedAt))
+        } else {
+            sqlite3_bind_null(stmt, 8)
+        }
+        sqlite3_step(stmt)
+        sqlite3_finalize(stmt)
+    }
+
+    func findSession(paneID: String, externalSessionID: String) -> SessionRecord? {
+        open()
+        return rows(
+            sql("SELECT id, pane_id, provider, external_session_id, title, summary, created_at, ended_at",
+                sqlFrom, "sessions", sqlWhere, "pane_id = ? AND external_session_id = ?"),
+            bind: [paneID, externalSessionID]
+        ) { stmt in
+            SessionRecord(
+                id: col(stmt, 0),
+                paneID: col(stmt, 1),
+                provider: col(stmt, 2),
+                externalSessionID: col(stmt, 3),
+                title: col(stmt, 4),
+                summary: col(stmt, 5),
+                createdAt: Int(sqlite3_column_int64(stmt, 6)),
+                endedAt: sqlite3_column_type(stmt, 7) == SQLITE_NULL ? nil : Int(sqlite3_column_int64(stmt, 7))
+            )
+        }.first
+    }
+
+    func appendSessionStep(_ record: SessionStepRecord) {
+        open()
+        upsert("session_steps", [
+            "id": record.id,
+            "session_id": record.sessionID,
+            "hook_event": record.hookEvent,
+            "title": record.title,
+            "description": record.description,
+            "source": record.source,
+            "created_at": String(record.createdAt)
+        ])
+    }
+
+    func deleteSession(id: String) {
+        open()
+        exec(sql("DELETE", sqlFrom, "session_steps", sqlWhere, "session_id = ?"), [id])
+        exec(sql("DELETE", sqlFrom, "sessions", sqlWhere, "id = ?"), [id])
+    }
+
+    func deleteSessions(paneID: String) {
+        open()
+        let sessionIDs = rows(sql("SELECT id", sqlFrom, "sessions", sqlWhere, "pane_id = ?"), bind: [paneID]) { col($0, 0) }
+        for id in sessionIDs {
+            deleteSession(id: id)
         }
     }
 

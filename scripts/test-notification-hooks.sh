@@ -163,7 +163,7 @@ print(pathlib.Path(path).read_text(encoding="utf-8").count(pattern))
 PY
 }
 
-printf '1..13\n'
+printf '1..15\n'
 
 before="$(event_count)"
 if ! run_notify_arg '"json string"' >/dev/null 2>"$TMPDIR/non-object.err"; then
@@ -308,3 +308,19 @@ PY
 elapsed_ms="$((end_ms - start_ms))"
 (( elapsed_ms <= perf_max_ms )) || fail "performance regression: ${perf_iters} runs took ${elapsed_ms}ms (budget ${perf_max_ms}ms)"
 printf 'ok 13 - performance budget holds (%sms for %s runs)\n' "$elapsed_ms" "$perf_iters"
+
+before="$(event_count)"
+run_notify_arg '{"hook_event_name":"UserPromptSubmit","cwd":"/tmp/project","session_id":"sess-abc-123"}' \
+  SROTA_PANE_ID=pane-session-1 >/dev/null
+wait_for_event_count "$((before + 1))"
+assert_eq "$(event_count)" "$((before + 1))" "session_id-bearing prompt submit should push a socket event"
+assert_eq "$(last_event_field sessionID)" "sess-abc-123" "session_id from the hook payload should forward as sessionID"
+printf 'ok 14 - session_id forwards as sessionID when present in the hook payload\n'
+
+before="$(event_count)"
+run_notify_arg '{"hook_event_name":"UserPromptSubmit","cwd":"/tmp/project"}' \
+  SROTA_PANE_ID=pane-session-2 >/dev/null
+wait_for_event_count "$((before + 1))"
+assert_eq "$(event_count)" "$((before + 1))" "session_id-less prompt submit should still push a socket event"
+assert_eq "$(last_event_field sessionID)" "None" "sessionID should be null, not a failure, when the hook payload omits session_id"
+printf 'ok 15 - sessionID is null, not a failure, when the hook payload omits session_id\n'

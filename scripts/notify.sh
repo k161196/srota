@@ -97,6 +97,7 @@ cwd = os.environ.get("SROTA_TAB_CWD") or payload.get("cwd") or payload.get("work
 tab_id = os.environ.get("SROTA_TAB_ID")
 pane_id = os.environ.get("SROTA_PANE_ID")
 summary = extract_summary(payload)
+session_id = payload.get("session_id")
 
 if pane_id:
     try:
@@ -108,6 +109,7 @@ if pane_id:
             "agent": agent,
             "summary": summary,
             "timestamp": time.time(),
+            "sessionID": session_id,
         }).encode("utf-8") + b"\n"
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.connect(sock_path)

@@ -91,7 +91,9 @@ final class PTYRegistry {
                         status: nil,
                         agent: nil,
                         summary: nil,
-                        updatedAt: nil
+                        updatedAt: nil,
+                        sessionID: nil,
+                        hookEvent: nil
                     )))
                 }
             }
@@ -138,7 +140,9 @@ final class PTYRegistry {
                 status: nil,
                 agent: nil,
                 summary: nil,
-                updatedAt: nil
+                updatedAt: nil,
+                sessionID: nil,
+                hookEvent: nil
             )))
         }
     }

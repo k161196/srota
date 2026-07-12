@@ -10,6 +10,11 @@ struct AgentItem: Codable, Identifiable {
     var presetID: UUID?
     var runInTempDir: Bool = false
     var isBuiltIn: Bool = false
+    // Explicit provider id ("claude" | "codex") for the launch-command fallback used when this
+    // agent has no preset (or an empty-command preset) to supply one. Optional so agents.json
+    // saved before this field existed still decode; nil falls back to the old name-sniffing
+    // heuristic at the one call site that needs it (ContentView.launchAgent).
+    var providerID: String? = nil
     // Snapshot of the built-in default text last written to disk for this agent.
     // If the file on disk still matches this, the user hasn't edited it, so app
     // updates can safely roll the new default in. Nil means unknown (pre-existing
@@ -219,6 +224,7 @@ Do not approve, merge, or request changes (`gh pr review`, `gh pr merge`) withou
             firstMessagePath: firstPath,
             runInTempDir: false,
             isBuiltIn: true,
+            providerID: "claude",
             syncedSystemPrompt: Self.reviewIssueSystemPrompt,
             syncedFirstMessage: Self.reviewIssueFirstMessage
         ), at: 0)
@@ -238,6 +244,7 @@ Do not approve, merge, or request changes (`gh pr review`, `gh pr merge`) withou
             firstMessagePath: firstPath,
             runInTempDir: false,
             isBuiltIn: true,
+            providerID: "claude",
             syncedSystemPrompt: Self.reviewPRSystemPrompt,
             syncedFirstMessage: Self.reviewPRFirstMessage
         ), at: insertIdx)

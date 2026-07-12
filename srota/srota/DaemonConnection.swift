@@ -50,6 +50,7 @@ struct PTYInfo {
     let agent: String
     let agentSummary: String
     let agentUpdatedAt: Double?
+    let agentSessionID: String?
 
     nonisolated init?(json: [String: Any]) {
         guard let paneID = json["paneID"] as? String,
@@ -63,7 +64,18 @@ struct PTYInfo {
         self.agent = json["agent"] as? String ?? ""
         self.agentSummary = json["agentSummary"] as? String ?? ""
         self.agentUpdatedAt = json["agentUpdatedAt"] as? Double
+        self.agentSessionID = json["agentSessionID"] as? String
     }
+}
+
+// One agent_status broadcast that carries enough to record a session/step (tickets 04/05).
+struct AgentHookEvent {
+    let stableID: String
+    let sessionID: String?
+    let provider: String
+    let hookEvent: String?
+    let summary: String
+    let timestamp: Double
 }
 
 private final class ManagedSession {
@@ -100,6 +112,15 @@ private final class ManagedSession {
 final class DaemonConnection {
     private(set) var isConnected = false
     private(set) var agentStatesByStableID: [String: AgentNotificationState] = [:]
+
+    // Fired once a pane is genuinely, permanently closed (not on the ws_panes layout-save churn —
+    // see ticket 07 in docs/wayfinder/agent-session-persistence/). Set by whoever owns WorkspaceDB;
+    // kept as a closure rather than a direct import so this transport layer stays DB-free.
+    var onPaneClosed: ((String) -> Void)?
+
+    // Fired on every agent_status broadcast that carries a sessionID (tickets 04/05) — same
+    // DB-free-transport reasoning as onPaneClosed above.
+    var onAgentEvent: ((AgentHookEvent) -> Void)?
 
     @ObservationIgnored private var fd: Int32 = -1
     @ObservationIgnored private var readBuffer = Data()
@@ -271,12 +292,21 @@ final class DaemonConnection {
         case "agent_status":
             guard let stableID = json["stableID"] as? String else { return }
             let state = agentState(from: json)
+            let event = AgentHookEvent(
+                stableID: stableID,
+                sessionID: json["sessionID"] as? String,
+                provider: json["agent"] as? String ?? "",
+                hookEvent: json["hookEvent"] as? String,
+                summary: json["summary"] as? String ?? "",
+                timestamp: json["updatedAt"] as? Double ?? 0
+            )
             DispatchQueue.main.async {
                 if let state {
                     self.agentStatesByStableID[stableID] = state
                 } else {
                     self.agentStatesByStableID.removeValue(forKey: stableID)
                 }
+                self.onAgentEvent?(event)
             }
 
         case "error":
@@ -453,13 +483,15 @@ final class DaemonConnection {
         }
     }
 
-    func killPane(paneID: String) {
+    func killPane(paneID: String, stableID: String? = nil) {
+        if let stableID { onPaneClosed?(stableID) }
         ioQueue.async { [self] in
             try? send(["type": "close", "paneID": paneID])
         }
     }
 
     func closeSession(stableID: String, paneID: String? = nil) {
+        onPaneClosed?(stableID)
         let shouldRestore = stateLock.withLock { () -> Bool in
             guard let managed = managedSessions[stableID] else { return false }
             managed.isClosing = true

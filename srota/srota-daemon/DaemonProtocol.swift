@@ -18,6 +18,7 @@ struct AgentEventParams: Decodable {
     let agent: String?
     let summary: String?
     let timestamp: Double?
+    let sessionID: String?
 }
 
 enum DaemonRequest: Decodable {
@@ -80,6 +81,7 @@ struct PTYInfo: Encodable {
     let agent: String?
     let agentSummary: String?
     let agentUpdatedAt: Double?
+    let agentSessionID: String?
 }
 
 struct AgentStatusPayload: Encodable {
@@ -89,6 +91,11 @@ struct AgentStatusPayload: Encodable {
     let agent: String?
     let summary: String?
     let updatedAt: Double?
+    let sessionID: String?
+    // The original hook event name (e.g. "Stop", "SessionStart") — status alone can't tell
+    // content-bearing events (Stop/PermissionRequest/SessionEnd) apart from lifecycle-only ones
+    // (Start/SessionStart both collapse to "idle"/"working" via PTYProcess.status(for:)).
+    let hookEvent: String?
 }
 
 enum DaemonResponse: Encodable {
@@ -115,6 +122,8 @@ enum DaemonResponse: Encodable {
         case agent
         case summary
         case updatedAt
+        case sessionID
+        case hookEvent
     }
 
     func encode(to encoder: Encoder) throws {
@@ -151,6 +160,8 @@ enum DaemonResponse: Encodable {
             try c.encodeIfPresent(payload.agent, forKey: .agent)
             try c.encodeIfPresent(payload.summary, forKey: .summary)
             try c.encodeIfPresent(payload.updatedAt, forKey: .updatedAt)
+            try c.encodeIfPresent(payload.sessionID, forKey: .sessionID)
+            try c.encodeIfPresent(payload.hookEvent, forKey: .hookEvent)
         case .ok:
             try c.encode("ok", forKey: .type)
         case .error(let m, let requestID):

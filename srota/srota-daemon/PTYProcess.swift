@@ -49,6 +49,7 @@ final class PTYProcess {
     private var agentName: String?
     private var agentSummary: String?
     private var agentUpdatedAt: Double?
+    private var agentSessionID: String?
     private var polledAgentChildPID: pid_t?
     private var polledAgentChildName: String?
 
@@ -64,7 +65,8 @@ final class PTYProcess {
             agentStatus: agentStatus,
             agent: agentName,
             agentSummary: agentSummary,
-            agentUpdatedAt: agentUpdatedAt
+            agentUpdatedAt: agentUpdatedAt,
+            agentSessionID: agentSessionID
         )
     }
 
@@ -198,13 +200,16 @@ final class PTYProcess {
         agentName = event.agent ?? "agent"
         agentSummary = event.summary ?? ""
         agentUpdatedAt = timestamp
+        agentSessionID = event.sessionID ?? agentSessionID
         return AgentStatusPayload(
             paneID: paneID,
             stableID: stableID,
             status: agentStatus,
             agent: agentName,
             summary: agentSummary,
-            updatedAt: agentUpdatedAt
+            updatedAt: agentUpdatedAt,
+            sessionID: agentSessionID,
+            hookEvent: event.event
         )
     }
 
@@ -236,13 +241,13 @@ final class PTYProcess {
             polledAgentChildPID = childPID
             polledAgentChildName = name
             lock.unlock()
-            return applyAgentEvent(AgentEventParams(stableID: stableID, event: "SessionStart", agent: name, summary: nil, timestamp: nil))
+            return applyAgentEvent(AgentEventParams(stableID: stableID, event: "SessionStart", agent: name, summary: nil, timestamp: nil, sessionID: nil))
         } else if previousPID != nil {
             lock.lock()
             polledAgentChildPID = nil
             polledAgentChildName = nil
             lock.unlock()
-            return applyAgentEvent(AgentEventParams(stableID: stableID, event: "SessionEnd", agent: previousName, summary: nil, timestamp: nil))
+            return applyAgentEvent(AgentEventParams(stableID: stableID, event: "SessionEnd", agent: previousName, summary: nil, timestamp: nil, sessionID: nil))
         }
         return nil
     }

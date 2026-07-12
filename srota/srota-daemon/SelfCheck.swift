@@ -20,6 +20,48 @@ func runDaemonSelfCheck() -> Bool {
     assert(response["paneID"] as? String == "pane-1")
     assert(response["requestID"] as? String == "req-2")
 
+    // sessionID round-trips through AgentEventParams when the hook payload carries one...
+    let eventWithSession = try! decoder.decode(
+        DaemonRequest.self,
+        from: Data(#"{"type":"agent_event","stableID":"stable-1","event":"Stop","agent":"claude","summary":"done","timestamp":1.0,"sessionID":"abc-123"}"#.utf8)
+    )
+    if case .agentEvent(let params) = eventWithSession {
+        assert(params.sessionID == "abc-123")
+    } else {
+        assertionFailure("expected agent_event request")
+    }
+
+    // ...and is nil, not a decode failure, when the hook payload omits it entirely (best-effort).
+    let eventWithoutSession = try! decoder.decode(
+        DaemonRequest.self,
+        from: Data(#"{"type":"agent_event","stableID":"stable-1","event":"Stop","agent":"claude","summary":"done","timestamp":1.0}"#.utf8)
+    )
+    if case .agentEvent(let params) = eventWithoutSession {
+        assert(params.sessionID == nil)
+    } else {
+        assertionFailure("expected agent_event request")
+    }
+
+    // AgentStatusPayload.sessionID and hookEvent encode onto the wire when present...
+    let statusData = try! JSONEncoder().encode(.agentStatus(AgentStatusPayload(
+        paneID: "pane-1", stableID: "stable-1", status: "idle", agent: "claude",
+        summary: "done", updatedAt: 1.0, sessionID: "abc-123", hookEvent: "Stop"
+    )) as DaemonResponse)
+    let status = try! JSONSerialization.jsonObject(with: statusData) as! [String: Any]
+    assert(status["sessionID"] as? String == "abc-123")
+    assert(status["hookEvent"] as? String == "Stop")
+
+    // ...and are simply absent from the wire (not a null placeholder) when nil — status alone
+    // can't distinguish "Stop" from "SessionStart" (both collapse to "idle"), which is exactly
+    // why hookEvent exists: it must survive the round trip distinctly from status.
+    let statusNoSessionData = try! JSONEncoder().encode(.agentStatus(AgentStatusPayload(
+        paneID: "pane-1", stableID: "stable-1", status: "idle", agent: "claude",
+        summary: "done", updatedAt: 1.0, sessionID: nil, hookEvent: nil
+    )) as DaemonResponse)
+    let statusNoSession = try! JSONSerialization.jsonObject(with: statusNoSessionData) as! [String: Any]
+    assert(statusNoSession["sessionID"] == nil)
+    assert(statusNoSession["hookEvent"] == nil)
+
     assert(processExitCode(from: 7 << 8) == 7)
     assert(processExitCode(from: 9) == 137)
 
