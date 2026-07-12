@@ -234,21 +234,21 @@ final class DaemonConnection {
                 (sessionsByPaneID[paneID], stableIDByPaneID[paneID].flatMap { managedSessions[$0] }?.ref)
             }
             ref?.isReplayingBuffer = true
-            DispatchQueue.main.async { session?.receive(data) }
+            session?.receive(data)
 
         case "ring_buffer_done":
             guard let paneID = json["paneID"] as? String else { return }
             let ref = stateLock.withLock {
                 stableIDByPaneID[paneID].flatMap { managedSessions[$0] }?.ref
             }
-            DispatchQueue.main.async { ref?.isReplayingBuffer = false }
+            ref?.isReplayingBuffer = false
 
         case "live":
             guard let paneID = json["paneID"] as? String,
                   let encoded = json["data"] as? String,
                   let data = Data(base64Encoded: encoded) else { return }
             let session = stateLock.withLock { sessionsByPaneID[paneID] }
-            DispatchQueue.main.async { session?.receive(data) }
+            session?.receive(data)
 
         case "listed":
             guard let requestID = json["requestID"] as? String else { return }
