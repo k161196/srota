@@ -163,7 +163,7 @@ print(pathlib.Path(path).read_text(encoding="utf-8").count(pattern))
 PY
 }
 
-printf '1..15\n'
+printf '1..16\n'
 
 before="$(event_count)"
 if ! run_notify_arg '"json string"' >/dev/null 2>"$TMPDIR/non-object.err"; then
@@ -324,3 +324,11 @@ wait_for_event_count "$((before + 1))"
 assert_eq "$(event_count)" "$((before + 1))" "session_id-less prompt submit should still push a socket event"
 assert_eq "$(last_event_field sessionID)" "None" "sessionID should be null, not a failure, when the hook payload omits session_id"
 printf 'ok 15 - sessionID is null, not a failure, when the hook payload omits session_id\n'
+
+before="$(event_count)"
+run_notify_arg '{"hook_event_name":"UserPromptSubmit","cwd":"/tmp/project","prompt":"fix the login bug"}' \
+  SROTA_PANE_ID=pane-session-3 >/dev/null
+wait_for_event_count "$((before + 1))"
+assert_eq "$(event_count)" "$((before + 1))" "prompt-bearing UserPromptSubmit should push a socket event"
+assert_eq "$(last_event_field summary)" "fix the login bug" "the prompt field should surface as summary for UserPromptSubmit"
+printf 'ok 16 - Claude UserPromptSubmit prompt field is captured as summary\n'

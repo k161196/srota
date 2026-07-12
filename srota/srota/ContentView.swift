@@ -1057,6 +1057,7 @@ struct ContentView: View {
     @Environment(KeyboardShortcutManager.self) private var shortcuts
     @Environment(PresetsStore.self) private var presetsStore
     @Environment(AgentsStore.self) private var agentsStore
+    @Environment(SessionRecorder.self) private var sessionRecorder
     @State private var sidebarVisible = true
     @State private var showBaseDirectoryPicker = false
     @State private var managementTab: ManagementTab = .workspaces
@@ -1169,8 +1170,13 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+
+                SessionTimelineSidebar()
+                    .frame(width: sessionRecorder.timelinePaneID != nil ? SessionTimelineSidebar.width : 0)
+                    .clipped()
         }
         .animation(.spring(duration: 0.22, bounce: 0.0), value: sidebarVisible)
+        .animation(.spring(duration: 0.22, bounce: 0.0), value: sessionRecorder.timelinePaneID)
         .onChange(of: sidebarVisible) { _, visible in
             guard !visible else { return }
             clearSidebarKeyboardFocus(restorePane: true)
@@ -3242,6 +3248,7 @@ private struct TerminalContentView: View {
                 focused: focused,
                 showClose: true,
                 status: daemon.agentStatesByStableID[entry.daemonStableID]?.status,
+                stableID: entry.daemonStableID,
                 onClose: onClose,
                 onRename: { tab.rename(id: id, to: $0) },
                 onDragChanged: { loc in
@@ -3372,6 +3379,7 @@ private struct ReactivePaneHeader: View {
     let focused: Bool
     let showClose: Bool
     let status: AgentRunStatus?
+    let stableID: String
     let onClose: () -> Void
     let onRename: (String) -> Void
     let onDragChanged: (CGPoint) -> Void
@@ -3386,6 +3394,7 @@ private struct ReactivePaneHeader: View {
             focused: focused,
             showClose: showClose,
             status: status,
+            stableID: stableID,
             onClose: onClose,
             onRename: onRename,
             onDragChanged: onDragChanged,
@@ -3400,12 +3409,14 @@ private struct PaneHeader: View {
     let focused: Bool
     let showClose: Bool
     let status: AgentRunStatus?
+    let stableID: String
     let onClose: () -> Void
     let onRename: (String) -> Void
     let onDragChanged: (CGPoint) -> Void
     let onDragEnded:   (CGPoint) -> Void
 
     @Environment(EditorsStore.self) private var editorsStore
+    @Environment(SessionRecorder.self) private var sessionRecorder
     @State private var isHovered  = false
     @State private var isRenaming = false
     @State private var editText   = ""
@@ -3437,6 +3448,19 @@ private struct PaneHeader: View {
 
                 if let status {
                     AgentStatusBadge(status: status)
+                }
+
+                if !(sessionRecorder.stepsByPaneID[stableID]?.isEmpty ?? true) {
+                    Button {
+                        sessionRecorder.timelinePaneID = (sessionRecorder.timelinePaneID == stableID) ? nil : stableID
+                    } label: {
+                        Image(systemName: "list.bullet.clipboard")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(sessionRecorder.timelinePaneID == stableID ? Color.accentOrange : Color.labelMuted)
+                            .frame(width: 16, height: 14)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Session timeline")
                 }
 
                 Spacer(minLength: 0)
@@ -3509,6 +3533,7 @@ private struct PaneHeader: View {
             .background(Color.tabBarBg)
             .contentShape(Rectangle())
             .onHover { isHovered = $0 }
+            .onAppear { sessionRecorder.loadIfNeeded(paneID: stableID) }
             .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named("panes"))
                 .onChanged { onDragChanged($0.location) }
                 .onEnded   { onDragEnded($0.location)   })

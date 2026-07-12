@@ -25,6 +25,7 @@ enum StepNoteGenerator {
         "Stop": "Turn complete",
         "PermissionRequest": "Blocked",
         "SessionEnd": "Session ended",
+        "Start": "New prompt", // user-tagged — see SessionRecorder.stepTagByHookEvent
     ]
 
     // ponytail: naive char-count proxy for the model's 4096-token context window (ticket 01) —

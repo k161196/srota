@@ -61,7 +61,9 @@ if event not in {"SessionStart", "Start", "Stop", "SessionEnd", "PermissionReque
     sys.exit(0)
 
 def extract_summary(payload):
-    for key in ("last_assistant_message", "message"):
+    # "prompt" holds the submitted text on Claude UserPromptSubmit events, distinct from
+    # last_assistant_message/message which only ever appear on the agent side of a turn.
+    for key in ("last_assistant_message", "message", "prompt"):
         text = payload.get(key)
         if isinstance(text, str):
             text = text.strip()

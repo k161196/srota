@@ -11,7 +11,16 @@ struct srotaApp: App {
     @State private var shortcuts = KeyboardShortcutManager()
     @State private var daemonConnection = DaemonConnection()
     @State private var hookSetupResult: HookSetupResult? = nil
-    @State private var sessionRecorder: SessionRecorder?
+    // Constructed eagerly (not in onAppear) so it can be injected into the environment like
+    // every other store — PaneHeader's timeline icon and SessionTimelineSidebar both read it
+    // via @Environment(SessionRecorder.self).
+    @State private var sessionRecorder: SessionRecorder
+
+    init() {
+        let db = WorkspaceDB()
+        _db = State(initialValue: db)
+        _sessionRecorder = State(initialValue: SessionRecorder(db: db))
+    }
 
     var body: some Scene {
         WindowGroup("Srota - स्रोत") {
@@ -25,6 +34,7 @@ struct srotaApp: App {
                 .environment(agentsStore)
                 .environment(shortcuts)
                 .environment(daemonConnection)
+                .environment(sessionRecorder)
                 .onAppear {
                     shortcuts.prefixKey = settings.shortcutPrefix
                     // Cascade-delete a pane's sessions only when it's genuinely, permanently
@@ -33,11 +43,13 @@ struct srotaApp: App {
                     daemonConnection.onPaneClosed = { stableID in
                         Task { @MainActor in db.deleteSessions(paneID: stableID) }
                     }
-                    let recorder = SessionRecorder(db: db)
-                    sessionRecorder = recorder
                     daemonConnection.onAgentEvent = { event in
-                        Task { @MainActor in recorder.handle(event) }
+                        Task { @MainActor in sessionRecorder.handle(event) }
                     }
+                    // Picks up agent-initiated notes (srota-mcp's add_session_note tool writes
+                    // directly to SQLite from a separate process) live, via the same file
+                    // watcher that already refreshes the repos list on any db write.
+                    db.onExternalWrite = { [sessionRecorder] in sessionRecorder.refreshTrackedPanes() }
                     Task { await startHookHealthLoop() }
                     Task {
                         await Task.yield()

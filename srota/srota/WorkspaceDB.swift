@@ -62,6 +62,7 @@ struct SessionStepRecord: Identifiable, Sendable {
     var title: String
     var description: String
     var source: String
+    var tag: String // "user" | "agent" | "mcp" — who/what this note is attributed to
     var createdAt: Int
 }
 
@@ -75,9 +76,22 @@ struct WorkspaceLayoutSnapshot: Sendable {
 final class WorkspaceDB {
     private let storage = WorkspaceStorage()
     private var dbWatcher: DispatchSourceFileSystemObject?
+    // The db is in WAL mode (srota-mcp's server sets PRAGMA journal_mode=WAL, which is sticky
+    // per file — every connection to it, including this app's, is WAL from then on). Actual
+    // writes land in "<db>-wal", not the main file, which is only touched on checkpoint — so a
+    // cross-process writer's changes never trigger dbWatcher's events without this second one.
+    private var dbWalWatcher: DispatchSourceFileSystemObject?
     private var writeTail: Task<Void, Never>?
     private var writeID = 0
     var repos: [RepoEntry] = []
+
+    // Fired alongside refresh() on every detected file write, including ones this process
+    // didn't make itself (e.g. the srota-mcp server's add_session_note tool, a separate
+    // process writing the same db file directly). SessionRecorder uses this to pick up
+    // agent-initiated notes live, without a new IPC path — see ponytail note on
+    // SessionRecorder.refreshTrackedPanes(): this fires on every write, not just relevant
+    // ones (same accepted cost the repos refresh above already pays).
+    var onExternalWrite: (() -> Void)?
 
     init() {
         Task {
@@ -88,13 +102,27 @@ final class WorkspaceDB {
     }
 
     private func startDBWatcher(dbPath: String) {
-        let fd = open(dbPath, O_EVTONLY)
-        guard fd >= 0 else { return }
+        dbWatcher = makeFileWatcher(path: dbPath)
+        // ponytail: if the -wal file doesn't exist yet at this exact moment (a truly fresh db
+        // that's never been opened in WAL mode before), this watcher is simply skipped — no
+        // retry/directory-watch for its later creation. In practice it already exists by the
+        // time the app runs, since srota-mcp sets WAL mode on its very first invocation ever
+        // and that setting is permanent for the file from then on. Revisit if a fresh-install
+        // path ever needs this before the MCP server has run once.
+        dbWalWatcher = makeFileWatcher(path: dbPath + "-wal")
+    }
+
+    private func makeFileWatcher(path: String) -> DispatchSourceFileSystemObject? {
+        let fd = open(path, O_EVTONLY)
+        guard fd >= 0 else { return nil }
         let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .extend, .attrib], queue: .main)
-        src.setEventHandler { [weak self] in Task { await self?.refresh() } }
+        src.setEventHandler { [weak self] in
+            Task { await self?.refresh() }
+            self?.onExternalWrite?()
+        }
         src.setCancelHandler { close(fd) }
         src.resume()
-        dbWatcher = src
+        return src
     }
 
     func refresh() async {
@@ -170,6 +198,13 @@ final class WorkspaceDB {
     func findSession(paneID: String, externalSessionID: String) async -> SessionRecord? {
         await writeTail?.value
         return await storage.findSession(paneID: paneID, externalSessionID: externalSessionID)
+    }
+
+    // Steps for a pane's most recently created session — used to seed the pane-top steps bar
+    // on first appearance (SessionRecorder's in-memory cache covers live updates from there).
+    func currentSessionSteps(paneID: String) async -> [SessionStepRecord] {
+        await writeTail?.value
+        return await storage.currentSessionSteps(paneID: paneID)
     }
 
     func appendSessionStep(_ record: SessionStepRecord) {
@@ -338,9 +373,11 @@ private actor WorkspaceStorage {
             title TEXT NOT NULL,
             description TEXT NOT NULL,
             source TEXT NOT NULL DEFAULT 'raw',
+            tag TEXT NOT NULL DEFAULT 'agent',
             created_at INTEGER NOT NULL
         );
         """)
+        migrateSessionStepsTagIfNeeded()
         migratePanesIfNeeded()
         migrateFolderPositionIfNeeded()
     }
@@ -356,6 +393,12 @@ private actor WorkspaceStorage {
         for (i, name) in folderNames.enumerated() {
             exec("UPDATE ws_workspaces SET folder_position = ? WHERE folder_name = ?", [String(i), name])
         }
+    }
+
+    private func migrateSessionStepsTagIfNeeded() {
+        let cols = rows("PRAGMA table_info(session_steps)", bind: []) { col($0, 1) }
+        guard !cols.contains("tag") else { return }
+        exec("ALTER TABLE session_steps ADD COLUMN tag TEXT NOT NULL DEFAULT 'agent'")
     }
 
     private func migratePanesIfNeeded() {
@@ -611,6 +654,32 @@ private actor WorkspaceStorage {
         }.first
     }
 
+    func currentSessionSteps(paneID: String) -> [SessionStepRecord] {
+        open()
+        let latestSessionIDs = rows(
+            sql("SELECT id", sqlFrom, "sessions", sqlWhere, "pane_id = ?", "ORDER BY created_at DESC LIMIT 1"),
+            bind: [paneID],
+            { col($0, 0) }
+        )
+        guard let sessionID = latestSessionIDs.first else { return [] }
+        return rows(
+            sql("SELECT id, session_id, hook_event, title, description, source, tag, created_at",
+                sqlFrom, "session_steps", sqlWhere, "session_id = ?", "ORDER BY created_at ASC"),
+            bind: [sessionID]
+        ) { stmt in
+            SessionStepRecord(
+                id: col(stmt, 0),
+                sessionID: col(stmt, 1),
+                hookEvent: col(stmt, 2),
+                title: col(stmt, 3),
+                description: col(stmt, 4),
+                source: col(stmt, 5),
+                tag: col(stmt, 6),
+                createdAt: Int(sqlite3_column_int64(stmt, 7))
+            )
+        }
+    }
+
     func appendSessionStep(_ record: SessionStepRecord) {
         open()
         upsert("session_steps", [
@@ -620,6 +689,7 @@ private actor WorkspaceStorage {
             "title": record.title,
             "description": record.description,
             "source": record.source,
+            "tag": record.tag,
             "created_at": String(record.createdAt)
         ])
     }
