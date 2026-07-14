@@ -1212,13 +1212,14 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .srotaOpenWorkspace)) { note in
             guard let path     = note.userInfo?["path"]       as? String else { return }
             let wsName         = note.userInfo?["name"]        as? String
+            let folderName     = note.userInfo?["folderName"]  as? String
             let needsWorktree  = note.userInfo?["createWorktree"] as? Bool ?? false
             let projectPath    = note.userInfo?["projectPath"] as? String ?? ""
             let branchRef      = note.userInfo?["branchRef"]   as? String ?? (wsName ?? "")
 
-            // New workspaces always land at the top level, regardless of which repo they came from.
-            let folderTag: String = ""
-            let folderID: UUID? = nil
+            let folderTag  = note.userInfo?["folderTag"] as? String ?? ""
+            let folder = folderName.map { manager.folder(named: $0, tag: folderTag) }
+            let folderID = folder?.id
 
             let launchAgentName     = note.userInfo?["launchAgentName"] as? String
             let launchAgentContext  = note.userInfo?["launchAgentContext"] as? String
@@ -1232,9 +1233,9 @@ struct ContentView: View {
                 launchAgent(agent: agent, systemPrompt: systemPrompt, firstMessage: firstMessage, preset: preset)
             }
 
-            // if a top-level workspace with the same name already exists, just select it
-            let candidatePool = manager.workspaces
-            if let existing = candidatePool.first(where: { $0.name == wsName }) {
+            // if a workspace for this exact repo+branch path already exists (top-level or in a legacy folder), just select it
+            let candidatePool = manager.allWorkspaces
+            if let existing = candidatePool.first(where: { $0.name == wsName && $0.directory == path }) {
                 manager.selectWorkspace(id: existing.id)
                 managementTab = .workspaces
                 launchAgentIfRequested()
@@ -1267,7 +1268,7 @@ struct ContentView: View {
                                              workingDirectory: path, name: wsName)
                         db.saveWorkspaceSession(WorkspaceSession(
                             id: manager.allWorkspaces.last?.id.uuidString ?? UUID().uuidString,
-                            name: wsName ?? "", folderName: "",
+                            name: wsName ?? "", folderName: folder?.name ?? "",
                             folderTag: folderTag, position: 0,
                             lastCWD: path,
                             lastAccessed: Int(Date().timeIntervalSince1970),
@@ -1287,7 +1288,7 @@ struct ContentView: View {
                 if let ws = manager.allWorkspaces.last {
                     db.saveWorkspaceSession(WorkspaceSession(
                         id: ws.id.uuidString, name: ws.name,
-                        folderName: "", folderTag: folderTag,
+                        folderName: folder?.name ?? "", folderTag: folderTag,
                         position: candidatePool.count,
                         lastCWD: path, lastAccessed: Int(Date().timeIntervalSince1970),
                         isPinned: false, directory: path))
