@@ -1904,6 +1904,74 @@ func collectRunningAgents(_ manager: TerminalManager) -> [RunningAgent] {
         .sorted { $0.updatedAt > $1.updatedAt }
 }
 
+func compactElapsed(since updatedAt: Double) -> String {
+    let seconds = max(0, Date().timeIntervalSince1970 - updatedAt)
+    let minutes = Int(seconds / 60)
+    if minutes < 1 { return "now" }
+    if minutes < 60 { return "\(minutes)m" }
+    let hours = minutes / 60
+    if hours < 24 { return "\(hours)h" }
+    return "\(hours / 24)d"
+}
+
+private extension Array where Element == RunningAgent {
+    var isActivelyWorking: Bool { contains { $0.status == .working } }
+    var idleStatusColor: Color? {
+        if contains(where: { $0.status == .blocked }) { return .dotBlocked }
+        if contains(where: { $0.status == .idle }) { return .dotIdle }
+        return nil
+    }
+    var statusDotColor: Color? { isActivelyWorking ? .accentOrange : idleStatusColor }
+}
+
+// Status glyph for a workspace's running agents — a spinning arc while
+// actively working, a static ring for idle/blocked, hidden once all done.
+private struct WorkspaceStatusDot: View {
+    let agents: [RunningAgent]
+    @State private var rotation: Double = 0
+
+    var body: some View {
+        if let color = agents.statusDotColor {
+            Group {
+                if agents.isActivelyWorking {
+                    Circle()
+                        .trim(from: 0, to: 0.7)
+                        .stroke(color, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
+                        .rotationEffect(.degrees(rotation))
+                        .onAppear {
+                            withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) {
+                                rotation = 360
+                            }
+                        }
+                } else {
+                    Circle()
+                        .strokeBorder(color, lineWidth: 1.4)
+                }
+            }
+            .frame(width: 11, height: 11)
+        }
+    }
+}
+
+private struct WorkspaceAgentMiniRow: View {
+    let agent: RunningAgent
+
+    var body: some View {
+        HStack(spacing: 6) {
+            WorkspaceStatusDot(agents: [agent])
+            Text(agent.title)
+                .font(.system(size: 11))
+                .foregroundStyle(Color.labelSecondary)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Text(compactElapsed(since: agent.updatedAt))
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundStyle(Color.sectionHeader.opacity(0.7))
+        }
+        .padding(.vertical, 2)
+    }
+}
+
 struct AgentRow: View {
     let agent: RunningAgent
     let isWorkspaceOpen: Bool
@@ -2510,8 +2578,14 @@ private struct PinnedWorkspaceCard: View {
 
     @Environment(WorkspaceDB.self) private var db
     @State private var isHovered = false
+    @State private var agentsExpanded = false
+
+    private var runningAgents: [RunningAgent] {
+        collectRunningAgents(manager).filter { $0.workspaceID == workspace.id }
+    }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
         Button(action: onSelect) {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -2542,7 +2616,16 @@ private struct PinnedWorkspaceCard: View {
 
                 Spacer(minLength: 4)
 
-                if isHovered {
+                WorkspaceStatusDot(agents: runningAgents)
+
+                if runningAgents.count > 1 {
+                    Button(action: { agentsExpanded.toggle() }) {
+                        Image(systemName: agentsExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(Color.sectionHeader)
+                    }
+                    .buttonStyle(.plain)
+                } else if isHovered {
                     Button(action: onClose) {
                         Image(systemName: "xmark")
                             .font(.system(size: 9, weight: .medium))
@@ -2576,6 +2659,18 @@ private struct PinnedWorkspaceCard: View {
             }
             Divider()
             Button("Close Workspace", role: .destructive) { onClose() }
+        }
+
+        if agentsExpanded, runningAgents.count > 1 {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(runningAgents) { agent in
+                    WorkspaceAgentMiniRow(agent: agent)
+                }
+            }
+            .padding(.leading, 18)
+            .padding(.trailing, 18)
+            .padding(.bottom, 6)
+        }
         }
     }
 }
@@ -2627,7 +2722,12 @@ private struct WorkspaceRow: View {
         manager.folders.first { $0.workspaces.contains { $0.id == workspace.id } }?.id
     }
 
+    private var runningAgents: [RunningAgent] {
+        collectRunningAgents(manager).filter { $0.workspaceID == workspace.id }
+    }
+
     var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
         HStack(spacing: 9) {
             Image(systemName: "square.stack")
                 .font(.system(size: 10))
@@ -2657,7 +2757,9 @@ private struct WorkspaceRow: View {
 
             Spacer(minLength: 4)
 
-            if let expanded = isExpanded, let toggle = onToggleExpand {
+            WorkspaceStatusDot(agents: runningAgents)
+
+            if runningAgents.count > 1, let expanded = isExpanded, let toggle = onToggleExpand {
                 Button(action: toggle) {
                     Image(systemName: expanded ? "chevron.up" : "chevron.down")
                         .font(.system(size: 8, weight: .medium))
@@ -2725,6 +2827,18 @@ private struct WorkspaceRow: View {
             Divider()
             Button("Close Workspace", role: .destructive) { onClose() }
         }
+
+        if isExpanded == true, runningAgents.count > 1 {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(runningAgents) { agent in
+                    WorkspaceAgentMiniRow(agent: agent)
+                }
+            }
+            .padding(.leading, 28)
+            .padding(.trailing, 8)
+            .padding(.bottom, 4)
+        }
+        }
     }
 }
 
@@ -2736,6 +2850,8 @@ private struct WorkspaceSidebarItem: View {
     let onSelect: () -> Void
     let onClose: () -> Void
 
+    @State private var agentsExpanded = false
+
     var body: some View {
         WorkspaceRow(
             workspace: workspace,
@@ -2744,8 +2860,8 @@ private struct WorkspaceSidebarItem: View {
             isKeyboardFocused: isKeyboardFocused,
             onSelect: onSelect,
             onClose: onClose,
-            isExpanded: nil,
-            onToggleExpand: nil
+            isExpanded: agentsExpanded,
+            onToggleExpand: { agentsExpanded.toggle() }
         )
     }
 }
@@ -3455,19 +3571,6 @@ private struct PaneHeader: View {
                     AgentStatusBadge(status: status)
                 }
 
-                if !(sessionRecorder.stepsByPaneID[stableID]?.isEmpty ?? true) {
-                    Button {
-                        sessionRecorder.timelinePaneID = (sessionRecorder.timelinePaneID == stableID) ? nil : stableID
-                    } label: {
-                        Image(systemName: "list.bullet.clipboard")
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(sessionRecorder.timelinePaneID == stableID ? Color.accentOrange : Color.labelMuted)
-                            .frame(width: 16, height: 14)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Session timeline")
-                }
-
                 Spacer(minLength: 0)
 
                 if !isRenaming {
@@ -3519,6 +3622,20 @@ private struct PaneHeader: View {
                         }
                     }
                     .disabled(cwd == nil)
+                    .opacity(isHovered || issuePopoverOpen ? 1 : 0)
+                }
+
+                if !(sessionRecorder.stepsByPaneID[stableID]?.isEmpty ?? true) {
+                    Button {
+                        sessionRecorder.timelinePaneID = (sessionRecorder.timelinePaneID == stableID) ? nil : stableID
+                    } label: {
+                        Image(systemName: "list.bullet.clipboard")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(sessionRecorder.timelinePaneID == stableID ? Color.accentOrange : Color.labelMuted)
+                            .frame(width: 16, height: 14)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Session timeline")
                     .opacity(isHovered || issuePopoverOpen ? 1 : 0)
                 }
 
