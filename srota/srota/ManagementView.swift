@@ -11,6 +11,7 @@ extension Notification.Name {
 // MARK: - Top-level tab enum
 
 enum ManagementTab: String, CaseIterable {
+    case tasks           = "Tasks"
     case workspaces      = "Workspaces"
     case agents          = "Agents"
     case repos           = "Repos"
@@ -18,6 +19,7 @@ enum ManagementTab: String, CaseIterable {
 
     var icon: String {
         switch self {
+        case .tasks:          return "checklist"
         case .workspaces:     return "terminal"
         case .agents:         return "bolt.fill"
         case .repos:          return "square.and.arrow.down"
@@ -201,6 +203,7 @@ struct ManagementPanel: View {
 
     var body: some View {
         switch tab {
+        case .tasks:          TasksPanel()
         case .workspaces:     EmptyView()  // handled by ContentView
         case .agents:         AgentsPanel()
         case .repos:          ReposPanel()
