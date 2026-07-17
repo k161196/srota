@@ -20,12 +20,18 @@ private extension Color {
 
 // MARK: - GitHub models
 
-struct TaskActor: Decodable, Hashable { let login: String }
+struct TaskActor: Decodable, Hashable {
+    let login: String
+    // GitHub serves a user's avatar off their login with no auth/API call required.
+    var avatarURL: URL? { URL(string: "https://github.com/\(login).png?size=64") }
+}
 struct TaskLabel: Decodable, Hashable { let name: String }
 struct TaskReviewRequest: Decodable, Hashable {
     let login: String?
     let name: String?
     var displayName: String { login ?? name ?? "team" }
+    // Teams (no `login`) have no user avatar to fetch.
+    var avatarURL: URL? { login.flatMap { URL(string: "https://github.com/\($0).png?size=64") } }
 }
 // statusCheckRollup mixes CheckRun (status/conclusion) and legacy StatusContext (state) shapes
 // from the GitHub API — all optional since either shape can lack the other's fields; a strict,
@@ -72,13 +78,13 @@ struct PRRow: Identifiable {
 }
 
 extension PRRow {
-    var checksSummary: (label: String, color: Color) {
+    var checksSummary: (label: String, color: Color, icon: String) {
         let runs = pr.statusCheckRollup
-        if runs.isEmpty { return ("No checks", .mgMuted) }
+        if runs.isEmpty { return ("No checks", .mgMuted, "minus") }
         let failing: Set<String?> = ["FAILURE", "ERROR"]
-        if runs.contains(where: { failing.contains($0.conclusion) || failing.contains($0.state) }) { return ("Failing", .red) }
-        if runs.contains(where: { ($0.status ?? "COMPLETED") != "COMPLETED" }) { return ("Pending", .yellow) }
-        return ("Passing", Color(red: 0.35, green: 0.85, blue: 0.55))
+        if runs.contains(where: { failing.contains($0.conclusion) || failing.contains($0.state) }) { return ("Failing", .red, "xmark.circle.fill") }
+        if runs.contains(where: { ($0.status ?? "COMPLETED") != "COMPLETED" }) { return ("Pending", .yellow, "clock.fill") }
+        return ("Passing", Color(red: 0.35, green: 0.85, blue: 0.55), "checkmark.circle.fill")
     }
 }
 
@@ -118,6 +124,24 @@ nonisolated private func cleanedSearchQuery(_ query: String) -> String {
     let kept = query.split(separator: " ").filter { $0 != "is:issue" && $0 != "is:pr" }
     let joined = kept.joined(separator: " ")
     return joined.isEmpty ? "is:open" : joined
+}
+
+// MARK: - GitHub repo discovery (for the Projects filter — broader than db.repos)
+
+struct TaskGHRepoListing: Identifiable, Decodable, Hashable {
+    struct DefaultBranchRef: Decodable, Hashable { let name: String }
+    let nameWithOwner: String
+    let url: String
+    let defaultBranchRef: DefaultBranchRef?
+    var id: String { url }
+}
+
+nonisolated func fetchTaskGHRepoListings() -> [TaskGHRepoListing] {
+    let args = ["repo", "list", "--json", "nameWithOwner,url,defaultBranchRef", "--limit", "200"]
+    switch runGH(args) {
+    case .failure: return []
+    case .success(let data): return (try? JSONDecoder().decode([TaskGHRepoListing].self, from: data)) ?? []
+    }
 }
 
 nonisolated private func fetchIssues(repo: RepoEntry, query: String) -> Result<[TaskIssue], TaskGHError> {
@@ -182,14 +206,31 @@ func fetchPRsAcrossRepos(_ repos: [RepoEntry], query: String) async -> ([PRRow],
 
 // MARK: - Issue mutations (actionable status/assignee dropdowns)
 
-func setIssueState(_ row: IssueRow, closed: Bool) async -> Result<Void, TaskGHError> {
+// `reason` mirrors GitHub's own close options ("completed" / "not planned") — passed straight
+// through to `gh issue close --reason`; nil (reopen, or a plain close) omits the flag.
+func setIssueState(_ row: IssueRow, closed: Bool, reason: String? = nil) async -> Result<Void, TaskGHError> {
     guard let (org, name) = gitURLComponents(row.repo.url) else {
         return .failure(TaskGHError(message: "Not a GitHub repo"))
     }
+    var args = ["issue", closed ? "close" : "reopen", String(row.issue.number), "--repo", "\(org)/\(name)"]
+    if closed, let reason { args += ["--reason", reason] }
     return await Task.detached {
-        runGH(["issue", closed ? "close" : "reopen", String(row.issue.number), "--repo", "\(org)/\(name)"])
-            .map { _ in () }
+        runGH(args).map { _ in () }
     }.value
+}
+
+// Users assignable to issues in this repo (GitHub's own "assignees" endpoint — the same list
+// GitHub.com's own assignee dropdown offers), for the row-level assignee picker.
+nonisolated private func fetchAssignableUsersSync(repo: RepoEntry) -> [TaskActor] {
+    guard let (org, name) = gitURLComponents(repo.url) else { return [] }
+    switch runGH(["api", "repos/\(org)/\(name)/assignees", "--paginate"]) {
+    case .failure: return []
+    case .success(let data): return (try? JSONDecoder().decode([TaskActor].self, from: data)) ?? []
+    }
+}
+
+func fetchAssignableUsers(repo: RepoEntry) async -> [TaskActor] {
+    await Task.detached { fetchAssignableUsersSync(repo: repo) }.value
 }
 
 func setIssueAssignee(_ row: IssueRow, login: String, add: Bool) async -> Result<Void, TaskGHError> {

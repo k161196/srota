@@ -31,9 +31,60 @@ struct TasksPanel: View {
     @State private var showFilters = false
     @State private var busyRowID: String? = nil
     @State private var actionError: String? = nil
+    @State private var projectFilter: Set<String> = []
+    @State private var showProjectFilter = false
+    @State private var ghRepoListings: [TaskGHRepoListing] = []
+    @State private var fetchingGHRepos = false
 
-    private var connectedRepos: [RepoEntry] { db.repos.filter { gitURLComponents($0.url) != nil } }
+    private var allConnectedRepos: [RepoEntry] { db.repos.filter { gitURLComponents($0.url) != nil } }
+
+    // Every repo you could scope to: your connected (Srota) repos plus anything else on your
+    // GitHub account discovered via `gh repo list`, so you can filter to a repo before adding it.
+    private var allProjectOptions: [RepoEntry] {
+        var result = allConnectedRepos
+        let existingKeys = Set(result.compactMap { gitURLComponents($0.url) }.map { "\($0.0)/\($0.1)".lowercased() })
+        for listing in ghRepoListings {
+            guard let parts = gitURLComponents(listing.url) else { continue }
+            let key = "\(parts.0)/\(parts.1)".lowercased()
+            guard !existingKeys.contains(key) else { continue }
+            let name = listing.nameWithOwner.split(separator: "/").last.map(String.init) ?? listing.nameWithOwner
+            result.append(RepoEntry(id: listing.url, name: name, url: listing.url, defaultBranch: listing.defaultBranchRef?.name ?? "main"))
+        }
+        return result
+    }
+
+    private var connectedRepos: [RepoEntry] {
+        guard !projectFilter.isEmpty else { return allConnectedRepos }
+        return allProjectOptions.filter { projectFilter.contains($0.id) }
+    }
     private var query: Binding<String> { subTab == .issues ? $issueQuery : $prQuery }
+
+    private var projectFilterLabel: String {
+        if projectFilter.isEmpty { return "All projects" }
+        if projectFilter.count == 1, let repo = allProjectOptions.first(where: { projectFilter.contains($0.id) }) {
+            return repo.name
+        }
+        return "\(projectFilter.count) projects"
+    }
+
+    // Selecting toggles from the "all connected repos" baseline, not the full GitHub account —
+    // otherwise unchecking one repo out of hundreds would scope every fetch to the other 199.
+    private func toggleProject(_ id: String) {
+        let connectedIDs = Set(allConnectedRepos.map(\.id))
+        var current = projectFilter.isEmpty ? connectedIDs : projectFilter
+        if current.contains(id) { current.remove(id) } else { current.insert(id) }
+        projectFilter = (current.isEmpty || current == connectedIDs) ? [] : current
+    }
+
+    private func fetchTaskGHRepoListingsIfNeeded() {
+        guard ghRepoListings.isEmpty, !fetchingGHRepos else { return }
+        fetchingGHRepos = true
+        Task {
+            let listings = await Task.detached { fetchTaskGHRepoListings() }.value
+            ghRepoListings = listings
+            fetchingGHRepos = false
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -47,6 +98,7 @@ struct TasksPanel: View {
         .background(Color.mgBg)
         .onAppear { fetchIfNeeded() }
         .onChange(of: subTab) { fetchIfNeeded() }
+        .onChange(of: projectFilter) { refresh() }
         .alert("Error", isPresented: .init(get: { actionError != nil }, set: { if !$0 { actionError = nil } })) {
             Button("OK", role: .cancel) { actionError = nil }
         } message: { Text(actionError ?? "") }
@@ -58,20 +110,34 @@ struct TasksPanel: View {
         HStack(spacing: 10) {
             Image(systemName: "checklist").font(.system(size: 13)).foregroundStyle(Color.mgAccent)
             Text("Tasks").font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.mgLabel)
-            Text("\(connectedRepos.count) \(connectedRepos.count == 1 ? "repo" : "repos")")
-                .font(.system(size: 11).monospacedDigit()).foregroundStyle(Color.mgMuted)
-                .padding(.horizontal, 6).padding(.vertical, 2)
-                .background(Color.mgSurface).clipShape(Capsule())
-            Spacer()
-            if fetching {
-                ProgressView().scaleEffect(0.6)
-            } else {
-                Button { refresh() } label: {
-                    Image(systemName: "arrow.clockwise").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.mgMuted)
+            Button { showProjectFilter = true } label: {
+                HStack(spacing: 4) {
+                    Text(projectFilterLabel).font(.system(size: 11, weight: .medium)).foregroundStyle(Color.mgLabel)
+                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 8)).foregroundStyle(Color.mgMuted)
                 }
-                .buttonStyle(.plain)
-                .help("Refresh")
+                .padding(.horizontal, 8).padding(.vertical, 4)
             }
+            .buttonStyle(.plain)
+            .background(Color.mgSurface)
+            .overlay(Capsule().stroke(Color.mgBorder, lineWidth: 1))
+            .clipShape(Capsule())
+            .popover(isPresented: $showProjectFilter, arrowEdge: .bottom) {
+                ProjectFilterMenu(
+                    recent: allConnectedRepos,
+                    others: allProjectOptions.filter { repo in !allConnectedRepos.contains { $0.id == repo.id } },
+                    selected: $projectFilter,
+                    settings: settings,
+                    isFetchingOthers: fetchingGHRepos,
+                    onToggle: toggleProject,
+                    onAppear: fetchTaskGHRepoListingsIfNeeded
+                )
+            }
+            Spacer()
+            Button { refresh() } label: {
+                Image(systemName: "arrow.clockwise").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.mgMuted)
+            }
+            .buttonStyle(.plain)
+            .help("Refresh")
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
         .background(Color.mgBg)
@@ -188,27 +254,30 @@ struct TasksPanel: View {
 
     private var tableHeaderRow: some View {
         HStack(spacing: 10) {
-            Color.clear.frame(width: 12)
-            Text(subTab == .issues ? "ISSUE" : "PULL REQUEST")
+            Text("ID").font(.system(size: 9, weight: .semibold)).tracking(0.6)
+                .foregroundStyle(Color.mgMuted).frame(width: TaskRowMetrics.idWidth, alignment: .leading)
+            Text("TITLE / CONTEXT")
                 .font(.system(size: 9, weight: .semibold)).tracking(0.6).foregroundStyle(Color.mgMuted)
             Spacer(minLength: 8)
             if subTab == .prs {
-                Color.clear.frame(width: 18)
+                Text("REVIEWERS").font(.system(size: 9, weight: .semibold)).tracking(0.6)
+                    .foregroundStyle(Color.mgMuted).frame(width: TaskRowMetrics.personWidth, alignment: .leading)
                 Text("CHECKS").font(.system(size: 9, weight: .semibold)).tracking(0.6)
-                    .foregroundStyle(Color.mgMuted).frame(width: 56)
+                    .foregroundStyle(Color.mgMuted).frame(width: TaskRowMetrics.checksWidth, alignment: .leading)
                 Text("MERGE").font(.system(size: 9, weight: .semibold)).tracking(0.6)
-                    .foregroundStyle(Color.mgMuted).frame(width: 52)
+                    .foregroundStyle(Color.mgMuted).frame(width: TaskRowMetrics.mergeWidth, alignment: .leading)
             } else {
-                Color.clear.frame(width: 34)
+                Text("ASSIGNEES").font(.system(size: 9, weight: .semibold)).tracking(0.6)
+                    .foregroundStyle(Color.mgMuted).frame(width: TaskRowMetrics.personWidth, alignment: .leading)
                 Text("STATUS").font(.system(size: 9, weight: .semibold)).tracking(0.6)
-                    .foregroundStyle(Color.mgMuted).frame(width: 70)
+                    .foregroundStyle(Color.mgMuted).frame(width: TaskRowMetrics.statusWidth, alignment: .leading)
             }
             Text("UPDATED").font(.system(size: 9, weight: .semibold)).tracking(0.6)
-                .foregroundStyle(Color.mgMuted).frame(width: 56, alignment: .trailing)
-            Color.clear.frame(width: 22)
-            Color.clear.frame(width: 42)
+                .foregroundStyle(Color.mgMuted).frame(width: TaskRowMetrics.updatedWidth, alignment: .trailing)
+            Color.clear.frame(width: TaskRowMetrics.actionWidth)
         }
         .padding(.horizontal, 12).padding(.vertical, 6)
+        .fixedSize(horizontal: false, vertical: true)
         .background(Color.mgBg)
         .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
     }
@@ -218,7 +287,9 @@ struct TasksPanel: View {
     @ViewBuilder
     private var content: some View {
         let isEmpty = subTab == .issues ? issueRows.isEmpty : prRows.isEmpty
-        if let loadError, isEmpty {
+        if fetching && isEmpty {
+            skeletonList
+        } else if let loadError, isEmpty {
             VStack { Spacer(); Text(loadError).font(.system(size: 12)).foregroundStyle(Color.mgMuted); Spacer() }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if isEmpty && !fetching {
@@ -241,7 +312,7 @@ struct TasksPanel: View {
                                 hasWorkspace: hasExistingWorkspace(issue: row),
                                 onStart: { startIssue(row) },
                                 onOpenGitHub: { openOnGitHub(row.issue.url) },
-                                onToggleState: { toggleIssueState(row) },
+                                onToggleState: { reason in toggleIssueState(row, reason: reason) },
                                 onAssigneeAction: { login, add in toggleAssignee(row, login: login, add: add) }
                             )
                         }
@@ -259,8 +330,19 @@ struct TasksPanel: View {
                     }
                 }
             }
+            .id("\(subTab)-\(query.wrappedValue)")
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
+    }
+
+    private var skeletonList: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(0..<10, id: \.self) { _ in SkeletonRow(isPR: subTab == .prs) }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .allowsHitTesting(false)
     }
 
     // MARK: - Distinct-value suggestions (no extra gh calls — derived from already-fetched rows)
@@ -341,11 +423,11 @@ struct TasksPanel: View {
         }
     }
 
-    private func toggleIssueState(_ row: IssueRow) {
+    private func toggleIssueState(_ row: IssueRow, reason: String? = nil) {
         guard let idx = issueRows.firstIndex(where: { $0.id == row.id }) else { return }
         let closing = row.issue.state == "OPEN"
         Task {
-            let result = await setIssueState(row, closed: closing)
+            let result = await setIssueState(row, closed: closing, reason: reason)
             switch result {
             case .success: issueRows[idx].issue.state = closing ? "CLOSED" : "OPEN"
             case .failure(let err): actionError = err.message
@@ -384,6 +466,135 @@ struct TasksPanel: View {
     }
 }
 
+// MARK: - Projects filter popover
+
+private struct ProjectFilterMenu: View {
+    let recent: [RepoEntry]           // your connected Srota repos
+    let others: [RepoEntry]           // rest of your GitHub account, not yet connected
+    @Binding var selected: Set<String>
+    let settings: AppSettings
+    let isFetchingOthers: Bool
+    let onToggle: (String) -> Void
+    let onAppear: () -> Void
+
+    @State private var search = ""
+
+    private var searching: Bool { !search.isEmpty }
+    private var allRepos: [RepoEntry] { recent + others }
+    private var searchMatches: [RepoEntry] {
+        allRepos.filter { $0.name.localizedCaseInsensitiveContains(search) }
+    }
+
+    private func isChecked(_ repo: RepoEntry) -> Bool {
+        selected.isEmpty ? recent.contains { $0.id == repo.id } : selected.contains(repo.id)
+    }
+
+    private func subtitle(for repo: RepoEntry) -> String {
+        if recent.contains(where: { $0.id == repo.id }) {
+            return mainClonePath(for: repo, settings: settings) ?? repo.url
+        }
+        return gitURLComponents(repo.url).map { $0.0 } ?? repo.url
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").font(.system(size: 13)).foregroundStyle(Color.mgMuted)
+                TextField("Search projects", text: $search).textFieldStyle(.plain).font(.system(size: 14)).foregroundStyle(Color.mgLabel)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .background(Color.mgSurface)
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.mgBorder, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .padding(10)
+
+            if !selected.isEmpty {
+                HStack {
+                    Text("\(selected.count) selected").font(.system(size: 11)).foregroundStyle(Color.mgMuted)
+                    Spacer()
+                    Button("Show all") { selected = [] }
+                        .buttonStyle(.plain).font(.system(size: 11, weight: .medium)).foregroundStyle(Color.mgAccent)
+                }
+                .padding(.horizontal, 12).padding(.bottom, 6)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    if searching {
+                        ForEach(searchMatches) { repo in
+                            ProjectFilterRow(title: repo.name, subtitle: subtitle(for: repo), isChecked: isChecked(repo)) {
+                                onToggle(repo.id)
+                            }
+                        }
+                    } else {
+                        if !recent.isEmpty {
+                            ProjectFilterSectionHeader(title: "RECENT")
+                            ForEach(recent) { repo in
+                                ProjectFilterRow(title: repo.name, subtitle: subtitle(for: repo), isChecked: isChecked(repo)) {
+                                    onToggle(repo.id)
+                                }
+                            }
+                        }
+                        ProjectFilterSectionHeader(title: "BROWSE ALL")
+                        if isFetchingOthers && others.isEmpty {
+                            Text("Loading your GitHub repos…").font(.system(size: 12)).foregroundStyle(Color.mgMuted)
+                                .padding(.horizontal, 12).padding(.vertical, 8)
+                        } else {
+                            ForEach(others) { repo in
+                                ProjectFilterRow(title: repo.name, subtitle: subtitle(for: repo), isChecked: isChecked(repo)) {
+                                    onToggle(repo.id)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 6).padding(.bottom, 8)
+            }
+            .frame(maxHeight: 360)
+        }
+        .frame(width: 320)
+        .background(Color.mgBg)
+        .onAppear(perform: onAppear)
+    }
+}
+
+private struct ProjectFilterSectionHeader: View {
+    let title: String
+    var body: some View {
+        Text(title).font(.system(size: 10, weight: .semibold)).tracking(0.6).foregroundStyle(Color.mgMuted)
+            .padding(.horizontal, 6).padding(.top, 10).padding(.bottom, 4)
+    }
+}
+
+private struct ProjectFilterRow: View {
+    let title: String
+    let subtitle: String
+    let isChecked: Bool
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.mgLabel).lineLimit(1)
+                    Text(subtitle).font(.system(size: 11)).foregroundStyle(Color.mgMuted).lineLimit(1).truncationMode(.middle)
+                }
+                Spacer()
+                if isChecked {
+                    Image(systemName: "checkmark").font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.mgAccent)
+                }
+            }
+            .padding(.horizontal, 10).padding(.vertical, 9)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(hovered ? Color.mgRowHover : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .onHover { hovered = $0 }
+    }
+}
+
 // MARK: - Small toolbar controls
 
 private struct SubTabButton: View {
@@ -394,12 +605,44 @@ private struct SubTabButton: View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 12, weight: isActive ? .semibold : .regular))
-                .foregroundStyle(isActive ? Color.mgLabel : Color.mgMuted)
+                .foregroundStyle(isActive ? Color.black.opacity(0.85) : Color.mgMuted)
                 .padding(.horizontal, 12).padding(.vertical, 5)
         }
         .buttonStyle(.plain)
-        .background(isActive ? Color.mgAccent.opacity(0.12) : Color.clear)
+        .background(isActive ? Color.white.opacity(0.92) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+private struct SkeletonRow: View {
+    let isPR: Bool
+    @State private var pulse = false
+
+    private var fill: Color { Color.white.opacity(pulse ? 0.10 : 0.05) }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 3).fill(fill).frame(width: TaskRowMetrics.idWidth, height: 11)
+            VStack(alignment: .leading, spacing: 6) {
+                RoundedRectangle(cornerRadius: 3).fill(fill).frame(width: 220, height: 11)
+                RoundedRectangle(cornerRadius: 3).fill(fill).frame(width: 120, height: 9)
+            }
+            Spacer(minLength: 8)
+            Circle().fill(fill).frame(width: 20, height: 20).frame(width: TaskRowMetrics.personWidth)
+            if isPR {
+                Capsule().fill(fill).frame(width: TaskRowMetrics.checksWidth, height: 16)
+                Capsule().fill(fill).frame(width: TaskRowMetrics.mergeWidth, height: 16)
+            } else {
+                Capsule().fill(fill).frame(width: TaskRowMetrics.statusWidth, height: 16)
+            }
+            RoundedRectangle(cornerRadius: 3).fill(fill).frame(width: TaskRowMetrics.updatedWidth, height: 9)
+            Capsule().fill(fill).frame(width: TaskRowMetrics.actionWidth, height: 16)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { pulse = true }
+        }
     }
 }
 
@@ -412,11 +655,10 @@ private struct QuickChip: View {
             Text(title).font(.system(size: 11, weight: isActive ? .semibold : .regular))
         }
         .buttonStyle(.plain)
-        .foregroundStyle(isActive ? Color.mgLabel : Color.mgMuted)
+        .foregroundStyle(isActive ? Color.black.opacity(0.85) : Color.mgMuted)
         .padding(.horizontal, 10).padding(.vertical, 5)
-        .background(isActive ? Color.mgSurface : Color.clear)
+        .background(isActive ? Color.white.opacity(0.92) : Color.clear)
         .clipShape(Capsule())
-        .overlay(Capsule().stroke(isActive ? Color.mgBorder : Color.clear))
     }
 }
 
