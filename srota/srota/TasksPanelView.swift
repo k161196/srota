@@ -43,6 +43,7 @@ struct TasksPanel: View {
             tableHeaderRow
             content
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.mgBg)
         .onAppear { fetchIfNeeded() }
         .onChange(of: subTab) { fetchIfNeeded() }
@@ -258,6 +259,7 @@ struct TasksPanel: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
     }
 
