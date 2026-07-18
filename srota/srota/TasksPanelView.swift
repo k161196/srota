@@ -115,13 +115,20 @@ struct TasksPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            toolbar
-            Rectangle().fill(Color.mgBorder).frame(height: 1)
+            headerToolbar
             if subTab == .repos {
                 repoSplitView
             } else {
-                tableHeaderRow
-                content
+                VStack(spacing: 0) {
+                    taskToolbar
+                    tableHeaderRow
+                    content
+                }
+                .background(Color.mgSurface)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.mgBorder, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .padding(.horizontal, 14)
+                .padding(.bottom, 10)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -162,24 +169,23 @@ struct TasksPanel: View {
 
     // MARK: - Toolbar
 
-    private var toolbar: some View {
+    private var headerToolbar: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 SubTabButton(title: "Repos", isActive: subTab == .repos) { subTab = .repos }
                 SubTabButton(title: "Issues", isActive: subTab == .issues) { subTab = .issues }
                 SubTabButton(title: "PRs", isActive: subTab == .prs) { subTab = .prs }
-                Spacer()
                 Button { showProjectFilter = true } label: {
-                    HStack(spacing: 4) {
-                        Text(projectFilterLabel).font(.system(size: 11, weight: .medium)).foregroundStyle(Color.mgLabel)
-                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 8)).foregroundStyle(Color.mgMuted)
+                    HStack(spacing: 7) {
+                        Text(projectFilterLabel).font(.system(size: 12, weight: .medium)).foregroundStyle(Color.mgLabel)
+                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Color.mgMuted)
                     }
-                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .padding(.horizontal, 12).padding(.vertical, 7)
                 }
                 .buttonStyle(.plain)
-                .background(Color.mgSurface)
-                .overlay(Capsule().stroke(Color.mgBorder, lineWidth: 1))
-                .clipShape(Capsule())
+                .background(Color.white.opacity(0.025))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.14), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
                 .popover(isPresented: $showProjectFilter, arrowEdge: .bottom) {
                     ProjectFilterMenu(
                         recent: allConnectedRepos,
@@ -188,12 +194,15 @@ struct TasksPanel: View {
                         onToggle: toggleProject
                     )
                 }
-                Button { refresh() } label: {
-                    Image(systemName: "arrow.clockwise").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.mgMuted)
-                }
-                .buttonStyle(.plain)
-                .help("Refresh")
+                Spacer()
             }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(Color.mgBg)
+    }
+
+    private var taskToolbar: some View {
+        VStack(alignment: .leading, spacing: 8) {
             if subTab != .repos {
                 HStack(spacing: 6) {
                     if subTab == .issues {
@@ -214,7 +223,10 @@ struct TasksPanel: View {
                             prQuery = "is:pr is:open review-requested:@me"; refreshPRs()
                         }
                     }
+                    Spacer()
+                }
 
+                HStack(spacing: 6) {
                     Button { showFilters = true } label: {
                         HStack(spacing: 5) {
                             Image(systemName: "line.3.horizontal.decrease").font(.system(size: 10))
@@ -298,37 +310,41 @@ struct TasksPanel: View {
                 }
             }
         }
-        .padding(.horizontal, 14).padding(.vertical, 10)
-        .background(Color.mgBg)
+        .padding(.horizontal, 12)
+        .padding(.top, 9)
+        .background(Color.mgSurface)
     }
 
     private var tableHeaderRow: some View {
         HStack(spacing: 10) {
-            Text("ID").font(.system(size: 9, weight: .semibold)).tracking(0.6)
+            Text("ID").font(.system(size: 10, weight: .semibold)).tracking(0.6)
                 .foregroundStyle(Color.mgMuted).frame(width: TaskRowMetrics.idWidth, alignment: .leading)
             Text("TITLE / CONTEXT")
-                .font(.system(size: 9, weight: .semibold)).tracking(0.6).foregroundStyle(Color.mgMuted)
+                .font(.system(size: 10, weight: .semibold)).tracking(0.6).foregroundStyle(Color.mgMuted)
             Spacer(minLength: 8)
             if subTab == .prs {
-                Text("REVIEWERS").font(.system(size: 9, weight: .semibold)).tracking(0.6)
-                    .foregroundStyle(Color.mgMuted).frame(width: TaskRowMetrics.personWidth, alignment: .leading)
-                Text("CHECKS").font(.system(size: 9, weight: .semibold)).tracking(0.6)
+                Text("REVIEWERS").font(.system(size: 10, weight: .semibold)).tracking(0.6)
+                    .foregroundStyle(Color.mgMuted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .frame(width: TaskRowMetrics.personWidth, alignment: .leading)
+                Text("CHECKS").font(.system(size: 10, weight: .semibold)).tracking(0.6)
                     .foregroundStyle(Color.mgMuted).frame(width: TaskRowMetrics.checksWidth, alignment: .leading)
-                Text("MERGE").font(.system(size: 9, weight: .semibold)).tracking(0.6)
+                Text("MERGE").font(.system(size: 10, weight: .semibold)).tracking(0.6)
                     .foregroundStyle(Color.mgMuted).frame(width: TaskRowMetrics.mergeWidth, alignment: .leading)
             } else {
-                Text("ASSIGNEES").font(.system(size: 9, weight: .semibold)).tracking(0.6)
+                Text("ASSIGNEES").font(.system(size: 10, weight: .semibold)).tracking(0.6)
                     .foregroundStyle(Color.mgMuted).frame(width: TaskRowMetrics.personWidth, alignment: .leading)
-                Text("STATUS").font(.system(size: 9, weight: .semibold)).tracking(0.6)
+                Text("STATUS").font(.system(size: 10, weight: .semibold)).tracking(0.6)
                     .foregroundStyle(Color.mgMuted).frame(width: TaskRowMetrics.statusWidth, alignment: .leading)
             }
-            Text("UPDATED").font(.system(size: 9, weight: .semibold)).tracking(0.6)
+            Text("UPDATED").font(.system(size: 10, weight: .semibold)).tracking(0.6)
                 .foregroundStyle(Color.mgMuted).frame(width: TaskRowMetrics.updatedWidth, alignment: .trailing)
             Color.clear.frame(width: TaskRowMetrics.actionWidth)
         }
-        .padding(.horizontal, 12).padding(.vertical, 6)
+        .padding(.horizontal, 12).padding(.vertical, 10)
         .fixedSize(horizontal: false, vertical: true)
-        .background(Color.mgBg)
+        .background(Color.mgSurface)
         .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
     }
 
@@ -891,11 +907,12 @@ private struct SubTabButton: View {
             Text(title)
                 .font(.system(size: 12, weight: isActive ? .semibold : .regular))
                 .foregroundStyle(isActive ? Color.black.opacity(0.85) : Color.mgMuted)
-                .padding(.horizontal, 12).padding(.vertical, 5)
+                .padding(.horizontal, 11).padding(.vertical, 6)
         }
         .buttonStyle(.plain)
         .background(isActive ? Color.white.opacity(0.92) : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(isActive ? Color.clear : Color.white.opacity(0.12), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
     }
 }
 
@@ -937,13 +954,14 @@ private struct QuickChip: View {
     let action: () -> Void
     var body: some View {
         Button(action: action) {
-            Text(title).font(.system(size: 11, weight: isActive ? .semibold : .regular))
+            Text(title).font(.system(size: 12, weight: isActive ? .semibold : .regular))
+                .padding(.horizontal, 11).padding(.vertical, 6)
         }
         .buttonStyle(.plain)
         .foregroundStyle(isActive ? Color.black.opacity(0.85) : Color.mgMuted)
-        .padding(.horizontal, 10).padding(.vertical, 5)
-        .background(isActive ? Color.white.opacity(0.92) : Color.clear)
-        .clipShape(Capsule())
+        .background(isActive ? Color.white.opacity(0.92) : Color.mgSurface)
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(isActive ? Color.clear : Color.white.opacity(0.08)))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 

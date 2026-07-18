@@ -420,7 +420,7 @@ struct IssueRowView: View {
             }
             .frame(width: TaskRowMetrics.actionWidth, alignment: .trailing)
         }
-        .padding(.horizontal, 12).padding(.vertical, 7)
+        .padding(.horizontal, 12).padding(.vertical, 14)
         .background(hovered ? Color.mgRowHover : Color.clear)
         .onHover { hovered = $0 }
         .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
@@ -753,7 +753,7 @@ struct PRRowView: View {
             }
             .frame(width: TaskRowMetrics.actionWidth, alignment: .trailing)
         }
-        .padding(.horizontal, 12).padding(.vertical, 7)
+        .padding(.horizontal, 12).padding(.vertical, 14)
         .background(hovered ? Color.mgRowHover : Color.clear)
         .onHover { hovered = $0 }
         .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
