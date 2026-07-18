@@ -60,7 +60,7 @@ struct TaskPR: Identifiable, Decodable {
     let isDraft: Bool
     let updatedAt: String
     let labels: [TaskLabel]
-    let reviewRequests: [TaskReviewRequest]
+    var reviewRequests: [TaskReviewRequest]
     let statusCheckRollup: [TaskCheckRun]
     var id: Int { number }
 }
@@ -86,6 +86,63 @@ extension PRRow {
         if runs.contains(where: { ($0.status ?? "COMPLETED") != "COMPLETED" }) { return ("Pending", .yellow, "clock.fill") }
         return ("Passing", Color(red: 0.35, green: 0.85, blue: 0.55), "checkmark.circle.fill")
     }
+}
+
+// A cross-repo generalization of RepoDetailView's branch list (ManagementView.swift) — same
+// remote/local detection, aggregated across every connected repo instead of one at a time.
+struct BranchRow: Identifiable, Sendable {
+    let repo: RepoEntry
+    let name: String
+    let isRemote: Bool
+    let isLocal: Bool
+    var id: String { "\(repo.id)#\(name)" }
+}
+
+// Plain `git` shellouts (no `gh`/GitHub API needed) — mirrors RepoDetailView.fetchBranches().
+nonisolated private func fetchBranchesForRepo(repo: RepoEntry, mainClonePath: String?) -> [BranchRow] {
+    var remoteNames: Set<String> = []
+    if !repo.url.isEmpty {
+        let p = Process(); let pipe = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        p.arguments = ["ls-remote", "--heads", repo.url]
+        p.standardOutput = pipe; p.standardError = Pipe()
+        try? p.run(); p.waitUntilExit()
+        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        remoteNames = Set(out.split(separator: "\n").compactMap { line -> String? in
+            guard let ref = line.split(separator: "\t").last else { return nil }
+            return String(ref).replacingOccurrences(of: "refs/heads/", with: "")
+        })
+    }
+    var localNames: Set<String> = []
+    if let root = mainClonePath, FileManager.default.fileExists(atPath: root) {
+        let p2 = Process(); let pipe2 = Pipe()
+        p2.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        p2.arguments = ["-C", root, "branch", "--format=%(refname:short)"]
+        p2.standardOutput = pipe2; p2.standardError = Pipe()
+        try? p2.run(); p2.waitUntilExit()
+        let out2 = String(data: pipe2.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        localNames = Set(out2.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+    }
+    let allNames = remoteNames.union(localNames).union([repo.defaultBranch])
+    return allNames.map { BranchRow(repo: repo, name: $0, isRemote: remoteNames.contains($0), isLocal: localNames.contains($0)) }
+}
+
+func fetchBranchesAcrossRepos(_ repos: [RepoEntry], settings: AppSettings) async -> [BranchRow] {
+    var mainPaths: [String: String?] = [:]
+    for repo in repos { mainPaths[repo.id] = await mainClonePath(for: repo, settings: settings) }
+    var rows: [BranchRow] = []
+    await withTaskGroup(of: [BranchRow].self) { group in
+        for repo in repos where gitURLComponents(repo.url) != nil {
+            let path = mainPaths[repo.id] ?? nil
+            group.addTask { fetchBranchesForRepo(repo: repo, mainClonePath: path) }
+        }
+        for await result in group { rows.append(contentsOf: result) }
+    }
+    rows.sort { (a: BranchRow, b: BranchRow) -> Bool in
+        if a.repo.name != b.repo.name { return a.repo.name < b.repo.name }
+        return a.name < b.name
+    }
+    return rows
 }
 
 func taskRelativeTime(_ iso: String) -> String {
@@ -244,6 +301,41 @@ func setIssueAssignee(_ row: IssueRow, login: String, add: Bool) async -> Result
     }.value
 }
 
+// `--body` is always passed (even empty) — omitting it makes `gh` fall back to an interactive
+// prompt, which hangs forever since this process has no TTY.
+func createIssue(repo: RepoEntry, title: String, body: String) async -> Result<Void, TaskGHError> {
+    guard let (org, name) = gitURLComponents(repo.url) else {
+        return .failure(TaskGHError(message: "Not a GitHub repo"))
+    }
+    let args = ["issue", "create", "--repo", "\(org)/\(name)", "--title", title, "--body", body]
+    return await Task.detached {
+        runGH(args).map { _ in () }
+    }.value
+}
+
+// MARK: - PR mutations (actionable reviewer dropdown)
+
+func createPR(repo: RepoEntry, title: String, head: String, base: String, body: String) async -> Result<Void, TaskGHError> {
+    guard let (org, name) = gitURLComponents(repo.url) else {
+        return .failure(TaskGHError(message: "Not a GitHub repo"))
+    }
+    let args = ["pr", "create", "--repo", "\(org)/\(name)", "--title", title, "--head", head, "--base", base, "--body", body]
+    return await Task.detached {
+        runGH(args).map { _ in () }
+    }.value
+}
+
+func setPRReviewer(_ row: PRRow, login: String, add: Bool) async -> Result<Void, TaskGHError> {
+    guard let (org, name) = gitURLComponents(row.repo.url) else {
+        return .failure(TaskGHError(message: "Not a GitHub repo"))
+    }
+    let flag = add ? "--add-reviewer" : "--remove-reviewer"
+    return await Task.detached {
+        runGH(["pr", "edit", String(row.pr.number), "--repo", "\(org)/\(name)", flag, login])
+            .map { _ in () }
+    }.value
+}
+
 // MARK: - "Start"/"Open" — launch a scoped workspace for an issue/PR
 
 @MainActor
@@ -373,6 +465,114 @@ func startPRWorkspace(_ row: PRRow, settings: AppSettings) async -> Result<Void,
         openTaskWorkspace(path: path, name: headRef, folderName: row.repo.name, branchRef: headRef)
     }
     return result
+}
+
+// MARK: - Repos/Branches tab mutations (clone, worktree, remove worktree)
+
+@MainActor
+func cloneMainBranch(_ repo: RepoEntry, settings: AppSettings) async -> Result<Void, TaskGHError> {
+    guard let path = mainClonePath(for: repo, settings: settings) else {
+        return .failure(TaskGHError(message: "Set a base working directory in Settings first"))
+    }
+    if FileManager.default.fileExists(atPath: path) { return .success(()) }
+    let url = repo.url; let branch = repo.defaultBranch
+    return await Task.detached { () -> Result<Void, TaskGHError> in
+        let p = Process(); let errPipe = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        p.arguments = ["clone", "--branch", branch, url, path]
+        p.standardError = errPipe
+        do { try p.run() } catch { return .failure(TaskGHError(message: error.localizedDescription)) }
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else {
+            let msg = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return .failure(TaskGHError(message: msg.isEmpty ? "git clone failed" : msg))
+        }
+        return .success(())
+    }.value
+}
+
+@MainActor
+func startRepoWorkspace(_ repo: RepoEntry, settings: AppSettings) async -> Result<Void, TaskGHError> {
+    guard let path = mainClonePath(for: repo, settings: settings) else {
+        return .failure(TaskGHError(message: "Set a base working directory in Settings first"))
+    }
+    if FileManager.default.fileExists(atPath: path) {
+        openTaskWorkspace(path: path, name: repo.defaultBranch, folderName: repo.name, branchRef: repo.defaultBranch)
+        return .success(())
+    }
+    let result = await cloneMainBranch(repo, settings: settings)
+    if case .success = result {
+        openTaskWorkspace(path: path, name: repo.defaultBranch, folderName: repo.name, branchRef: repo.defaultBranch)
+    }
+    return result
+}
+
+@MainActor
+func startBranchWorkspace(_ row: BranchRow, settings: AppSettings) async -> Result<Void, TaskGHError> {
+    let repo = row.repo; let branch = row.name
+    guard let path = worktreePath(for: repo, branch: branch, settings: settings) else {
+        return .failure(TaskGHError(message: "Set a base working directory in Settings first"))
+    }
+    if branch == repo.defaultBranch {
+        let result = await cloneMainBranch(repo, settings: settings)
+        if case .success = result {
+            openTaskWorkspace(path: path, name: branch, folderName: repo.name, branchRef: branch)
+        }
+        return result
+    }
+    if FileManager.default.fileExists(atPath: path) {
+        openTaskWorkspace(path: path, name: branch, folderName: repo.name, branchRef: branch)
+        return .success(())
+    }
+    guard let mainPath = mainClonePath(for: repo, settings: settings), isMainCloned(for: repo, settings: settings) else {
+        return .failure(TaskGHError(message: "Clone \(repo.defaultBranch) first"))
+    }
+    // A branch that's neither remote nor local doesn't exist as a ref yet (e.g. just typed into
+    // the Branches tab's "+" sheet) — create it off the default branch instead of checking it out.
+    let isNewBranch = !row.isRemote && !row.isLocal
+    let defaultBranch = repo.defaultBranch
+    let result = await Task.detached { () -> Result<Void, TaskGHError> in
+        let p = Process(); let errPipe = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        p.arguments = isNewBranch
+            ? ["-C", mainPath, "worktree", "add", "-b", branch, path, defaultBranch]
+            : ["-C", mainPath, "worktree", "add", path, branch]
+        p.standardError = errPipe
+        do { try p.run() } catch { return .failure(TaskGHError(message: error.localizedDescription)) }
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else {
+            let msg = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return .failure(TaskGHError(message: msg.isEmpty ? "git worktree add failed" : msg))
+        }
+        return .success(())
+    }.value
+    if case .success = result {
+        openTaskWorkspace(path: path, name: branch, folderName: repo.name, branchRef: branch)
+    }
+    return result
+}
+
+@MainActor
+func removeBranchWorkspace(_ row: BranchRow, settings: AppSettings) async -> Result<Void, TaskGHError> {
+    guard let path = worktreePath(for: row.repo, branch: row.name, settings: settings),
+          let mainPath = mainClonePath(for: row.repo, settings: settings)
+    else { return .failure(TaskGHError(message: "Not found")) }
+    return await Task.detached { () -> Result<Void, TaskGHError> in
+        let p = Process(); let errPipe = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        p.arguments = ["-C", mainPath, "worktree", "remove", "--force", path]
+        p.standardError = errPipe
+        do { try p.run() } catch { return .failure(TaskGHError(message: error.localizedDescription)) }
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else {
+            let msg = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return .failure(TaskGHError(message: msg.isEmpty ? "git worktree remove failed" : msg))
+        }
+        return .success(())
+    }.value
 }
 
 // MARK: - Search-query token helpers (Filters dropdown reads/writes these directly)
