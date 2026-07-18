@@ -1,16 +1,14 @@
 import SwiftUI
 import AppKit
 
-// Mirrors ManagementView.swift's private Color.mg* palette — duplicated here since that
-// extension is file-private and this view lives in a different file (same convention GitHubProjectsPanel.swift uses).
 private extension Color {
-    static let mgBg        = Color(red: 0.067, green: 0.067, blue: 0.075)
-    static let mgSurface   = Color(red: 0.10,  green: 0.10,  blue: 0.11)
-    static let mgBorder    = Color.white.opacity(0.07)
-    static let mgAccent    = Color(red: 1.0, green: 0.45, blue: 0.15)
-    static let mgLabel     = Color(red: 0.92, green: 0.92, blue: 0.93)
-    static let mgMuted     = Color(red: 0.92, green: 0.92, blue: 0.93).opacity(0.40)
-    static let mgRowHover  = Color.white.opacity(0.065)
+    static let mgBg = tasksBg
+    static let mgSurface = tasksSurface
+    static let mgBorder = tasksBorder
+    static let mgAccent = tasksAccent
+    static let mgLabel = tasksLabel
+    static let mgMuted = tasksMuted
+    static let mgRowHover = tasksRowHover
 }
 
 // MARK: - Filters popover

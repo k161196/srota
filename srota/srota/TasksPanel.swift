@@ -5,17 +5,27 @@ import AppKit
 // surfaced as a top-level tab so you don't have to drill into a single repo to see what's open.
 // See RepoDetailView (ManagementView.swift) for the single-repo precedent this generalizes from.
 
-// Mirrors ManagementView.swift's private Color.mg* palette — duplicated here since that
-// extension is file-private and this view lives in a different file (same convention GitHubProjectsPanel.swift uses).
+// Shared by the Tasks tab's panel, rows, and sheets.
+extension Color {
+    static let tasksBg        = Color(red: 0.067, green: 0.067, blue: 0.075)
+    static let tasksSurface   = Color(red: 0.10,  green: 0.10,  blue: 0.11)
+    static let tasksBorder    = Color.white.opacity(0.07)
+    static let tasksAccent    = Color(red: 1.0, green: 0.45, blue: 0.15)
+    static let tasksLabel     = Color(red: 0.92, green: 0.92, blue: 0.93)
+    static let tasksMuted     = Color(red: 0.92, green: 0.92, blue: 0.93).opacity(0.62)
+    static let tasksRow       = Color.white.opacity(0.035)
+    static let tasksRowHover  = Color.white.opacity(0.065)
+}
+
 private extension Color {
-    static let mgBg        = Color(red: 0.067, green: 0.067, blue: 0.075)
-    static let mgSurface   = Color(red: 0.10,  green: 0.10,  blue: 0.11)
-    static let mgBorder    = Color.white.opacity(0.07)
-    static let mgAccent    = Color(red: 1.0, green: 0.45, blue: 0.15)
-    static let mgLabel     = Color(red: 0.92, green: 0.92, blue: 0.93)
-    static let mgMuted     = Color(red: 0.92, green: 0.92, blue: 0.93).opacity(0.40)
-    static let mgRow       = Color.white.opacity(0.035)
-    static let mgRowHover  = Color.white.opacity(0.065)
+    static let mgBg = tasksBg
+    static let mgSurface = tasksSurface
+    static let mgBorder = tasksBorder
+    static let mgAccent = tasksAccent
+    static let mgLabel = tasksLabel
+    static let mgMuted = tasksMuted
+    static let mgRow = tasksRow
+    static let mgRowHover = tasksRowHover
 }
 
 // MARK: - GitHub models

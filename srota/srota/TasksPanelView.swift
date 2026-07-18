@@ -1,16 +1,14 @@
 import SwiftUI
 import AppKit
 
-// Mirrors ManagementView.swift's private Color.mg* palette — duplicated here since that
-// extension is file-private and this view lives in a different file (same convention GitHubProjectsPanel.swift uses).
 private extension Color {
-    static let mgBg        = Color(red: 0.067, green: 0.067, blue: 0.075)
-    static let mgSurface   = Color(red: 0.10,  green: 0.10,  blue: 0.11)
-    static let mgBorder    = Color.white.opacity(0.07)
-    static let mgAccent    = Color(red: 1.0, green: 0.45, blue: 0.15)
-    static let mgLabel     = Color(red: 0.92, green: 0.92, blue: 0.93)
-    static let mgMuted     = Color(red: 0.92, green: 0.92, blue: 0.93).opacity(0.40)
-    static let mgRowHover  = Color.white.opacity(0.065)
+    static let mgBg = tasksBg
+    static let mgSurface = tasksSurface
+    static let mgBorder = tasksBorder
+    static let mgAccent = tasksAccent
+    static let mgLabel = tasksLabel
+    static let mgMuted = tasksMuted
+    static let mgRowHover = tasksRowHover
 }
 
 struct TasksPanel: View {
@@ -22,10 +20,14 @@ struct TasksPanel: View {
     @State private var subTab: SubTab = .issues
     @State private var issueRows: [IssueRow] = []
     @State private var prRows: [PRRow] = []
-    @State private var hasFetchedIssues = false
-    @State private var hasFetchedPRs = false
-    @State private var fetching = false
-    @State private var loadError: String? = nil
+    @State private var issueRowsByQuery: [String: [IssueRow]] = [:]
+    @State private var prRowsByQuery: [String: [PRRow]] = [:]
+    @State private var displayedIssueQueryKey: String?
+    @State private var displayedPRQueryKey: String?
+    @State private var fetchingIssueQueryKeys: Set<String> = []
+    @State private var fetchingPRQueryKeys: Set<String> = []
+    @State private var issueLoadError: String?
+    @State private var prLoadError: String?
     @State private var issueQuery = "is:issue is:open"
     @State private var prQuery = "is:pr is:open"
     @State private var browseSearch = ""
@@ -43,9 +45,8 @@ struct TasksPanel: View {
 
     // Repos tab: master-detail — selecting a repo on the left loads its branches on the right.
     @State private var selectedRepoID: String? = nil
-    @State private var selectedRepoBranches: [BranchRow] = []
-    @State private var selectedRepoBranchesFetchedFor: String? = nil
-    @State private var fetchingSelectedRepoBranches = false
+    @State private var branchRowsByRepoID: [String: [BranchRow]] = [:]
+    @State private var fetchingBranchRepoIDs: Set<String> = []
     @State private var branchSearch = ""
 
     private var allConnectedRepos: [RepoEntry] { db.repos.filter { gitURLComponents($0.url) != nil } }
@@ -68,6 +69,22 @@ struct TasksPanel: View {
         case .repos: return ""
         }
     }
+    private var currentIssueQueryKey: String { taskQueryCacheKey(query: issueQuery) }
+    private var currentPRQueryKey: String { taskQueryCacheKey(query: prQuery) }
+    private var fetching: Bool {
+        switch subTab {
+        case .issues: return displayedIssueQueryKey.map(fetchingIssueQueryKeys.contains) ?? false
+        case .prs: return displayedPRQueryKey.map(fetchingPRQueryKeys.contains) ?? false
+        case .repos: return false
+        }
+    }
+    private var loadError: String? {
+        subTab == .issues ? issueLoadError : prLoadError
+    }
+
+    private func taskQueryCacheKey(query: String) -> String {
+        connectedRepos.map(\.id).sorted().joined(separator: ",") + "\n" + query
+    }
 
     private var filteredRepoRows: [RepoEntry] {
         browseSearch.isEmpty ? connectedRepos : connectedRepos.filter { $0.name.localizedCaseInsensitiveContains(browseSearch) }
@@ -76,6 +93,14 @@ struct TasksPanel: View {
     private var selectedRepo: RepoEntry? {
         guard let id = selectedRepoID else { return nil }
         return allConnectedRepos.first { $0.id == id }
+    }
+    private var selectedRepoBranches: [BranchRow] {
+        guard let selectedRepoID else { return [] }
+        return branchRowsByRepoID[selectedRepoID] ?? []
+    }
+    private var fetchingSelectedRepoBranches: Bool {
+        guard let selectedRepoID else { return false }
+        return fetchingBranchRepoIDs.contains(selectedRepoID)
     }
     private var filteredSelectedRepoBranches: [BranchRow] {
         branchSearch.isEmpty ? selectedRepoBranches : selectedRepoBranches.filter { $0.name.localizedCaseInsensitiveContains(branchSearch) }
@@ -157,12 +182,12 @@ struct TasksPanel: View {
         }
         .sheet(isPresented: $showAddIssue) {
             AddIssueSheet(repos: connectedRepos, isPresented: $showAddIssue) { repo, title, body in
-                submitNewIssue(repo: repo, title: title, body: body)
+                await submitNewIssue(repo: repo, title: title, body: body)
             }
         }
         .sheet(isPresented: $showAddPR) {
             AddPRSheet(repos: connectedRepos, isPresented: $showAddPR) { repo, title, head, base, body in
-                submitNewPR(repo: repo, title: title, head: head, base: base, body: body)
+                await submitNewPR(repo: repo, title: title, head: head, base: base, body: body)
             }
         }
     }
@@ -281,10 +306,10 @@ struct TasksPanel: View {
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
 
-                    ToolbarIconButton(systemName: "plus") {
+                    ToolbarIconButton(systemName: "plus", label: subTab == .issues ? "New issue" : "New pull request") {
                         if subTab == .issues { showAddIssue = true } else { showAddPR = true }
                     }
-                    ToolbarIconButton(systemName: "arrow.clockwise") { refresh() }
+                    ToolbarIconButton(systemName: "arrow.clockwise", label: "Refresh", isLoading: fetching) { forceRefresh() }
                 }
 
                 let tokens = activeFilterTokens(query.wrappedValue, subTab: subTab)
@@ -356,16 +381,19 @@ struct TasksPanel: View {
         if fetching && isEmpty {
             skeletonList
         } else if let loadError, isEmpty {
-            VStack { Spacer(); Text(loadError).font(.system(size: 12)).foregroundStyle(Color.mgMuted); Spacer() }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            TaskStateView(
+                systemName: "exclamationmark.triangle",
+                title: "Couldn’t load \(subTab == .issues ? "issues" : "pull requests")",
+                detail: loadError,
+                actionTitle: "Try Again",
+                action: forceRefresh
+            )
         } else if isEmpty && !fetching {
-            VStack {
-                Spacer()
-                Text(subTab == .issues ? "No matching issues" : "No matching PRs")
-                    .font(.system(size: 12)).foregroundStyle(Color.mgMuted)
-                Spacer()
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            TaskStateView(
+                systemName: "line.3.horizontal.decrease.circle",
+                title: subTab == .issues ? "No matching issues" : "No matching pull requests",
+                detail: "Adjust the search or filters and try again."
+            )
         } else {
             ScrollView {
                 LazyVStack(spacing: 0) {
@@ -429,8 +457,8 @@ struct TasksPanel: View {
                         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
                         .clipShape(RoundedRectangle(cornerRadius: 6))
 
-                        ToolbarIconButton(systemName: "plus") { showAddRepo = true }
-                        ToolbarIconButton(systemName: "arrow.clockwise") { refreshGHRepoListings() }
+                        ToolbarIconButton(systemName: "plus", label: "Add repository") { showAddRepo = true }
+                        ToolbarIconButton(systemName: "arrow.clockwise", label: "Refresh repositories", isLoading: fetchingGHRepos) { refreshGHRepoListings() }
                     }
                 }
                 .padding(.horizontal, 12).padding(.vertical, 8)
@@ -438,8 +466,13 @@ struct TasksPanel: View {
                 .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
 
                 if filteredRepoRows.isEmpty {
-                    VStack { Spacer(); Text("No matching repos").font(.system(size: 12)).foregroundStyle(Color.mgMuted); Spacer() }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    TaskStateView(
+                        systemName: "folder",
+                        title: connectedRepos.isEmpty ? "No repositories connected" : "No matching repositories",
+                        detail: connectedRepos.isEmpty ? "Add a GitHub repository to get started." : "Clear the search to see all repositories.",
+                        actionTitle: connectedRepos.isEmpty ? "Add Repository" : nil,
+                        action: connectedRepos.isEmpty ? { showAddRepo = true } : nil
+                    )
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 0) {
@@ -491,8 +524,8 @@ struct TasksPanel: View {
                         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
                         .clipShape(RoundedRectangle(cornerRadius: 6))
 
-                        ToolbarIconButton(systemName: "plus") { showAddBranch = true }
-                        ToolbarIconButton(systemName: "arrow.clockwise") { refreshSelectedRepoBranches() }
+                        ToolbarIconButton(systemName: "plus", label: "Add branch") { showAddBranch = true }
+                        ToolbarIconButton(systemName: "arrow.clockwise", label: "Refresh branches", isLoading: fetchingSelectedRepoBranches) { refreshSelectedRepoBranches() }
                     }
                 }
                 .padding(.horizontal, 14).padding(.vertical, 10)
@@ -515,10 +548,13 @@ struct TasksPanel: View {
                 .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
 
                 if fetchingSelectedRepoBranches && filteredSelectedRepoBranches.isEmpty {
-                    VStack { Spacer(); ProgressView(); Spacer() }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                    TaskStateView(systemName: "arrow.clockwise", title: "Loading branches…", isLoading: true)
                 } else if filteredSelectedRepoBranches.isEmpty {
-                    VStack { Spacer(); Text("No matching branches").font(.system(size: 12)).foregroundStyle(Color.mgMuted); Spacer() }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    TaskStateView(
+                        systemName: "arrow.triangle.branch",
+                        title: selectedRepoBranches.isEmpty ? "No branches found" : "No matching branches",
+                        detail: selectedRepoBranches.isEmpty ? "Refresh or add a branch to continue." : "Clear the search to see all branches."
+                    )
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 0) {
@@ -540,12 +576,11 @@ struct TasksPanel: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         } else {
-            VStack {
-                Spacer()
-                Text("Select a repo to view its branches").font(.system(size: 12)).foregroundStyle(Color.mgMuted)
-                Spacer()
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            TaskStateView(
+                systemName: "sidebar.left",
+                title: "Select a repository",
+                detail: "Choose a repository to view and manage its branches."
+            )
         }
     }
 
@@ -581,8 +616,8 @@ struct TasksPanel: View {
     // MARK: - Fetch
 
     private func fetchIfNeeded() {
-        if subTab == .issues, !hasFetchedIssues { refreshIssues() }
-        if subTab == .prs, !hasFetchedPRs { refreshPRs() }
+        if subTab == .issues { refreshIssues() }
+        if subTab == .prs { refreshPRs() }
     }
 
     private func refresh() {
@@ -595,21 +630,57 @@ struct TasksPanel: View {
         }
     }
 
-    private func refreshIssues() {
-        fetching = true; loadError = nil
-        let repos = connectedRepos; let q = issueQuery
-        Task {
-            let (rows, err) = await fetchIssuesAcrossRepos(repos, query: q)
-            issueRows = rows; loadError = err; fetching = false; hasFetchedIssues = true
+    private func forceRefresh() {
+        switch subTab {
+        case .repos: refresh()
+        case .issues: refreshIssues(force: true)
+        case .prs: refreshPRs(force: true)
         }
     }
 
-    private func refreshPRs() {
-        fetching = true; loadError = nil
+    private func refreshIssues(force: Bool = false) {
+        let repos = connectedRepos; let q = issueQuery
+        let key = taskQueryCacheKey(query: q)
+        if !force, let cached = issueRowsByQuery[key] {
+            issueRows = cached
+            displayedIssueQueryKey = key
+            issueLoadError = nil
+            return
+        }
+        if displayedIssueQueryKey != key { issueRows = [] }
+        displayedIssueQueryKey = key
+        issueLoadError = nil
+        guard fetchingIssueQueryKeys.insert(key).inserted else { return }
+        Task {
+            let (rows, err) = await fetchIssuesAcrossRepos(repos, query: q)
+            if err == nil { issueRowsByQuery[key] = rows }
+            fetchingIssueQueryKeys.remove(key)
+            guard displayedIssueQueryKey == key else { return }
+            issueRows = rows
+            issueLoadError = err
+        }
+    }
+
+    private func refreshPRs(force: Bool = false) {
         let repos = connectedRepos; let q = prQuery
+        let key = taskQueryCacheKey(query: q)
+        if !force, let cached = prRowsByQuery[key] {
+            prRows = cached
+            displayedPRQueryKey = key
+            prLoadError = nil
+            return
+        }
+        if displayedPRQueryKey != key { prRows = [] }
+        displayedPRQueryKey = key
+        prLoadError = nil
+        guard fetchingPRQueryKeys.insert(key).inserted else { return }
         Task {
             let (rows, err) = await fetchPRsAcrossRepos(repos, query: q)
-            prRows = rows; loadError = err; fetching = false; hasFetchedPRs = true
+            if err == nil { prRowsByQuery[key] = rows }
+            fetchingPRQueryKeys.remove(key)
+            guard displayedPRQueryKey == key else { return }
+            prRows = rows
+            prLoadError = err
         }
     }
 
@@ -635,25 +706,26 @@ struct TasksPanel: View {
         Task {
             let result = await startRepoWorkspace(repo, settings: settings)
             busyRowID = nil
-            if case .failure(let err) = result { actionError = err.message }
+            switch result {
+            case .success: refreshSelectedRepoBranches(for: repo)
+            case .failure(let err): actionError = err.message
+            }
         }
     }
 
     private func selectRepo(_ repo: RepoEntry) {
         selectedRepoID = repo.id
         branchSearch = ""
-        if selectedRepoBranchesFetchedFor != repo.id { refreshSelectedRepoBranches(for: repo) }
+        if branchRowsByRepoID[repo.id] == nil { refreshSelectedRepoBranches(for: repo) }
     }
 
     private func refreshSelectedRepoBranches(for explicitRepo: RepoEntry? = nil) {
         guard let repo = explicitRepo ?? selectedRepo else { return }
-        fetchingSelectedRepoBranches = true
+        guard fetchingBranchRepoIDs.insert(repo.id).inserted else { return }
         Task {
             let rows = await fetchBranchesAcrossRepos([repo], settings: settings)
-            guard selectedRepoID == repo.id else { return }
-            selectedRepoBranches = rows
-            selectedRepoBranchesFetchedFor = repo.id
-            fetchingSelectedRepoBranches = false
+            branchRowsByRepoID[repo.id] = rows
+            fetchingBranchRepoIDs.remove(repo.id)
         }
     }
 
@@ -662,7 +734,10 @@ struct TasksPanel: View {
         Task {
             let result = await startBranchWorkspace(row, settings: settings)
             busyRowID = nil
-            if case .failure(let err) = result { actionError = err.message }
+            switch result {
+            case .success: refreshSelectedRepoBranches(for: row.repo)
+            case .failure(let err): actionError = err.message
+            }
         }
     }
 
@@ -671,7 +746,10 @@ struct TasksPanel: View {
         Task {
             let result = await removeBranchWorkspace(row, settings: settings)
             busyRowID = nil
-            if case .failure(let err) = result { actionError = err.message }
+            switch result {
+            case .success: refreshSelectedRepoBranches(for: row.repo)
+            case .failure(let err): actionError = err.message
+            }
         }
     }
 
@@ -681,33 +759,36 @@ struct TasksPanel: View {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, repo.id == selectedRepoID,
               !selectedRepoBranches.contains(where: { $0.name == trimmed }) else { return }
-        selectedRepoBranches.append(BranchRow(repo: repo, name: trimmed, isRemote: false, isLocal: false))
-        selectedRepoBranchesFetchedFor = repo.id
+        branchRowsByRepoID[repo.id, default: []].append(
+            BranchRow(repo: repo, name: trimmed, isRemote: false, isLocal: false)
+        )
     }
 
-    private func submitNewIssue(repo: RepoEntry, title: String, body: String) {
+    private func submitNewIssue(repo: RepoEntry, title: String, body: String) async -> String? {
         let trimmedTitle = title.trimmingCharacters(in: .whitespaces)
-        guard !trimmedTitle.isEmpty else { return }
-        Task {
-            let result = await createIssue(repo: repo, title: trimmedTitle, body: body)
-            switch result {
-            case .success: refreshIssues()
-            case .failure(let err): actionError = err.message
-            }
+        guard !trimmedTitle.isEmpty else { return "Enter an issue title." }
+        switch await createIssue(repo: repo, title: trimmedTitle, body: body) {
+        case .success:
+            issueRowsByQuery.removeAll()
+            refreshIssues(force: true)
+            return nil
+        case .failure(let err):
+            return err.message
         }
     }
 
-    private func submitNewPR(repo: RepoEntry, title: String, head: String, base: String, body: String) {
+    private func submitNewPR(repo: RepoEntry, title: String, head: String, base: String, body: String) async -> String? {
         let trimmedTitle = title.trimmingCharacters(in: .whitespaces)
         let trimmedHead = head.trimmingCharacters(in: .whitespaces)
-        guard !trimmedTitle.isEmpty, !trimmedHead.isEmpty else { return }
+        guard !trimmedTitle.isEmpty, !trimmedHead.isEmpty else { return "Enter a title and source branch." }
         let resolvedBase = base.trimmingCharacters(in: .whitespaces).isEmpty ? repo.defaultBranch : base
-        Task {
-            let result = await createPR(repo: repo, title: trimmedTitle, head: trimmedHead, base: resolvedBase, body: body)
-            switch result {
-            case .success: refreshPRs()
-            case .failure(let err): actionError = err.message
-            }
+        switch await createPR(repo: repo, title: trimmedTitle, head: trimmedHead, base: resolvedBase, body: body) {
+        case .success:
+            prRowsByQuery.removeAll()
+            refreshPRs(force: true)
+            return nil
+        case .failure(let err):
+            return err.message
         }
     }
 
@@ -744,48 +825,55 @@ struct TasksPanel: View {
     }
 
     private func toggleIssueState(_ row: IssueRow, reason: String? = nil) {
-        guard let idx = issueRows.firstIndex(where: { $0.id == row.id }) else { return }
         let closing = row.issue.state == "OPEN"
         Task {
             let result = await setIssueState(row, closed: closing, reason: reason)
             switch result {
-            case .success: issueRows[idx].issue.state = closing ? "CLOSED" : "OPEN"
+            case .success:
+                if let idx = issueRows.firstIndex(where: { $0.id == row.id }) {
+                    issueRows[idx].issue.state = closing ? "CLOSED" : "OPEN"
+                }
+                issueRowsByQuery.removeAll()
             case .failure(let err): actionError = err.message
             }
         }
     }
 
     private func toggleAssignee(_ row: IssueRow, login: String, add: Bool) {
-        guard let idx = issueRows.firstIndex(where: { $0.id == row.id }) else { return }
         Task {
             let result = await setIssueAssignee(row, login: login, add: add)
             switch result {
             case .success:
-                if add {
-                    if !issueRows[idx].issue.assignees.contains(where: { $0.login == login }) {
-                        issueRows[idx].issue.assignees.append(TaskActor(login: login))
+                if let idx = issueRows.firstIndex(where: { $0.id == row.id }) {
+                    if add {
+                        if !issueRows[idx].issue.assignees.contains(where: { $0.login == login }) {
+                            issueRows[idx].issue.assignees.append(TaskActor(login: login))
+                        }
+                    } else {
+                        issueRows[idx].issue.assignees.removeAll { $0.login == login }
                     }
-                } else {
-                    issueRows[idx].issue.assignees.removeAll { $0.login == login }
                 }
+                issueRowsByQuery.removeAll()
             case .failure(let err): actionError = err.message
             }
         }
     }
 
     private func toggleReviewer(_ row: PRRow, login: String, add: Bool) {
-        guard let idx = prRows.firstIndex(where: { $0.id == row.id }) else { return }
         Task {
             let result = await setPRReviewer(row, login: login, add: add)
             switch result {
             case .success:
-                if add {
-                    if !prRows[idx].pr.reviewRequests.contains(where: { $0.login == login }) {
-                        prRows[idx].pr.reviewRequests.append(TaskReviewRequest(login: login, name: nil))
+                if let idx = prRows.firstIndex(where: { $0.id == row.id }) {
+                    if add {
+                        if !prRows[idx].pr.reviewRequests.contains(where: { $0.login == login }) {
+                            prRows[idx].pr.reviewRequests.append(TaskReviewRequest(login: login, name: nil))
+                        }
+                    } else {
+                        prRows[idx].pr.reviewRequests.removeAll { $0.login == login }
                     }
-                } else {
-                    prRows[idx].pr.reviewRequests.removeAll { $0.login == login }
                 }
+                prRowsByQuery.removeAll()
             case .failure(let err): actionError = err.message
             }
         }
@@ -948,6 +1036,46 @@ private struct SkeletonRow: View {
     }
 }
 
+private struct TaskStateView: View {
+    let systemName: String
+    let title: String
+    var detail: String? = nil
+    var isLoading = false
+    var actionTitle: String? = nil
+    var action: (() -> Void)? = nil
+
+    var body: some View {
+        VStack(spacing: 10) {
+            if isLoading {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: systemName)
+                    .font(.system(size: 22))
+                    .foregroundStyle(Color.mgMuted)
+            }
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.mgLabel)
+                .multilineTextAlignment(.center)
+            if let detail {
+                Text(detail)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.mgMuted)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(3)
+            }
+            if let actionTitle, let action {
+                Button(actionTitle, action: action)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .tint(Color.mgAccent)
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 private struct QuickChip: View {
     let title: String
     let isActive: Bool
@@ -968,16 +1096,56 @@ private struct QuickChip: View {
 // The square icon buttons (add / refresh) next to the Repos & Branches search fields.
 private struct ToolbarIconButton: View {
     let systemName: String
+    let label: String
+    var isLoading = false
     let action: () -> Void
     var body: some View {
         Button(action: action) {
-            Image(systemName: systemName).font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.mgLabel)
-                .frame(width: 30, height: 30)
+            Group {
+                if isLoading {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: systemName).font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.mgLabel)
+                }
+            }
+            .frame(width: 30, height: 30)
         }
         .buttonStyle(.plain)
         .background(Color.mgSurface)
         .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.mgBorder))
         .clipShape(RoundedRectangle(cornerRadius: 7))
+        .disabled(isLoading)
+        .help(isLoading ? "\(label)…" : label)
+        .accessibilityLabel(label)
+        .accessibilityValue(isLoading ? "In progress" : "")
+    }
+}
+
+private struct TaskSheetActions: View {
+    let primaryTitle: String
+    let isEnabled: Bool
+    var isWorking = false
+    let onCancel: () -> Void
+    let onSubmit: () -> Void
+
+    var body: some View {
+        HStack {
+            Spacer()
+            Button("Cancel", action: onCancel)
+                .keyboardShortcut(.cancelAction)
+            Button(action: onSubmit) {
+                HStack(spacing: 6) {
+                    if isWorking { ProgressView().controlSize(.mini) }
+                    Text(isWorking ? "\(primaryTitle)…" : primaryTitle)
+                }
+                .frame(minWidth: 58)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color.mgAccent)
+            .keyboardShortcut(.defaultAction)
+            .disabled(!isEnabled || isWorking)
+        }
+        .controlSize(.regular)
     }
 }
 
@@ -1020,9 +1188,15 @@ private struct AddRepoSheet: View {
             .background(Color.mgSurface).clipShape(RoundedRectangle(cornerRadius: 6))
 
             if isFetching && listings.isEmpty {
-                ProgressView().frame(maxWidth: .infinity).padding(20)
+                TaskStateView(systemName: "arrow.clockwise", title: "Loading GitHub repositories…", isLoading: true)
+                    .frame(height: 180)
             } else if filtered.isEmpty {
-                Text("No matching repos").font(.system(size: 12)).foregroundStyle(Color.mgMuted).padding(20)
+                TaskStateView(
+                    systemName: "folder",
+                    title: listings.isEmpty ? "No repositories found" : "No matching repositories",
+                    detail: listings.isEmpty ? "Check GitHub authentication and refresh." : "Try a different search."
+                )
+                .frame(height: 180)
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 2) {
@@ -1067,21 +1241,12 @@ private struct AddBranchSheet: View {
             TextField("Branch name", text: $branchName)
                 .textFieldStyle(.roundedBorder)
 
-            HStack {
-                Spacer()
-                Button("Cancel") { isPresented = false }
-                    .buttonStyle(.plain).foregroundStyle(Color.mgMuted)
-                    .padding(.horizontal, 14).padding(.vertical, 8)
-                Button("Add") {
+            TaskSheetActions(primaryTitle: "Add", isEnabled: !trimmedName.isEmpty, onCancel: {
+                isPresented = false
+            }, onSubmit: {
                     onAdd(branchName)
                     isPresented = false
-                }
-                .buttonStyle(.plain).foregroundStyle(.black)
-                .padding(.horizontal, 14).padding(.vertical, 8)
-                .background(trimmedName.isEmpty ? Color.mgMuted : Color.mgAccent)
-                .clipShape(RoundedRectangle(cornerRadius: 7))
-                .disabled(trimmedName.isEmpty)
-            }
+            })
         }
         .padding(28).frame(width: 360).background(Color.mgBg)
     }
@@ -1090,11 +1255,13 @@ private struct AddBranchSheet: View {
 private struct AddIssueSheet: View {
     let repos: [RepoEntry]
     @Binding var isPresented: Bool
-    let onAdd: (RepoEntry, String, String) -> Void
+    let onAdd: (RepoEntry, String, String) async -> String?
 
     @State private var selectedRepoID: String?
     @State private var title = ""
     @State private var issueBody = ""
+    @State private var isSubmitting = false
+    @State private var submitError: String?
 
     private var selectedRepo: RepoEntry? { repos.first { $0.id == selectedRepoID } }
     private var canSubmit: Bool { selectedRepo != nil && !title.trimmingCharacters(in: .whitespaces).isEmpty }
@@ -1113,37 +1280,44 @@ private struct AddIssueSheet: View {
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(3...6)
 
-            HStack {
-                Spacer()
-                Button("Cancel") { isPresented = false }
-                    .buttonStyle(.plain).foregroundStyle(Color.mgMuted)
-                    .padding(.horizontal, 14).padding(.vertical, 8)
-                Button("Create") {
-                    if let repo = selectedRepo { onAdd(repo, title, issueBody) }
-                    isPresented = false
-                }
-                .buttonStyle(.plain).foregroundStyle(.black)
-                .padding(.horizontal, 14).padding(.vertical, 8)
-                .background(canSubmit ? Color.mgAccent : Color.mgMuted)
-                .clipShape(RoundedRectangle(cornerRadius: 7))
-                .disabled(!canSubmit)
+            if let submitError {
+                Label(submitError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.red)
+                    .accessibilityLabel("Couldn’t create issue: \(submitError)")
             }
+            TaskSheetActions(primaryTitle: "Create", isEnabled: canSubmit, isWorking: isSubmitting, onCancel: {
+                isPresented = false
+            }, onSubmit: submit)
         }
         .padding(28).frame(width: 400).background(Color.mgBg)
         .onAppear { if selectedRepoID == nil { selectedRepoID = repos.first?.id } }
+    }
+
+    private func submit() {
+        guard let repo = selectedRepo else { return }
+        isSubmitting = true
+        submitError = nil
+        Task {
+            submitError = await onAdd(repo, title, issueBody)
+            isSubmitting = false
+            if submitError == nil { isPresented = false }
+        }
     }
 }
 
 private struct AddPRSheet: View {
     let repos: [RepoEntry]
     @Binding var isPresented: Bool
-    let onAdd: (RepoEntry, String, String, String, String) -> Void  // repo, title, head, base, body
+    let onAdd: (RepoEntry, String, String, String, String) async -> String?  // repo, title, head, base, body
 
     @State private var selectedRepoID: String?
     @State private var title = ""
     @State private var head = ""
     @State private var base = ""
     @State private var prBody = ""
+    @State private var isSubmitting = false
+    @State private var submitError: String?
 
     private var selectedRepo: RepoEntry? { repos.first { $0.id == selectedRepoID } }
     private var canSubmit: Bool {
@@ -1171,26 +1345,31 @@ private struct AddPRSheet: View {
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(3...6)
 
-            HStack {
-                Spacer()
-                Button("Cancel") { isPresented = false }
-                    .buttonStyle(.plain).foregroundStyle(Color.mgMuted)
-                    .padding(.horizontal, 14).padding(.vertical, 8)
-                Button("Create") {
-                    if let repo = selectedRepo { onAdd(repo, title, head, base, prBody) }
-                    isPresented = false
-                }
-                .buttonStyle(.plain).foregroundStyle(.black)
-                .padding(.horizontal, 14).padding(.vertical, 8)
-                .background(canSubmit ? Color.mgAccent : Color.mgMuted)
-                .clipShape(RoundedRectangle(cornerRadius: 7))
-                .disabled(!canSubmit)
+            if let submitError {
+                Label(submitError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.red)
+                    .accessibilityLabel("Couldn’t create pull request: \(submitError)")
             }
+            TaskSheetActions(primaryTitle: "Create", isEnabled: canSubmit, isWorking: isSubmitting, onCancel: {
+                isPresented = false
+            }, onSubmit: submit)
         }
         .padding(28).frame(width: 420).background(Color.mgBg)
         .onAppear {
             if selectedRepoID == nil { selectedRepoID = repos.first?.id }
             if base.isEmpty { base = selectedRepo?.defaultBranch ?? "" }
+        }
+    }
+
+    private func submit() {
+        guard let repo = selectedRepo else { return }
+        isSubmitting = true
+        submitError = nil
+        Task {
+            submitError = await onAdd(repo, title, head, base, prBody)
+            isSubmitting = false
+            if submitError == nil { isPresented = false }
         }
     }
 }
