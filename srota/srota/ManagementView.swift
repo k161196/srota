@@ -11,17 +11,15 @@ extension Notification.Name {
 // MARK: - Top-level tab enum
 
 enum ManagementTab: String, CaseIterable {
-    case tasks           = "Tasks"
+    case tasks           = "Flow"
     case workspaces      = "Workspaces"
     case agents          = "Agents"
-    case githubProjects  = "Projects"
 
     var icon: String {
         switch self {
         case .tasks:          return "checklist"
         case .workspaces:     return "terminal"
         case .agents:         return "bolt.fill"
-        case .githubProjects: return "folder"
         }
     }
 }
@@ -204,7 +202,6 @@ struct ManagementPanel: View {
         case .tasks:          TasksPanel()
         case .workspaces:     EmptyView()  // handled by ContentView
         case .agents:         AgentsPanel()
-        case .githubProjects: GitHubProjectsPanel()
         }
     }
 }
