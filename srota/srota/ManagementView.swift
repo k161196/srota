@@ -206,58 +206,21 @@ struct ManagementPanel: View {
     }
 }
 
-// MARK: - Agents panel (split view: daemon-tracked agents on the left, an attached live terminal on the right)
+// MARK: - Agents panel (multiple agents open side by side, evenly tiled)
 
-// Even 50/50 splits only — no per-split resize fraction. "Add to split" always splits the
-// currently-focused leaf's slot in the chosen direction; minimizing a leaf collapses its slot
-// back into its sibling, and collapsing to a single leaf drops `splitRoot` to nil entirely so
-// AgentsPanel falls back to the plain single-`detail` path instead of a 1-leaf tree.
-private enum AgentSplitNode {
-    case leaf(String)
-    indirect case split(Axis, AgentSplitNode, AgentSplitNode)
-
-    var containedStableIDs: Set<String> {
-        switch self {
-        case .leaf(let id): return [id]
-        case .split(_, let a, let b): return a.containedStableIDs.union(b.containedStableIDs)
-        }
-    }
-
-    func replacingLeaf(_ target: String, addingInDirection axis: Axis, newID: String) -> AgentSplitNode {
-        switch self {
-        case .leaf(let id):
-            return id == target ? .split(axis, .leaf(id), .leaf(newID)) : self
-        case .split(let a, let first, let second):
-            return .split(a, first.replacingLeaf(target, addingInDirection: axis, newID: newID),
-                           second.replacingLeaf(target, addingInDirection: axis, newID: newID))
-        }
-    }
-
-    // Swaps which agent occupies a leaf's slot without changing the tree shape — this is how
-    // plain (left-)clicking a non-split agent "switches" the focused pane instead of adding one.
-    func replacingLeafID(_ target: String, with newID: String) -> AgentSplitNode {
-        switch self {
-        case .leaf(let id):
-            return id == target ? .leaf(newID) : self
-        case .split(let axis, let first, let second):
-            return .split(axis, first.replacingLeafID(target, with: newID), second.replacingLeafID(target, with: newID))
-        }
-    }
-
-    // nil means the whole tree became empty (only relevant when called on a lone `.leaf`).
-    func removingLeaf(_ target: String) -> AgentSplitNode? {
-        switch self {
-        case .leaf(let id):
-            return id == target ? nil : self
-        case .split(let axis, let first, let second):
-            switch (first.removingLeaf(target), second.removingLeaf(target)) {
-            case (nil, nil): return nil
-            case (nil, let s?): return s
-            case (let f?, nil): return f
-            case (let f?, let s?): return .split(axis, f, s)
-            }
-        }
-    }
+// A "region" is an ordered group of 1+ agents evenly tiled together in one direction. A lone open
+// agent is simply a region with a single member — there's no separate "standalone" case, which is
+// what lets a freshly-opened agent and a multi-agent split share one attach/render/minimize path
+// instead of two parallel mechanisms (that duplication was the root cause of earlier bugs, e.g. a
+// blank pane when moving an attachment between the single-view and split-view code paths).
+//
+// Multiple regions can be open at once (e.g. a lone agent next to a 3-way split); AgentsPanel tiles
+// all open regions evenly side by side. Within a region, "Add to split" has no cap — a region can
+// grow to any number of members, always evenly divided in whichever direction it was first split.
+private struct AgentRegion: Identifiable {
+    let id: UUID
+    var direction: Axis
+    var memberIDs: [String]
 }
 
 private struct DaemonAgentRow: Identifiable {
@@ -285,12 +248,10 @@ private struct AgentsPanel: View {
 
     @State private var allPanes: [PTYInfo] = []
     @State private var showAllProcesses = false
-    @State private var selectedStableID: String?
-    @State private var attachment: AgentAttachment?
     @State private var listWidth: CGFloat = 280
     @State private var listVisible = true
-    @State private var splitRoot: AgentSplitNode?
-    @State private var focusedSplitStableID: String?
+    @State private var regions: [AgentRegion] = []
+    @State private var focusedStableID: String?
     @State private var attachments: [String: AgentAttachment] = [:]
 
     private var rows: [DaemonAgentRow] {
@@ -330,102 +291,115 @@ private struct AgentsPanel: View {
         })
     }
 
-    private var selectedRow: DaemonAgentRow? { rows.first { $0.stableID == selectedStableID } }
+    private func regionIndex(containing stableID: String) -> Int? {
+        regions.firstIndex { $0.memberIDs.contains(stableID) }
+    }
+
+    // The region/member that "Add to split" and plain-click "switch" both target when nothing more
+    // specific is focused: the focused agent's own region if it's still open, else the last region.
+    private func fallbackTargetID() -> String? {
+        if let focusedStableID, regionIndex(containing: focusedStableID) != nil { return focusedStableID }
+        return regions.last?.memberIDs.last
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Rectangle().fill(Color.mgBorder).frame(height: 1)
             HStack(spacing: 0) {
-                VStack(spacing: 0) {
-                    if rows.isEmpty {
-                        Spacer()
-                        Text(showAllProcesses ? "No terminals running" : "No agents running")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Color.mgMuted)
-                        Spacer()
-                    } else {
-                        ScrollView {
-                            VStack(spacing: 2) {
-                                ForEach(rows) { row in
-                                    DaemonAgentRowView(
-                                        row: row,
-                                        isSelected: splitRoot != nil ? row.stableID == focusedSplitStableID : row.stableID == selectedStableID,
-                                        // Disables "Add to split" not just for agents already inside an
-                                        // active split, but also for the lone agent currently shown via
-                                        // the plain single-detail view — otherwise right-clicking it
-                                        // wraps that same agent in a redundant, confusing one-pane split.
-                                        isInSplit: splitRoot != nil
-                                            ? splitRoot!.containedStableIDs.contains(row.stableID)
-                                            : row.stableID == selectedStableID,
-                                        onSelect: { selectOrSwitch(to: row) },
-                                        onAddToSplit: { direction in addToSplit(row, direction: direction) }
-                                    )
-                                }
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.top, 8)
-                        }
-                    }
-                }
-                .frame(width: listVisible ? listWidth : 0, alignment: .leading)
-                .clipped()
-                .allowsHitTesting(listVisible)
+                listColumn
+                    .frame(width: listVisible ? listWidth : 0, alignment: .leading)
+                    .clipped()
+                    .allowsHitTesting(listVisible)
 
                 SidebarDivider(sidebarVisible: listVisible, width: $listWidth)
 
-                Group {
-                    if let splitRoot {
-                        AgentSplitTreeView(node: splitRoot) { AnyView(splitPane(for: $0)) }
-                    } else {
-                        detail
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .animation(.spring(duration: 0.22, bounce: 0.0), value: listVisible)
         .onAppear { refresh() }
-        .onChange(of: focusedSplitStableID) { _, newID in
+        .onChange(of: focusedStableID) { _, newID in
             if let newID, let attach = attachments[newID] { focusTerminalSurface(for: attach.viewState) }
         }
         .onChange(of: daemon.agentStatesByStableID.count) { _, _ in refresh() }
-        .onChange(of: rows.map(\.stableID)) { _, ids in
-            guard selectedStableID == nil || !ids.contains(selectedStableID!) else { return }
-            selectedStableID = rows.first?.stableID
-            attachment = nil
-        }
     }
 
     @ViewBuilder
-    private var detail: some View {
-        if let row = selectedRow {
-            if let attachment, attachment.stableID == row.stableID {
-                // Without this, SwiftUI treats consecutive attachments as the SAME view identity
-                // (same type/position in the tree) and reuses the underlying NSView + its
-                // long-lived TerminalSurfaceCoordinator across agent switches, just calling
-                // updateNSView with the new context — reconfiguring one live coordinator from
-                // agent A's session straight to agent B's. tearDownSurface then reads
-                // `configuration.inMemorySession` AFTER it's already been overwritten by B's
-                // config, so it gates the free against the wrong (empty) session, skips its
-                // safety wait, and frees the surface while A's session can still be mid-write
-                // (the os_unfair_lock corruption crash). Forcing a new identity per attachment
-                // makes SwiftUI dismantle the old NSView and build a fresh one per agent, so each
-                // coordinator only ever owns one session for its whole lifetime.
-                TerminalSurfaceView(context: attachment.viewState)
-                    .id(attachment.token)
-            } else if claimedElsewhereStableIDs.contains(row.stableID) {
-                PaneStartOverlay(cwd: row.cwd, label: "Use Here") { attach(row) }
-            } else {
-                Color.clear.id(row.stableID).onAppear { attach(row) }
+    private var listColumn: some View {
+        if rows.isEmpty {
+            VStack(spacing: 0) {
+                Spacer()
+                Text(showAllProcesses ? "No terminals running" : "No agents running")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.mgMuted)
+                Spacer()
             }
         } else {
+            ScrollView {
+                VStack(spacing: 6) {
+                    // Grouped regions (2+ members) render as a bordered cluster so it's clear which
+                    // agents are split together; a lone-member region is just a plain row below —
+                    // nothing to visually group a single agent with.
+                    ForEach(regions.filter { $0.memberIDs.count > 1 }) { region in
+                        VStack(spacing: 2) {
+                            ForEach(region.memberIDs.compactMap { id in rows.first { $0.stableID == id } }) { row in
+                                rowView(for: row)
+                            }
+                        }
+                        .padding(4)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.mgAccent.opacity(0.08)))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.mgAccent.opacity(0.3), lineWidth: 1))
+                    }
+                    let groupedIDs = Set(regions.filter { $0.memberIDs.count > 1 }.flatMap(\.memberIDs))
+                    VStack(spacing: 2) {
+                        ForEach(rows.filter { !groupedIDs.contains($0.stableID) }) { row in
+                            rowView(for: row)
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+            }
+        }
+    }
+
+    private func rowView(for row: DaemonAgentRow) -> some View {
+        DaemonAgentRowView(
+            row: row,
+            isSelected: row.stableID == focusedStableID,
+            // Disables "Add to split" for any agent that's already open somewhere — whether it's
+            // one member of a multi-agent region or the sole member of a lone-agent region — since
+            // adding an already-open agent again doesn't mean anything.
+            isInSplit: regionIndex(containing: row.stableID) != nil,
+            onSelect: { selectOrSwitch(to: row) },
+            onAddToSplit: { direction in addToSplit(row, direction: direction) }
+        )
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if regions.isEmpty {
             VStack {
                 Spacer()
                 Text("Select an agent")
                     .font(.system(size: 13))
                     .foregroundStyle(Color.mgMuted)
                 Spacer()
+            }
+        } else {
+            // All open regions (lone agents and multi-agent splits alike) are tiled evenly side by
+            // side — this is the same "auto-tile evenly" rule AgentGroupView applies *within* a
+            // region, just one level up, across regions.
+            HStack(spacing: 0) {
+                ForEach(Array(regions.enumerated()), id: \.element.id) { index, region in
+                    AgentGroupView(ids: region.memberIDs, direction: region.direction) { AnyView(agentPane(for: $0)) }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if index < regions.count - 1 {
+                        Rectangle().fill(Color.mgBorder).frame(width: 1)
+                    }
+                }
             }
         }
     }
@@ -478,98 +452,78 @@ private struct AgentsPanel: View {
         }
     }
 
-    private func attach(_ row: DaemonAgentRow) {
-        let token = UUID()
-        let attachmentBinding = $attachment
-        attachment = AgentAttachment(stableID: row.stableID, cwd: row.cwd, colorScheme: colorScheme, daemon: daemon, token: token) {
-            // Only clear if `attachment` is still THIS instance — re-selecting a previously-viewed
-            // agent steals from its own stale claim, and that old callback fires async afterward;
-            // without this check it would wipe out the brand-new attachment it just raced against.
-            if attachmentBinding.wrappedValue?.token == token {
-                attachmentBinding.wrappedValue = nil
-            }
-        }
-    }
-
-    // MARK: - Split view (multiple agents side by side)
-
-    // Plain click on a row: if it's already showing in the split, just focus that pane. Otherwise,
-    // while a split is active, "select" means switch the focused pane's agent to this one (there's
-    // no separate single-detail view visible to fall back to once any split exists). Only when no
-    // split is active at all does this touch the old single-detail `selectedStableID`/`attachment`.
+    // Plain click on a row: if it's already open somewhere, just focus that pane. Otherwise it
+    // "switches" — replaces whatever agent currently occupies the target slot — rather than opening
+    // a new region; opening a new region alongside what's already there is what "Add to split" (the
+    // right-click menu) is for.
     private func selectOrSwitch(to row: DaemonAgentRow) {
-        guard let root = splitRoot else {
-            selectedStableID = row.stableID
-            attachment = nil
+        if regionIndex(containing: row.stableID) != nil {
+            focusedStableID = row.stableID
             return
         }
-        if root.containedStableIDs.contains(row.stableID) {
-            focusedSplitStableID = row.stableID
+        guard let targetID = fallbackTargetID(), let idx = regionIndex(containing: targetID) else {
+            // Nothing open at all yet.
+            regions.append(AgentRegion(id: UUID(), direction: .horizontal, memberIDs: [row.stableID]))
+            focusedStableID = row.stableID
             return
         }
-        let target = focusedSplitStableID.flatMap { root.containedStableIDs.contains($0) ? $0 : nil }
-            ?? root.containedStableIDs.first
-        guard let target else { return }
-        attachments[target] = nil
-        splitRoot = root.replacingLeafID(target, with: row.stableID)
-        focusedSplitStableID = row.stableID
+        attachments[targetID] = nil
+        regions[idx].memberIDs = regions[idx].memberIDs.map { $0 == targetID ? row.stableID : $0 }
+        focusedStableID = row.stableID
     }
 
+    // No cap: adding to an already-multi-member region always grows that SAME region (evenly
+    // re-tiling all its members), never nests or replaces. The chosen direction only matters the
+    // first time a lone agent becomes a real split — an existing multi-member region keeps its
+    // original direction regardless of which menu item was used to grow it further.
     private func addToSplit(_ row: DaemonAgentRow, direction: Axis) {
-        guard splitRoot?.containedStableIDs.contains(row.stableID) != true else { return }
-        if let root = splitRoot {
-            let target = focusedSplitStableID.flatMap { root.containedStableIDs.contains($0) ? $0 : nil }
-                ?? root.containedStableIDs.first
-            guard let target else { return }
-            splitRoot = root.replacingLeaf(target, addingInDirection: direction, newID: row.stableID)
-        } else if let current = selectedStableID {
-            // Same agent as the one already shown alone — nothing to split, so no-op instead of
-            // wrapping it in a redundant one-pane split (the menu item is disabled for this case
-            // too, but guard here as well rather than relying solely on the UI).
-            guard current != row.stableID else { return }
-            // Drop the old single-detail attachment rather than moving it into `attachments` —
-            // moving the SAME AgentAttachment into splitPane's view-tree position doesn't actually
-            // preserve its terminal surface (SwiftUI still builds a new NSView there since the
-            // structural position changed), so it just showed a blank pane with no daemon replay.
-            // Letting splitPane's own onAppear→attachSplit path create a fresh attachment (like
-            // re-selecting an agent already does) is simpler and actually renders content. The
-            // daemon's existing steal/onStolen handshake resolves the brief dual ownership safely.
-            attachment = nil
-            splitRoot = .split(direction, .leaf(current), .leaf(row.stableID))
-        } else {
-            splitRoot = .leaf(row.stableID)
+        guard regionIndex(containing: row.stableID) == nil else { return }
+        guard let targetID = fallbackTargetID(), let idx = regionIndex(containing: targetID) else {
+            // Nothing open yet — right-clicking "Add to split" directly opens this as the first region.
+            regions.append(AgentRegion(id: UUID(), direction: direction, memberIDs: [row.stableID]))
+            focusedStableID = row.stableID
+            return
         }
-        focusedSplitStableID = row.stableID
+        if regions[idx].memberIDs.count == 1 {
+            regions[idx].direction = direction
+        }
+        regions[idx].memberIDs.append(row.stableID)
+        focusedStableID = row.stableID
     }
 
-    private func minimizeFromSplit(_ stableID: String) {
+    private func minimizeFromRegion(_ stableID: String) {
         attachments[stableID] = nil
-        guard let root = splitRoot else { return }
-        let updated = root.removingLeaf(stableID)
-        splitRoot = updated
-        if focusedSplitStableID == stableID { focusedSplitStableID = updated?.containedStableIDs.first }
+        guard let idx = regionIndex(containing: stableID) else { return }
+        regions[idx].memberIDs.removeAll { $0 == stableID }
+        if regions[idx].memberIDs.isEmpty {
+            regions.remove(at: idx)
+        }
+        if focusedStableID == stableID {
+            focusedStableID = regions.first?.memberIDs.first
+        }
     }
 
-    private func attachSplit(_ row: DaemonAgentRow) {
+    private func attachToRegion(_ row: DaemonAgentRow) {
         let token = UUID()
         let stableID = row.stableID
         let attachmentsBinding = $attachments
         attachmentsBinding.wrappedValue[stableID] = AgentAttachment(
             stableID: stableID, cwd: row.cwd, colorScheme: colorScheme, daemon: daemon, token: token
         ) {
-            // Same re-entrancy guard as `attach(_:)`'s onStolen — only clear if still this instance.
+            // Only clear if this dict entry is still THIS instance — re-attaching from a fresh
+            // steal races this old callback, and it fires async after the new one already landed.
             if attachmentsBinding.wrappedValue[stableID]?.token == token {
                 attachmentsBinding.wrappedValue[stableID] = nil
             }
         }
         // Focus was already requested (e.g. by addToSplit) before this attachment existed to focus.
-        if focusedSplitStableID == stableID, let attach = attachmentsBinding.wrappedValue[stableID] {
+        if focusedStableID == stableID, let attach = attachmentsBinding.wrappedValue[stableID] {
             focusTerminalSurface(for: attach.viewState)
         }
     }
 
     @ViewBuilder
-    private func splitPane(for stableID: String) -> some View {
+    private func agentPane(for stableID: String) -> some View {
         let row = rows.first { $0.stableID == stableID }
         // Header as an .overlay ON TOP of the content, not stacked before it in a plain VStack —
         // mirrors TerminalContentView.paneView exactly. TerminalSurfaceView is AppKit-backed and can
@@ -582,32 +536,32 @@ private struct AgentsPanel: View {
                     TerminalSurfaceView(context: attach.viewState)
                         .id(attach.token)
                 } else if claimedElsewhereStableIDs.contains(stableID) {
-                    PaneStartOverlay(cwd: row.cwd, label: "Use Here") { attachSplit(row) }
+                    PaneStartOverlay(cwd: row.cwd, label: "Use Here") { attachToRegion(row) }
                 } else {
-                    Color.clear.onAppear { attachSplit(row) }
+                    Color.clear.onAppear { attachToRegion(row) }
                 }
             } else {
                 // Row disappeared (e.g. the agent's process exited) — nothing left to show.
-                Color.clear.onAppear { minimizeFromSplit(stableID) }
+                Color.clear.onAppear { minimizeFromRegion(stableID) }
             }
         }
         .padding(.top, 29)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .top) {
             VStack(spacing: 0) {
-                splitPaneHeader(stableID: stableID, row: row)
+                agentPaneHeader(stableID: stableID, row: row)
                 Rectangle().fill(Color.mgBorder).frame(height: 1)
             }
         }
         // Covers the terminal content area too, not just the header — clicking into the terminal
         // to type should also move the focus highlight, matching workspace panes' own behavior
         // (TerminalContentView.paneView attaches its equivalent gesture over the whole pane).
-        .simultaneousGesture(TapGesture().onEnded { focusedSplitStableID = stableID })
+        .simultaneousGesture(TapGesture().onEnded { focusedStableID = stableID })
     }
 
     @ViewBuilder
-    private func splitPaneHeader(stableID: String, row: DaemonAgentRow?) -> some View {
-        let focused = focusedSplitStableID == stableID
+    private func agentPaneHeader(stableID: String, row: DaemonAgentRow?) -> some View {
+        let focused = focusedStableID == stableID
         ZStack(alignment: .bottom) {
             HStack(spacing: 6) {
                 Text(row?.title ?? stableID)
@@ -618,7 +572,7 @@ private struct AgentsPanel: View {
                     AgentStatusBadge(status: status)
                 }
                 Spacer(minLength: 0)
-                Button { minimizeFromSplit(stableID) } label: {
+                Button { minimizeFromRegion(stableID) } label: {
                     Image(systemName: "minus")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(Color.mgMuted)
@@ -642,56 +596,53 @@ private struct AgentsPanel: View {
     }
 }
 
-// Recursive on purpose: each `.split` level is its own view instance with its own local `width`
-// state (exactly like ResizableSidebar owns its width) — no fraction lives in AgentSplitNode
-// itself, so resizing one split doesn't re-render sibling splits elsewhere in the tree. Reuses
-// SidebarDivider/SidebarResizeLogic (the same mechanism the app sidebar resizes with) rather than
-// inventing a second drag-resize implementation.
-private struct AgentSplitTreeView: View {
-    let node: AgentSplitNode
+// A region's members are always evenly tiled in one direction — no manual per-member resize
+// fraction is stored, so adding/removing a member re-tiles everyone else automatically. All but the
+// last member get an explicit measured size (defaulting to 1/N of the available space until
+// dragged); the last member is flexible and soaks up whatever's left, exactly like the app sidebar's
+// own fixed-width-plus-flexible-remainder pattern, generalized from one divider to N-1.
+private struct AgentGroupView: View {
+    let ids: [String]
+    let direction: Axis
     let renderLeaf: (String) -> AnyView
-    // nil until the user actually drags — defaults to 50% of whatever space is currently
-    // available (measured below) instead of a fixed guess, and locks to an explicit value once set.
-    @State private var size: CGFloat?
+    @State private var sizes: [String: CGFloat] = [:]
 
     var body: some View {
-        switch node {
-        case .leaf(let stableID):
-            renderLeaf(stableID)
-        case .split(let axis, let first, let second):
-            GeometryReader { geo in
-                let total = axis == .horizontal ? geo.size.width : geo.size.height
-                let resolvedSize = size ?? total / 2
-                let sizeBinding = Binding(get: { resolvedSize }, set: { size = $0 })
-                if axis == .horizontal {
-                    HStack(spacing: 0) {
-                        AgentSplitTreeView(node: first, renderLeaf: renderLeaf)
-                            .frame(width: resolvedSize)
-                        // No maxWidth cap: unlike the app sidebar, a split pane's sibling is
-                        // flexible (maxWidth: .infinity), so it should be draggable up to most of
-                        // the available space, not the sidebar's fixed 500pt ceiling.
-                        SidebarDivider(sidebarVisible: true, width: sizeBinding, axis: .horizontal, maxWidth: .greatestFiniteMagnitude)
-                        AgentSplitTreeView(node: second, renderLeaf: renderLeaf)
-                            .frame(maxWidth: .infinity)
-                    }
-                } else {
-                    VStack(spacing: 0) {
-                        AgentSplitTreeView(node: first, renderLeaf: renderLeaf)
-                            .frame(height: resolvedSize)
-                        SidebarDivider(sidebarVisible: true, width: sizeBinding, axis: .vertical, maxWidth: .greatestFiniteMagnitude)
-                        AgentSplitTreeView(node: second, renderLeaf: renderLeaf)
-                            .frame(maxHeight: .infinity)
-                    }
+        GeometryReader { geo in
+            let total = direction == .horizontal ? geo.size.width : geo.size.height
+            let evenShare = ids.isEmpty ? 0 : total / CGFloat(ids.count)
+            let stack = ForEach(Array(ids.enumerated()), id: \.element) { index, id in
+                let isLast = index == ids.count - 1
+                renderLeaf(id)
+                    .frame(
+                        width: direction == .horizontal && !isLast ? (sizes[id] ?? evenShare) : nil,
+                        height: direction == .vertical && !isLast ? (sizes[id] ?? evenShare) : nil
+                    )
+                    .frame(
+                        maxWidth: direction == .horizontal && isLast ? .infinity : nil,
+                        maxHeight: direction == .vertical && isLast ? .infinity : nil
+                    )
+                if !isLast {
+                    SidebarDivider(
+                        sidebarVisible: true,
+                        width: Binding(get: { sizes[id] ?? evenShare }, set: { sizes[id] = $0 }),
+                        axis: direction, maxWidth: .greatestFiniteMagnitude
+                    )
                 }
+            }
+            if direction == .horizontal {
+                HStack(spacing: 0) { stack }
+            } else {
+                VStack(spacing: 0) { stack }
             }
         }
     }
 }
 
 // Mirrors TerminalTab's own pane-attach pattern exactly — this is just another consumer of
-// spawnOrAttach, not a separate "secondary" mechanism. Switching the Agents-tab selection away
-// drops this instance (see `attachment = nil` above), which deallocates `viewState` and tears
-// down its terminal surface synchronously on the main thread. `deinit` calls `detachViewer` first
+// spawnOrAttach, not a separate "secondary" mechanism. Removing an entry from `attachments` (e.g.
+// minimizing that pane) drops this instance, which deallocates `viewState` and tears down its
+// terminal surface synchronously on the main thread. `deinit` calls `detachViewer` first
 // so the daemon stops routing background PTY output into a surface that's mid-teardown — without
 // it, a background write can race the surface's deallocation and corrupt its internal lock (crash:
 // "os_unfair_lock is corrupt" in Termio.processOutput vs. drawFrame).
