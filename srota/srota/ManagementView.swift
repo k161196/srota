@@ -396,18 +396,22 @@ private struct AgentsPanel: View {
 }
 
 // Mirrors TerminalTab's own pane-attach pattern exactly — this is just another consumer of
-// spawnOrAttach, not a separate "secondary" mechanism. Note: switching the Agents-tab selection
-// away doesn't currently release this claim (no explicit detach primitive exists yet), so the
-// underlying PTY keeps streaming to this now-unviewed session until something else steals it —
-// harmless (no corruption), just an unclaimed background listener.
+// spawnOrAttach, not a separate "secondary" mechanism. Switching the Agents-tab selection away
+// drops this instance (see `attachment = nil` above), which deallocates `viewState` and tears
+// down its terminal surface synchronously on the main thread. `deinit` calls `detachViewer` first
+// so the daemon stops routing background PTY output into a surface that's mid-teardown — without
+// it, a background write can race the surface's deallocation and corrupt its internal lock (crash:
+// "os_unfair_lock is corrupt" in Termio.processOutput vs. drawFrame).
 private final class AgentAttachment {
     let stableID: String
     let token: UUID
     let viewState: TerminalViewState
+    private weak var daemon: DaemonConnection?
 
     init(stableID: String, cwd: String, colorScheme: ColorScheme, daemon: DaemonConnection, token: UUID, onStolen: @escaping () -> Void) {
         self.stableID = stableID
         self.token = token
+        self.daemon = daemon
         let state = TerminalViewState(terminalConfiguration: TerminalConfiguration())
         let ref = DaemonPaneRef()
         let session = InMemoryTerminalSession(
@@ -431,6 +435,10 @@ private final class AgentAttachment {
             stableID: stableID, cwd: cwd.isEmpty ? NSHomeDirectory() : cwd, env: [:],
             session: session, into: ref, onStolen: onStolen
         )
+    }
+
+    deinit {
+        daemon?.detachViewer(stableID: stableID)
     }
 }
 

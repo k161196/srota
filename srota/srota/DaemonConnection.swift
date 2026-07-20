@@ -490,6 +490,19 @@ final class DaemonConnection {
         }
     }
 
+    /// Severs a viewer's live-output routing without closing the underlying PTY. Call this the
+    /// moment a viewer (e.g. an Agents-tab attachment) is about to give up its terminal surface —
+    /// otherwise the daemon keeps delivering "live"/"ring_buffer" frames into a surface that's
+    /// concurrently being torn down on the main thread, corrupting the ghostty surface's lock.
+    /// The PTY itself keeps running; re-attaching later (spawnOrAttach) resumes it via ring-buffer replay.
+    nonisolated func detachViewer(stableID: String) {
+        stateLock.withLock {
+            if let paneID = managedSessions[stableID]?.paneID {
+                sessionsByPaneID.removeValue(forKey: paneID)
+            }
+        }
+    }
+
     func closeSession(stableID: String, paneID: String? = nil) {
         onPaneClosed?(stableID)
         let shouldRestore = stateLock.withLock { () -> Bool in
