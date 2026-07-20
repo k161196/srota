@@ -201,8 +201,12 @@ struct TasksPanel: View {
         }
         .sheet(isPresented: $showAddBranch) {
             if let repo = selectedRepo {
-                AddBranchSheet(repo: repo, isPresented: $showAddBranch) { name in
-                    addBranch(repo: repo, name: name)
+                AddBranchSheet(
+                    repo: repo,
+                    availableBases: availableBaseBranches(for: repo),
+                    isPresented: $showAddBranch
+                ) { name, base in
+                    createBranch(repo: repo, name: name, baseBranch: base)
                 }
             }
         }
@@ -767,10 +771,17 @@ struct TasksPanel: View {
         }
     }
 
+    // Rows shown in the list always come from real git data (ls-remote/branch --local), so the
+    // base branch is only ever relevant for a brand-new branch, and that's chosen up front in
+    // AddBranchSheet (see createBranch) rather than asked for here.
     private func startBranch(_ row: BranchRow) {
+        runStartBranch(row, baseBranch: nil)
+    }
+
+    private func runStartBranch(_ row: BranchRow, baseBranch: String?) {
         busyRowID = row.id
         Task {
-            let result = await startBranchWorkspace(row, settings: settings)
+            let result = await startBranchWorkspace(row, settings: settings, baseBranch: baseBranch)
             busyRowID = nil
             switch result {
             case .success: refreshSelectedRepoBranches(for: row.repo)
@@ -791,15 +802,25 @@ struct TasksPanel: View {
         }
     }
 
-    // Adds a not-yet-existing branch name to the selected repo's list — neither remote nor local,
-    // so startBranchWorkspace creates it fresh (off the default branch) the first time it's opened.
-    private func addBranch(repo: RepoEntry, name: String) {
+    // Every known branch name for the repo, default branch first — offered as the mandatory base
+    // picker in AddBranchSheet even before "Fetch" has been pressed.
+    private func availableBaseBranches(for repo: RepoEntry) -> [String] {
+        var names = Set((branchRowsByRepoID[repo.id] ?? []).map(\.name))
+        names.insert(repo.defaultBranch)
+        return names.sorted { a, b in
+            if a == repo.defaultBranch { return true }
+            if b == repo.defaultBranch { return false }
+            return a < b
+        }
+    }
+
+    // git checkout -b <name> <base>, via a worktree: creates the branch and its workspace in one
+    // step instead of adding a placeholder row to be started later.
+    private func createBranch(repo: RepoEntry, name: String, baseBranch: String) {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty, repo.id == selectedRepoID,
+        guard !trimmed.isEmpty, !baseBranch.isEmpty, repo.id == selectedRepoID,
               !selectedRepoBranches.contains(where: { $0.name == trimmed }) else { return }
-        branchRowsByRepoID[repo.id, default: []].append(
-            BranchRow(repo: repo, name: trimmed, isRemote: false, isLocal: false)
-        )
+        runStartBranch(BranchRow(repo: repo, name: trimmed, isRemote: false, isLocal: false), baseBranch: baseBranch)
     }
 
     private func submitNewIssue(repo: RepoEntry, title: String, body: String) async -> String? {
@@ -1323,13 +1344,23 @@ private struct AddRepoSheet: View {
     }
 }
 
+// git checkout -b <name> <base> — the base branch is mandatory, picked here up front rather than
+// deferred to when the branch is later started.
 private struct AddBranchSheet: View {
     let repo: RepoEntry
+    let availableBases: [String]
     @Binding var isPresented: Bool
-    let onAdd: (String) -> Void
+    let onAdd: (String, String) -> Void  // name, baseBranch
 
     @State private var branchName = ""
+    @State private var baseSearch = ""
+    @State private var selectedBase = ""
+
     private var trimmedName: String { branchName.trimmingCharacters(in: .whitespaces) }
+    private var filteredBases: [String] {
+        baseSearch.isEmpty ? availableBases : availableBases.filter { $0.localizedCaseInsensitiveContains(baseSearch) }
+    }
+    private var canSubmit: Bool { !trimmedName.isEmpty && !selectedBase.isEmpty }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -1339,14 +1370,54 @@ private struct AddBranchSheet: View {
             TextField("Branch name", text: $branchName)
                 .textFieldStyle(.roundedBorder)
 
-            TaskSheetActions(primaryTitle: "Add", isEnabled: !trimmedName.isEmpty, onCancel: {
+            Text("Base branch").font(.system(size: 11, weight: .medium)).foregroundStyle(Color.mgMuted)
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11)).foregroundStyle(Color.mgMuted)
+                TextField("Search branches…", text: $baseSearch)
+                    .textFieldStyle(.plain).font(.system(size: 12)).foregroundStyle(Color.mgLabel)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            .background(Color.mgSurface)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(filteredBases, id: \.self) { branch in
+                        HStack {
+                            Text(branch)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(Color.mgLabel)
+                            Spacer()
+                            if selectedBase == branch {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(Color.mgAccent)
+                            }
+                        }
+                        .padding(.horizontal, 10).padding(.vertical, 7)
+                        .background(selectedBase == branch ? Color.mgAccent.opacity(0.1) : Color.clear)
+                        .contentShape(Rectangle())
+                        .onTapGesture { selectedBase = branch }
+                        .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
+                    }
+                }
+            }
+            .frame(maxHeight: 180)
+            .background(Color.mgSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
+
+            TaskSheetActions(primaryTitle: "Add", isEnabled: canSubmit, onCancel: {
                 isPresented = false
             }, onSubmit: {
-                    onAdd(branchName)
+                    onAdd(branchName, selectedBase)
                     isPresented = false
             })
         }
-        .padding(28).frame(width: 360).background(Color.mgBg)
+        .padding(28).frame(width: 380).background(Color.mgBg)
+        .onAppear { if selectedBase.isEmpty { selectedBase = availableBases.first ?? "" } }
     }
 }
 

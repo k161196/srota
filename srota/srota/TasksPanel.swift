@@ -547,7 +547,7 @@ func startRepoWorkspace(_ repo: RepoEntry, settings: AppSettings) async -> Resul
 }
 
 @MainActor
-func startBranchWorkspace(_ row: BranchRow, settings: AppSettings) async -> Result<Void, TaskGHError> {
+func startBranchWorkspace(_ row: BranchRow, settings: AppSettings, baseBranch: String? = nil) async -> Result<Void, TaskGHError> {
     let repo = row.repo; let branch = row.name
     guard let path = worktreePath(for: repo, branch: branch, settings: settings) else {
         return .failure(TaskGHError(message: "Set a base working directory in Settings first"))
@@ -567,14 +567,15 @@ func startBranchWorkspace(_ row: BranchRow, settings: AppSettings) async -> Resu
         return .failure(TaskGHError(message: "Clone \(repo.defaultBranch) first"))
     }
     // A branch that's neither remote nor local doesn't exist as a ref yet (e.g. just typed into
-    // the Branches tab's "+" sheet) — create it off the default branch instead of checking it out.
+    // the Branches tab's "+" sheet) — create it off the chosen base branch (defaulting to the
+    // repo's default branch) instead of checking it out.
     let isNewBranch = !row.isRemote && !row.isLocal
-    let defaultBranch = repo.defaultBranch
+    let base = baseBranch ?? repo.defaultBranch
     let result = await Task.detached { () -> Result<Void, TaskGHError> in
         let p = Process(); let errPipe = Pipe()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         p.arguments = isNewBranch
-            ? ["-C", mainPath, "worktree", "add", "-b", branch, path, defaultBranch]
+            ? ["-C", mainPath, "worktree", "add", "-b", branch, path, base]
             : ["-C", mainPath, "worktree", "add", path, branch]
         p.standardError = errPipe
         do { try p.run() } catch { return .failure(TaskGHError(message: error.localizedDescription)) }
