@@ -324,7 +324,19 @@ private struct AgentsPanel: View {
     private var detail: some View {
         if let row = selectedRow {
             if let attachment, attachment.stableID == row.stableID {
+                // Without this, SwiftUI treats consecutive attachments as the SAME view identity
+                // (same type/position in the tree) and reuses the underlying NSView + its
+                // long-lived TerminalSurfaceCoordinator across agent switches, just calling
+                // updateNSView with the new context — reconfiguring one live coordinator from
+                // agent A's session straight to agent B's. tearDownSurface then reads
+                // `configuration.inMemorySession` AFTER it's already been overwritten by B's
+                // config, so it gates the free against the wrong (empty) session, skips its
+                // safety wait, and frees the surface while A's session can still be mid-write
+                // (the os_unfair_lock corruption crash). Forcing a new identity per attachment
+                // makes SwiftUI dismantle the old NSView and build a fresh one per agent, so each
+                // coordinator only ever owns one session for its whole lifetime.
                 TerminalSurfaceView(context: attachment.viewState)
+                    .id(attachment.token)
             } else if claimedElsewhereStableIDs.contains(row.stableID) {
                 PaneStartOverlay(cwd: row.cwd, label: "Use Here") { attach(row) }
             } else {
