@@ -208,6 +208,58 @@ struct ManagementPanel: View {
 
 // MARK: - Agents panel (split view: daemon-tracked agents on the left, an attached live terminal on the right)
 
+// Even 50/50 splits only — no per-split resize fraction. "Add to split" always splits the
+// currently-focused leaf's slot in the chosen direction; minimizing a leaf collapses its slot
+// back into its sibling, and collapsing to a single leaf drops `splitRoot` to nil entirely so
+// AgentsPanel falls back to the plain single-`detail` path instead of a 1-leaf tree.
+private enum AgentSplitNode {
+    case leaf(String)
+    indirect case split(Axis, AgentSplitNode, AgentSplitNode)
+
+    var containedStableIDs: Set<String> {
+        switch self {
+        case .leaf(let id): return [id]
+        case .split(_, let a, let b): return a.containedStableIDs.union(b.containedStableIDs)
+        }
+    }
+
+    func replacingLeaf(_ target: String, addingInDirection axis: Axis, newID: String) -> AgentSplitNode {
+        switch self {
+        case .leaf(let id):
+            return id == target ? .split(axis, .leaf(id), .leaf(newID)) : self
+        case .split(let a, let first, let second):
+            return .split(a, first.replacingLeaf(target, addingInDirection: axis, newID: newID),
+                           second.replacingLeaf(target, addingInDirection: axis, newID: newID))
+        }
+    }
+
+    // Swaps which agent occupies a leaf's slot without changing the tree shape — this is how
+    // plain (left-)clicking a non-split agent "switches" the focused pane instead of adding one.
+    func replacingLeafID(_ target: String, with newID: String) -> AgentSplitNode {
+        switch self {
+        case .leaf(let id):
+            return id == target ? .leaf(newID) : self
+        case .split(let axis, let first, let second):
+            return .split(axis, first.replacingLeafID(target, with: newID), second.replacingLeafID(target, with: newID))
+        }
+    }
+
+    // nil means the whole tree became empty (only relevant when called on a lone `.leaf`).
+    func removingLeaf(_ target: String) -> AgentSplitNode? {
+        switch self {
+        case .leaf(let id):
+            return id == target ? nil : self
+        case .split(let axis, let first, let second):
+            switch (first.removingLeaf(target), second.removingLeaf(target)) {
+            case (nil, nil): return nil
+            case (nil, let s?): return s
+            case (let f?, nil): return f
+            case (let f?, let s?): return .split(axis, f, s)
+            }
+        }
+    }
+}
+
 private struct DaemonAgentRow: Identifiable {
     let stableID: String
     let cwd: String
@@ -235,6 +287,11 @@ private struct AgentsPanel: View {
     @State private var showAllProcesses = false
     @State private var selectedStableID: String?
     @State private var attachment: AgentAttachment?
+    @State private var listWidth: CGFloat = 280
+    @State private var listVisible = true
+    @State private var splitRoot: AgentSplitNode?
+    @State private var focusedSplitStableID: String?
+    @State private var attachments: [String: AgentAttachment] = [:]
 
     private var rows: [DaemonAgentRow] {
         let states = daemon.agentStatesByStableID
@@ -276,42 +333,56 @@ private struct AgentsPanel: View {
     private var selectedRow: DaemonAgentRow? { rows.first { $0.stableID == selectedStableID } }
 
     var body: some View {
-        HStack(spacing: 0) {
-            VStack(spacing: 0) {
-                header
-                Rectangle().fill(Color.mgBorder).frame(height: 1)
-                if rows.isEmpty {
-                    Spacer()
-                    Text(showAllProcesses ? "No terminals running" : "No agents running")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Color.mgMuted)
-                    Spacer()
-                } else {
-                    ScrollView {
-                        VStack(spacing: 2) {
-                            ForEach(rows) { row in
-                                DaemonAgentRowView(
-                                    row: row,
-                                    isSelected: row.stableID == selectedStableID
-                                ) {
-                                    selectedStableID = row.stableID
-                                    attachment = nil
+        VStack(spacing: 0) {
+            header
+            Rectangle().fill(Color.mgBorder).frame(height: 1)
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    if rows.isEmpty {
+                        Spacer()
+                        Text(showAllProcesses ? "No terminals running" : "No agents running")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.mgMuted)
+                        Spacer()
+                    } else {
+                        ScrollView {
+                            VStack(spacing: 2) {
+                                ForEach(rows) { row in
+                                    DaemonAgentRowView(
+                                        row: row,
+                                        isSelected: splitRoot != nil ? row.stableID == focusedSplitStableID : row.stableID == selectedStableID,
+                                        isInSplit: splitRoot?.containedStableIDs.contains(row.stableID) ?? false,
+                                        onSelect: { selectOrSwitch(to: row) },
+                                        onAddToSplit: { direction in addToSplit(row, direction: direction) }
+                                    )
                                 }
                             }
+                            .padding(.horizontal, 12)
+                            .padding(.top, 8)
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.top, 8)
                     }
                 }
-            }
-            .frame(width: 280)
+                .frame(width: listVisible ? listWidth : 0, alignment: .leading)
+                .clipped()
+                .allowsHitTesting(listVisible)
 
-            Rectangle().fill(Color.mgBorder).frame(width: 1)
+                SidebarDivider(sidebarVisible: listVisible, width: $listWidth)
 
-            detail
+                Group {
+                    if let splitRoot {
+                        AgentSplitTreeView(node: splitRoot) { AnyView(splitPane(for: $0)) }
+                    } else {
+                        detail
+                    }
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
+        .animation(.spring(duration: 0.22, bounce: 0.0), value: listVisible)
         .onAppear { refresh() }
+        .onChange(of: focusedSplitStableID) { _, newID in
+            if let newID, let attach = attachments[newID] { focusTerminalSurface(for: attach.viewState) }
+        }
         .onChange(of: daemon.agentStatesByStableID.count) { _, _ in refresh() }
         .onChange(of: rows.map(\.stableID)) { _, ids in
             guard selectedStableID == nil || !ids.contains(selectedStableID!) else { return }
@@ -355,6 +426,14 @@ private struct AgentsPanel: View {
 
     private var header: some View {
         HStack(spacing: 10) {
+            Button { listVisible.toggle() } label: {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 12))
+                    .foregroundStyle(listVisible ? Color.mgLabel : Color.mgMuted)
+            }
+            .buttonStyle(.plain)
+            .help(listVisible ? "Hide agent list" : "Show agent list")
+
             Text("Agents")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Color.mgLabel)
@@ -402,6 +481,178 @@ private struct AgentsPanel: View {
             // without this check it would wipe out the brand-new attachment it just raced against.
             if attachmentBinding.wrappedValue?.token == token {
                 attachmentBinding.wrappedValue = nil
+            }
+        }
+    }
+
+    // MARK: - Split view (multiple agents side by side)
+
+    // Plain click on a row: if it's already showing in the split, just focus that pane. Otherwise,
+    // while a split is active, "select" means switch the focused pane's agent to this one (there's
+    // no separate single-detail view visible to fall back to once any split exists). Only when no
+    // split is active at all does this touch the old single-detail `selectedStableID`/`attachment`.
+    private func selectOrSwitch(to row: DaemonAgentRow) {
+        guard let root = splitRoot else {
+            selectedStableID = row.stableID
+            attachment = nil
+            return
+        }
+        if root.containedStableIDs.contains(row.stableID) {
+            focusedSplitStableID = row.stableID
+            return
+        }
+        let target = focusedSplitStableID.flatMap { root.containedStableIDs.contains($0) ? $0 : nil }
+            ?? root.containedStableIDs.first
+        guard let target else { return }
+        attachments[target] = nil
+        splitRoot = root.replacingLeafID(target, with: row.stableID)
+        focusedSplitStableID = row.stableID
+    }
+
+    // Moves a pre-existing single-detail attachment into the split's attachment dictionary instead
+    // of leaving two AgentAttachment instances alive for the same PTY (each spawnOrAttach call
+    // steals ownership from the other, which is wasteful churn even though it self-heals via onStolen).
+    private func adoptSingleAttachmentIntoSplit(for stableID: String) {
+        if let existing = attachment, existing.stableID == stableID {
+            attachments[stableID] = existing
+            attachment = nil
+        }
+    }
+
+    private func addToSplit(_ row: DaemonAgentRow, direction: Axis) {
+        guard splitRoot?.containedStableIDs.contains(row.stableID) != true else { return }
+        if let root = splitRoot {
+            let target = focusedSplitStableID.flatMap { root.containedStableIDs.contains($0) ? $0 : nil }
+                ?? root.containedStableIDs.first
+            guard let target else { return }
+            splitRoot = root.replacingLeaf(target, addingInDirection: direction, newID: row.stableID)
+        } else if let current = selectedStableID, current != row.stableID {
+            adoptSingleAttachmentIntoSplit(for: current)
+            splitRoot = .split(direction, .leaf(current), .leaf(row.stableID))
+        } else {
+            if let current = selectedStableID { adoptSingleAttachmentIntoSplit(for: current) }
+            splitRoot = .leaf(row.stableID)
+        }
+        focusedSplitStableID = row.stableID
+    }
+
+    private func minimizeFromSplit(_ stableID: String) {
+        attachments[stableID] = nil
+        guard let root = splitRoot else { return }
+        let updated = root.removingLeaf(stableID)
+        splitRoot = updated
+        if focusedSplitStableID == stableID { focusedSplitStableID = updated?.containedStableIDs.first }
+    }
+
+    private func attachSplit(_ row: DaemonAgentRow) {
+        let token = UUID()
+        let stableID = row.stableID
+        let attachmentsBinding = $attachments
+        attachmentsBinding.wrappedValue[stableID] = AgentAttachment(
+            stableID: stableID, cwd: row.cwd, colorScheme: colorScheme, daemon: daemon, token: token
+        ) {
+            // Same re-entrancy guard as `attach(_:)`'s onStolen — only clear if still this instance.
+            if attachmentsBinding.wrappedValue[stableID]?.token == token {
+                attachmentsBinding.wrappedValue[stableID] = nil
+            }
+        }
+        // Focus was already requested (e.g. by addToSplit) before this attachment existed to focus.
+        if focusedSplitStableID == stableID, let attach = attachmentsBinding.wrappedValue[stableID] {
+            focusTerminalSurface(for: attach.viewState)
+        }
+    }
+
+    @ViewBuilder
+    private func splitPane(for stableID: String) -> some View {
+        let row = rows.first { $0.stableID == stableID }
+        VStack(spacing: 0) {
+            splitPaneHeader(stableID: stableID, row: row)
+            Rectangle().fill(Color.mgBorder).frame(height: 1)
+            if let row {
+                if let attach = attachments[stableID] {
+                    TerminalSurfaceView(context: attach.viewState)
+                        .id(attach.token)
+                } else if claimedElsewhereStableIDs.contains(stableID) {
+                    PaneStartOverlay(cwd: row.cwd, label: "Use Here") { attachSplit(row) }
+                } else {
+                    Color.clear.onAppear { attachSplit(row) }
+                }
+            } else {
+                // Row disappeared (e.g. the agent's process exited) — nothing left to show.
+                Color.clear.onAppear { minimizeFromSplit(stableID) }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Covers the terminal content area too, not just the header — clicking into the terminal
+        // to type should also move the focus highlight, matching workspace panes' own behavior
+        // (TerminalContentView.paneView attaches its equivalent gesture over the whole pane).
+        .simultaneousGesture(TapGesture().onEnded { focusedSplitStableID = stableID })
+    }
+
+    @ViewBuilder
+    private func splitPaneHeader(stableID: String, row: DaemonAgentRow?) -> some View {
+        let focused = focusedSplitStableID == stableID
+        ZStack(alignment: .bottom) {
+            HStack(spacing: 6) {
+                Text(row?.title ?? stableID)
+                    .font(.system(size: 12, weight: focused ? .medium : .regular))
+                    .foregroundStyle(focused ? Color.mgLabel : Color.mgMuted)
+                    .lineLimit(1)
+                if let status = row?.status {
+                    AgentStatusBadge(status: status)
+                }
+                Spacer(minLength: 0)
+                Button { minimizeFromSplit(stableID) } label: {
+                    Image(systemName: "minus")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.mgMuted)
+                        .frame(width: 16, height: 16)
+                }
+                .buttonStyle(.plain)
+                .help("Minimize (agent keeps running in the background)")
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .contentShape(Rectangle())
+
+            Rectangle()
+                .fill(focused ? Color.mgAccent : Color.mgBorder)
+                .frame(height: focused ? 2 : 1)
+        }
+    }
+}
+
+// Recursive on purpose: each `.split` level is its own view instance with its own local `width`
+// state (exactly like ResizableSidebar owns its width) — no fraction lives in AgentSplitNode
+// itself, so resizing one split doesn't re-render sibling splits elsewhere in the tree. Reuses
+// SidebarDivider/SidebarResizeLogic (the same mechanism the app sidebar resizes with) rather than
+// inventing a second drag-resize implementation.
+private struct AgentSplitTreeView: View {
+    let node: AgentSplitNode
+    let renderLeaf: (String) -> AnyView
+    @State private var size: CGFloat = 320
+
+    var body: some View {
+        switch node {
+        case .leaf(let stableID):
+            renderLeaf(stableID)
+        case .split(let axis, let first, let second):
+            if axis == .horizontal {
+                HStack(spacing: 0) {
+                    AgentSplitTreeView(node: first, renderLeaf: renderLeaf)
+                        .frame(width: size)
+                    SidebarDivider(sidebarVisible: true, width: $size, axis: .horizontal)
+                    AgentSplitTreeView(node: second, renderLeaf: renderLeaf)
+                        .frame(maxWidth: .infinity)
+                }
+            } else {
+                VStack(spacing: 0) {
+                    AgentSplitTreeView(node: first, renderLeaf: renderLeaf)
+                        .frame(height: size)
+                    SidebarDivider(sidebarVisible: true, width: $size, axis: .vertical)
+                    AgentSplitTreeView(node: second, renderLeaf: renderLeaf)
+                        .frame(maxHeight: .infinity)
+                }
             }
         }
     }
@@ -457,7 +708,9 @@ private final class AgentAttachment {
 private struct DaemonAgentRowView: View {
     let row: DaemonAgentRow
     let isSelected: Bool
+    let isInSplit: Bool
     let onSelect: () -> Void
+    let onAddToSplit: (Axis) -> Void
     @State private var isHovered = false
 
     var body: some View {
@@ -517,6 +770,12 @@ private struct DaemonAgentRowView: View {
             radius: 6
         )
         .onHover { isHovered = $0 }
+        .contextMenu {
+            Button("Add to split → Horizontally") { onAddToSplit(.horizontal) }
+                .disabled(isInSplit)
+            Button("Add to split → Vertically") { onAddToSplit(.vertical) }
+                .disabled(isInSplit)
+        }
     }
 }
 

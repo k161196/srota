@@ -904,11 +904,12 @@ private extension Color {
 // once the cursor leaves its bounds - the same mechanism PaneResizingView
 // relies on for jitter-free dragging.
 private final class SidebarResizeHandleView: NSView {
+    var axis: Axis = .horizontal
     var onDragChanged: (CGFloat) -> Void = { _ in }
     var onDragEnded: () -> Void = {}
     var onHoverChanged: (Bool) -> Void = { _ in }
 
-    private var dragStartWindowX: CGFloat?
+    private var dragStartWindowCoord: CGFloat?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -922,27 +923,31 @@ private final class SidebarResizeHandleView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .resizeLeftRight)
+        addCursorRect(bounds, cursor: axis == .horizontal ? .resizeLeftRight : .resizeUpDown)
     }
 
     override func mouseEntered(with event: NSEvent) { onHoverChanged(true) }
 
     override func mouseExited(with event: NSEvent) {
-        if dragStartWindowX == nil { onHoverChanged(false) }
+        if dragStartWindowCoord == nil { onHoverChanged(false) }
+    }
+
+    private func coord(_ event: NSEvent) -> CGFloat {
+        axis == .horizontal ? event.locationInWindow.x : event.locationInWindow.y
     }
 
     override func mouseDown(with event: NSEvent) {
-        dragStartWindowX = event.locationInWindow.x
+        dragStartWindowCoord = coord(event)
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let startX = dragStartWindowX else { return }
-        onDragChanged(event.locationInWindow.x - startX)
+        guard let start = dragStartWindowCoord else { return }
+        onDragChanged(coord(event) - start)
     }
 
     override func mouseUp(with event: NSEvent) {
-        guard dragStartWindowX != nil else { return }
-        dragStartWindowX = nil
+        guard dragStartWindowCoord != nil else { return }
+        dragStartWindowCoord = nil
         onDragEnded()
         if !bounds.contains(convert(event.locationInWindow, from: nil)) {
             onHoverChanged(false)
@@ -951,12 +956,14 @@ private final class SidebarResizeHandleView: NSView {
 }
 
 private struct SidebarResizeHandle: NSViewRepresentable {
+    var axis: Axis = .horizontal
     let onDragChanged: (CGFloat) -> Void
     let onDragEnded: () -> Void
     let onHoverChanged: (Bool) -> Void
 
     func makeNSView(context: Context) -> SidebarResizeHandleView {
         let v = SidebarResizeHandleView()
+        v.axis = axis
         v.onDragChanged = onDragChanged
         v.onDragEnded = onDragEnded
         v.onHoverChanged = onHoverChanged
@@ -964,6 +971,7 @@ private struct SidebarResizeHandle: NSViewRepresentable {
     }
 
     func updateNSView(_ v: SidebarResizeHandleView, context: Context) {
+        v.axis = axis
         v.onDragChanged = onDragChanged
         v.onDragEnded = onDragEnded
         v.onHoverChanged = onHoverChanged
@@ -972,14 +980,16 @@ private struct SidebarResizeHandle: NSViewRepresentable {
 
 // MARK: - Sidebar divider
 
-// internal (not private) — SessionTimelineSidebar.swift reuses this for the right-docked
-// timeline sidebar via `mirrored: true`, rather than duplicating the AppKit drag-handle plumbing.
+// internal (not private) — SessionTimelineSidebar.swift reuses this for the right-docked timeline
+// sidebar via `mirrored: true`, and AgentsPanel's split view reuses it via `axis: .vertical` for
+// top/bottom splits, rather than duplicating the AppKit drag-handle plumbing.
 struct SidebarDivider: View {
     let sidebarVisible: Bool
     @Binding var width: CGFloat
     // true for a sidebar docked on the right: dragging left should grow it (translation sign
     // flips relative to the left sidebar, where dragging right grows it).
     var mirrored: Bool = false
+    var axis: Axis = .horizontal
     @State private var isHovered = false
     @State private var dragStartWidth: CGFloat? = nil
 
@@ -987,9 +997,9 @@ struct SidebarDivider: View {
         ZStack {
             Rectangle()
                 .fill(Color.white.opacity(0.06))
-                .frame(width: 1)
+                .frame(width: axis == .horizontal ? 1 : nil, height: axis == .horizontal ? nil : 1)
             if isHovered {
-                Image(systemName: "arrow.left.and.right")
+                Image(systemName: axis == .horizontal ? "arrow.left.and.right" : "arrow.up.and.down")
                     .font(.system(size: 8, weight: .bold))
                     .foregroundStyle(Color.accentOrange)
                     .frame(width: 16, height: 16)
@@ -998,6 +1008,7 @@ struct SidebarDivider: View {
                     .transition(.opacity)
             }
             SidebarResizeHandle(
+                axis: axis,
                 onDragChanged: { dx in
                     let startWidth = dragStartWidth ?? width
                     dragStartWidth = startWidth
@@ -1008,11 +1019,11 @@ struct SidebarDivider: View {
                 onHoverChanged: { isHovered = $0 }
             )
         }
-        .frame(width: 9)
+        .frame(width: axis == .horizontal ? 9 : nil, height: axis == .horizontal ? nil : 9)
         .opacity(sidebarVisible ? 1 : 0)
         .allowsHitTesting(sidebarVisible)
         .animation(.easeOut(duration: 0.12), value: isHovered)
-        .help("Drag to resize sidebar")
+        .help("Drag to resize")
     }
 }
 
@@ -3249,6 +3260,31 @@ struct PaneStartOverlay: View {
     }
 }
 
+// Shared by TerminalContentView (workspace panes) and AgentsPanel (Agents-tab split view) — finds
+// the AppKit view backing a given TerminalViewState and makes it the window's first responder, so
+// clicking/focusing a pane also moves keyboard input to it, not just its visual focus highlight.
+func focusTerminalSurface(for state: TerminalViewState) {
+    DispatchQueue.main.async {
+        guard let window = NSApp.keyWindow, let root = window.contentView else { return }
+        if let tv = findTerminalSurfaceView(for: state, in: root) {
+            // ponytail: Ghostty's AppKit layer is transparent; make it opaque so cleared cells don't show stale glyphs.
+            tv.layer?.isOpaque = true
+            tv.layer?.backgroundColor = NSColor.black.cgColor
+            window.makeFirstResponder(tv)
+        }
+    }
+}
+
+private func findTerminalSurfaceView(for state: TerminalViewState, in view: NSView) -> NSView? {
+    if let v = view as? TerminalView,
+       let del = v.delegate,
+       ObjectIdentifier(del) == ObjectIdentifier(state) { return v }
+    for sub in view.subviews {
+        if let found = findTerminalSurfaceView(for: state, in: sub) { return found }
+    }
+    return nil
+}
+
 private struct TerminalContentView: View {
     @Environment(DaemonConnection.self) private var daemon
     @ObservedObject var tab: TerminalTab
@@ -3279,7 +3315,7 @@ private struct TerminalContentView: View {
             })
                         .onAppear {
                             if tab.focusedPaneID == entry.id && entry.isStarted {
-                                requestKeyboardFocus(for: entry.viewState)
+                                focusTerminalSurface(for: entry.viewState)
                             }
                         }
                     }
@@ -3305,12 +3341,12 @@ private struct TerminalContentView: View {
             .coordinateSpace(name: "panes")
             .onChange(of: tab.focusedPaneID) { _, newID in
                 if let entry = tab.panes.first(where: { $0.id == newID }), entry.isStarted {
-                    requestKeyboardFocus(for: entry.viewState)
+                    focusTerminalSurface(for: entry.viewState)
                 }
             }
             .onChange(of: isSelected) { _, selected in
                 guard selected, let entry = tab.panes.first(where: { $0.id == tab.focusedPaneID }), entry.isStarted else { return }
-                requestKeyboardFocus(for: entry.viewState)
+                focusTerminalSurface(for: entry.viewState)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -3341,7 +3377,7 @@ private struct TerminalContentView: View {
                     // dragging the pane divider does to "fix" this.
                     nudgeLayout(for: id)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                        requestKeyboardFocus(for: entry.viewState)
+                        focusTerminalSurface(for: entry.viewState)
                     }
                 }
                 .padding(.top, 30)
@@ -3434,32 +3470,6 @@ private struct TerminalContentView: View {
         let dy = abs(p.y - cy) / (sz.height * l.h)
         if dx > dy { return p.x < cx ? .left : .right }
         return p.y < cy ? .top : .bottom
-    }
-
-    private func requestKeyboardFocus(for state: TerminalViewState) {
-        DispatchQueue.main.async {
-            guard let window = NSApp.keyWindow, let root = window.contentView else { return }
-            if let tv = Self.findTerminalView(for: state, in: root) {
-                Self.configureTerminalView(tv)
-                window.makeFirstResponder(tv)
-            }
-        }
-    }
-
-    private static func configureTerminalView(_ view: NSView) {
-        // ponytail: Ghostty's AppKit layer is transparent; make it opaque so cleared cells don't show stale glyphs.
-        view.layer?.isOpaque = true
-        view.layer?.backgroundColor = NSColor.black.cgColor
-    }
-
-    private static func findTerminalView(for state: TerminalViewState, in view: NSView) -> NSView? {
-        if let v = view as? TerminalView,
-           let del = v.delegate,
-           ObjectIdentifier(del) == ObjectIdentifier(state) { return v }
-        for sub in view.subviews {
-            if let found = findTerminalView(for: state, in: sub) { return found }
-        }
-        return nil
     }
 
     private struct DividerSegment { let isVertical: Bool; let at: CGFloat; let from: CGFloat; let to: CGFloat }
