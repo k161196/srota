@@ -950,6 +950,7 @@ private struct PullRequestEntry: Identifiable, Decodable {
     let number: Int
     let title: String
     let headRefName: String
+    let baseRefName: String
     let author: Author
     let state: String  // "OPEN", "CLOSED", or "MERGED"
     struct Author: Decodable { let login: String }
@@ -1651,7 +1652,7 @@ private struct RepoDetailView: View {
             let p = Process(); let outPipe = Pipe(); let errPipe = Pipe()
             p.executableURL = URL(fileURLWithPath: ghPath)
             p.arguments = ["pr", "list", "--repo", "\(org)/\(repoName)", "--state", state,
-                           "--json", "number,title,headRefName,author,state", "--limit", "100"]
+                           "--json", "number,title,headRefName,baseRefName,author,state", "--limit", "100"]
             p.standardOutput = outPipe; p.standardError = errPipe
             do { try p.run() } catch {
                 await MainActor.run { prError = error.localizedDescription; fetchingPRs = false }
@@ -1853,7 +1854,7 @@ private struct RepoDetailView: View {
                 "projectPath":          path,
                 "branchRef":            pr.headRefName,
                 "launchAgentName":      "GitHub PR Review Agent",
-                "launchAgentContext":   "Review PR #\(pr.number): \(pr.title) (base: \(defaultBranch)).",
+                "launchAgentContext":   "Review PR #\(pr.number): \(pr.title) (base: \(pr.baseRefName)).",
                 "launchAgentPresetID":  preset.id.uuidString
             ]
         )

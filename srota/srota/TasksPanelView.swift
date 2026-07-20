@@ -36,8 +36,10 @@ struct TasksPanel: View {
     @State private var actionError: String? = nil
     @State private var projectFilter: Set<String> = []
     @State private var showProjectFilter = false
-    @State private var ghRepoListings: [TaskGHRepoListing] = []
+    @State private var ghRepoListingsByOwner: [String: [TaskGHRepoListing]] = [:]
     @State private var fetchingGHRepos = false
+    @State private var ghOrgs: [String] = []
+    @State private var addRepoOwner = ""
     @State private var showAddRepo = false
     @State private var showAddBranch = false
     @State private var showAddIssue = false
@@ -87,7 +89,9 @@ struct TasksPanel: View {
     }
 
     private var filteredRepoRows: [RepoEntry] {
-        browseSearch.isEmpty ? connectedRepos : connectedRepos.filter { $0.name.localizedCaseInsensitiveContains(browseSearch) }
+        // Repos tab always lists every connected repo — the cross-tab "All repos" filter
+        // (Issues/PRs scoping) isn't shown here, so it shouldn't silently narrow this list either.
+        browseSearch.isEmpty ? allConnectedRepos : allConnectedRepos.filter { $0.name.localizedCaseInsensitiveContains(browseSearch) }
     }
 
     private var selectedRepo: RepoEntry? {
@@ -103,7 +107,14 @@ struct TasksPanel: View {
         return fetchingBranchRepoIDs.contains(selectedRepoID)
     }
     private var filteredSelectedRepoBranches: [BranchRow] {
-        branchSearch.isEmpty ? selectedRepoBranches : selectedRepoBranches.filter { $0.name.localizedCaseInsensitiveContains(branchSearch) }
+        let rows = branchSearch.isEmpty ? selectedRepoBranches : selectedRepoBranches.filter { $0.name.localizedCaseInsensitiveContains(branchSearch) }
+        // Branches with an existing worktree directory ("Open") sort above ones that still need
+        // one created ("Worktree"/"Clone") — a stable sort keeps everything else in place.
+        return rows.enumerated().sorted { a, b in
+            let ca = hasExistingWorkspace(branch: a.element), cb = hasExistingWorkspace(branch: b.element)
+            if ca != cb { return ca }
+            return a.offset < b.offset
+        }.map(\.element)
     }
 
     private var projectFilterLabel: String {
@@ -124,16 +135,27 @@ struct TasksPanel: View {
     }
 
     private func fetchTaskGHRepoListingsIfNeeded() {
-        guard ghRepoListings.isEmpty, !fetchingGHRepos else { return }
+        if ghOrgs.isEmpty { refreshGHOrgs() }
         refreshGHRepoListings()
     }
 
-    private func refreshGHRepoListings() {
+    private func refreshGHOrgs() {
+        Task {
+            let orgs = await Task.detached { fetchTaskGHOrgs() }.value
+            ghOrgs = orgs
+        }
+    }
+
+    // Cached per-owner: switching back to an org already fetched this session shows
+    // instantly with no spinner. Pass force: true (the sheet's Fetch button) to bypass.
+    private func refreshGHRepoListings(force: Bool = false) {
         guard !fetchingGHRepos else { return }
+        let owner = addRepoOwner
+        if !force, ghRepoListingsByOwner[owner] != nil { return }
         fetchingGHRepos = true
         Task {
-            let listings = await Task.detached { fetchTaskGHRepoListings() }.value
-            ghRepoListings = listings
+            let listings = await Task.detached { fetchTaskGHRepoListings(owner: owner) }.value
+            ghRepoListingsByOwner[owner] = listings
             fetchingGHRepos = false
         }
     }
@@ -167,10 +189,14 @@ struct TasksPanel: View {
         .sheet(isPresented: $showAddRepo) {
             AddRepoSheet(
                 db: db,
-                listings: ghRepoListings,
+                listings: ghRepoListingsByOwner[addRepoOwner] ?? [],
                 isFetching: fetchingGHRepos,
+                orgs: ghOrgs,
+                owner: $addRepoOwner,
                 isPresented: $showAddRepo,
-                onAppear: fetchTaskGHRepoListingsIfNeeded
+                onAppear: fetchTaskGHRepoListingsIfNeeded,
+                onOwnerChange: { refreshGHRepoListings() },
+                onFetch: { refreshGHRepoListings(force: true) }
             )
         }
         .sheet(isPresented: $showAddBranch) {
@@ -200,24 +226,26 @@ struct TasksPanel: View {
                 SubTabButton(title: "Repos", isActive: subTab == .repos) { subTab = .repos }
                 SubTabButton(title: "Issues", isActive: subTab == .issues) { subTab = .issues }
                 SubTabButton(title: "PRs", isActive: subTab == .prs) { subTab = .prs }
-                Button { showProjectFilter = true } label: {
-                    HStack(spacing: 7) {
-                        Text(projectFilterLabel).font(.system(size: 12, weight: .medium)).foregroundStyle(Color.mgLabel)
-                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Color.mgMuted)
+                if subTab != .repos {
+                    Button { showProjectFilter = true } label: {
+                        HStack(spacing: 7) {
+                            Text(projectFilterLabel).font(.system(size: 12, weight: .medium)).foregroundStyle(Color.mgLabel)
+                            Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Color.mgMuted)
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 7)
                     }
-                    .padding(.horizontal, 12).padding(.vertical, 7)
-                }
-                .buttonStyle(.plain)
-                .background(Color.white.opacity(0.025))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.14), lineWidth: 1))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .popover(isPresented: $showProjectFilter, arrowEdge: .bottom) {
-                    ProjectFilterMenu(
-                        recent: allConnectedRepos,
-                        selected: $projectFilter,
-                        settings: settings,
-                        onToggle: toggleProject
-                    )
+                    .buttonStyle(.plain)
+                    .background(Color.white.opacity(0.025))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.14), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .popover(isPresented: $showProjectFilter, arrowEdge: .bottom) {
+                        ProjectFilterMenu(
+                            recent: allConnectedRepos,
+                            selected: $projectFilter,
+                            settings: settings,
+                            onToggle: toggleProject
+                        )
+                    }
                 }
                 Spacer()
             }
@@ -419,7 +447,8 @@ struct TasksPanel: View {
                                 hasWorkspace: hasExistingWorkspace(pr: row),
                                 onStart: { startPR(row) },
                                 onOpenGitHub: { openPROnGitHub(row) },
-                                onReviewerAction: { login, add in toggleReviewer(row, login: login, add: add) }
+                                onReviewerAction: { login, add in toggleReviewer(row, login: login, add: add) },
+                                onReviewAgent: { preset in launchPRReviewAgent(row, preset: preset) }
                             )
                         }
                     }
@@ -468,10 +497,10 @@ struct TasksPanel: View {
                 if filteredRepoRows.isEmpty {
                     TaskStateView(
                         systemName: "folder",
-                        title: connectedRepos.isEmpty ? "No repositories connected" : "No matching repositories",
-                        detail: connectedRepos.isEmpty ? "Add a GitHub repository to get started." : "Clear the search to see all repositories.",
-                        actionTitle: connectedRepos.isEmpty ? "Add Repository" : nil,
-                        action: connectedRepos.isEmpty ? { showAddRepo = true } : nil
+                        title: allConnectedRepos.isEmpty ? "No repositories connected" : "No matching repositories",
+                        detail: allConnectedRepos.isEmpty ? "Add a GitHub repository to get started." : "Clear the search to see all repositories.",
+                        actionTitle: allConnectedRepos.isEmpty ? "Add Repository" : nil,
+                        action: allConnectedRepos.isEmpty ? { showAddRepo = true } : nil
                     )
                 } else {
                     ScrollView {
@@ -483,7 +512,8 @@ struct TasksPanel: View {
                                     isCloned: isMainCloned(for: repo, settings: settings),
                                     isSelected: repo.id == selectedRepoID,
                                     onStart: { startRepo(repo) },
-                                    onSelect: { selectRepo(repo) }
+                                    onSelect: { selectRepo(repo) },
+                                    onDelete: { removeRepo(repo) }
                                 )
                             }
                         }
@@ -719,6 +749,14 @@ struct TasksPanel: View {
         if branchRowsByRepoID[repo.id] == nil { refreshSelectedRepoBranches(for: repo) }
     }
 
+    private func removeRepo(_ repo: RepoEntry) {
+        if selectedRepoID == repo.id { selectedRepoID = nil }
+        branchRowsByRepoID.removeValue(forKey: repo.id)
+        fetchingBranchRepoIDs.remove(repo.id)
+        projectFilter.remove(repo.id)
+        db.deleteRepo(id: repo.id)
+    }
+
     private func refreshSelectedRepoBranches(for explicitRepo: RepoEntry? = nil) {
         guard let repo = explicitRepo ?? selectedRepo else { return }
         guard fetchingBranchRepoIDs.insert(repo.id).inserted else { return }
@@ -889,6 +927,37 @@ struct TasksPanel: View {
               let url = URL(string: "https://github.com/\(org)/\(name)/pull/\(row.pr.number)")
         else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    // Mirrors RepoDetailView.launchReviewAgent (ManagementView.swift) — same notification contract.
+    // Creates the worktree first if it doesn't exist yet (e.g. a closed PR never opened before),
+    // same as "Start" does, so review-with-agent isn't limited to PRs already checked out.
+    private func launchPRReviewAgent(_ row: PRRow, preset: TerminalPreset) {
+        busyRowID = row.id
+        Task {
+            let result = await ensurePRWorktree(row, settings: settings)
+            busyRowID = nil
+            switch result {
+            case .failure(let err): actionError = err.message
+            case .success(let path):
+                NotificationCenter.default.post(
+                    name: .srotaOpenWorkspace,
+                    object: nil,
+                    userInfo: [
+                        "path":                 path,
+                        "name":                 row.pr.headRefName,
+                        "folderName":           row.repo.name,
+                        "folderTag":            "",
+                        "createWorktree":       false,
+                        "projectPath":          path,
+                        "branchRef":            row.pr.headRefName,
+                        "launchAgentName":      "GitHub PR Review Agent",
+                        "launchAgentContext":   "Review PR #\(row.pr.number): \(row.pr.title) (base: \(row.pr.baseRefName)).",
+                        "launchAgentPresetID":  preset.id.uuidString
+                    ]
+                )
+            }
+        }
     }
 }
 
@@ -1155,8 +1224,12 @@ private struct AddRepoSheet: View {
     let db: WorkspaceDB
     let listings: [TaskGHRepoListing]
     let isFetching: Bool
+    let orgs: [String]
+    @Binding var owner: String
     @Binding var isPresented: Bool
     let onAppear: () -> Void
+    let onOwnerChange: () -> Void
+    let onFetch: () -> Void
 
     @State private var search = ""
 
@@ -1176,9 +1249,33 @@ private struct AddRepoSheet: View {
             HStack {
                 Text("Add Repo").font(.system(size: 16, weight: .semibold)).foregroundStyle(Color.mgLabel)
                 Spacer()
+                if isFetching {
+                    ProgressView().scaleEffect(0.6)
+                } else {
+                    Button("Fetch", action: onFetch)
+                        .buttonStyle(.plain).font(.system(size: 12, weight: .medium)).foregroundStyle(Color.mgAccent)
+                }
                 Button("Done") { isPresented = false }
                     .buttonStyle(.plain).foregroundStyle(Color.mgAccent)
             }
+            Menu {
+                Button("Your repos") { owner = "" }
+                ForEach(orgs, id: \.self) { org in
+                    Button(org) { owner = org }
+                }
+            } label: {
+                HStack {
+                    Text(owner.isEmpty ? "Your repos" : owner)
+                        .font(.system(size: 13)).foregroundStyle(Color.mgLabel)
+                    Spacer()
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10)).foregroundStyle(Color.mgMuted)
+                }
+                .padding(.horizontal, 10).padding(.vertical, 7)
+                .background(Color.mgSurface).clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .buttonStyle(.plain).menuStyle(.borderlessButton)
+
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(Color.mgMuted)
                 TextField("Search your GitHub repos…", text: $search)
@@ -1222,6 +1319,7 @@ private struct AddRepoSheet: View {
         }
         .padding(20).frame(width: 360).background(Color.mgBg)
         .onAppear(perform: onAppear)
+        .onChange(of: owner) { onOwnerChange() }
     }
 }
 

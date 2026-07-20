@@ -65,6 +65,7 @@ struct TaskPR: Identifiable, Decodable {
     let number: Int
     let title: String
     let headRefName: String
+    let baseRefName: String
     let author: TaskActor
     let state: String  // OPEN / CLOSED / MERGED
     let isDraft: Bool
@@ -150,6 +151,7 @@ func fetchBranchesAcrossRepos(_ repos: [RepoEntry], settings: AppSettings) async
     }
     rows.sort { (a: BranchRow, b: BranchRow) -> Bool in
         if a.repo.name != b.repo.name { return a.repo.name < b.repo.name }
+        if a.isLocal != b.isLocal { return a.isLocal }
         return a.name < b.name
     }
     return rows
@@ -188,9 +190,18 @@ nonisolated private func runGH(_ arguments: [String]) -> Result<Data, TaskGHErro
 // "is:issue"/"is:pr" are decorative in the search box (kept for visual parity with GitHub's own
 // combined search) but redundant here since each gh subcommand is already scoped to one type.
 nonisolated private func cleanedSearchQuery(_ query: String) -> String {
-    let kept = query.split(separator: " ").filter { $0 != "is:issue" && $0 != "is:pr" }
-    let joined = kept.joined(separator: " ")
-    return joined.isEmpty ? "is:open" : joined
+    let kept = query.split(separator: " ").filter { $0 != "is:issue" && $0 != "is:pr" && $0 != "is:open" && $0 != "is:closed" }
+    return kept.joined(separator: " ")
+}
+
+// gh defaults --state to "open" whenever it's left unset, silently ANDing that onto --search —
+// so a bare number search or the "All"/"Closed" filter (no is:open/is:closed token) would still
+// only ever return open items unless --state is passed explicitly here.
+nonisolated private func ghStateArg(_ query: String) -> String {
+    let tokens = query.split(separator: " ").map(String.init)
+    if tokens.contains("is:closed") { return "closed" }
+    if tokens.contains("is:open") { return "open" }
+    return "all"
 }
 
 // MARK: - GitHub repo discovery (for the Projects filter — broader than db.repos)
@@ -203,20 +214,31 @@ struct TaskGHRepoListing: Identifiable, Decodable, Hashable {
     var id: String { url }
 }
 
-nonisolated func fetchTaskGHRepoListings() -> [TaskGHRepoListing] {
-    let args = ["repo", "list", "--json", "nameWithOwner,url,defaultBranchRef", "--limit", "200"]
+nonisolated func fetchTaskGHRepoListings(owner: String = "") -> [TaskGHRepoListing] {
+    var args = ["repo", "list"]
+    if !owner.isEmpty { args.append(owner) }
+    args += ["--json", "nameWithOwner,url,defaultBranchRef", "--limit", "200"]
     switch runGH(args) {
     case .failure: return []
     case .success(let data): return (try? JSONDecoder().decode([TaskGHRepoListing].self, from: data)) ?? []
     }
 }
 
+nonisolated func fetchTaskGHOrgs() -> [String] {
+    switch runGH(["api", "user/orgs", "--jq", ".[].login"]) {
+    case .failure: return []
+    case .success(let data):
+        let out = String(data: data, encoding: .utf8) ?? ""
+        return out.split(separator: "\n").map(String.init)
+    }
+}
+
 nonisolated private func fetchIssues(repo: RepoEntry, query: String) -> Result<[TaskIssue], TaskGHError> {
     guard let (org, name) = gitURLComponents(repo.url) else { return .success([]) }
-    let args = ["issue", "list", "--repo", "\(org)/\(name)",
-                "--search", cleanedSearchQuery(query),
-                "--json", "number,title,state,url,labels,assignees,author,updatedAt",
-                "--limit", "50"]
+    var args = ["issue", "list", "--repo", "\(org)/\(name)", "--state", ghStateArg(query)]
+    let search = cleanedSearchQuery(query)
+    if !search.isEmpty { args += ["--search", search] }
+    args += ["--json", "number,title,state,url,labels,assignees,author,updatedAt", "--limit", "50"]
     switch runGH(args) {
     case .failure(let err): return .failure(err)
     case .success(let data): return .success((try? JSONDecoder().decode([TaskIssue].self, from: data)) ?? [])
@@ -225,10 +247,10 @@ nonisolated private func fetchIssues(repo: RepoEntry, query: String) -> Result<[
 
 nonisolated private func fetchPRs(repo: RepoEntry, query: String) -> Result<[TaskPR], TaskGHError> {
     guard let (org, name) = gitURLComponents(repo.url) else { return .success([]) }
-    let args = ["pr", "list", "--repo", "\(org)/\(name)",
-                "--search", cleanedSearchQuery(query),
-                "--json", "number,title,headRefName,author,state,isDraft,updatedAt,labels,reviewRequests,statusCheckRollup",
-                "--limit", "50"]
+    var args = ["pr", "list", "--repo", "\(org)/\(name)", "--state", ghStateArg(query)]
+    let search = cleanedSearchQuery(query)
+    if !search.isEmpty { args += ["--search", search] }
+    args += ["--json", "number,title,headRefName,baseRefName,author,state,isDraft,updatedAt,labels,reviewRequests,statusCheckRollup", "--limit", "50"]
     switch runGH(args) {
     case .failure(let err): return .failure(err)
     case .success(let data): return .success((try? JSONDecoder().decode([TaskPR].self, from: data)) ?? [])
@@ -407,20 +429,20 @@ func startIssueWorkspace(_ row: IssueRow, settings: AppSettings) async -> Result
     return result
 }
 
+// Creates the PR's worktree if it doesn't already exist and returns its path — split out from
+// startPRWorkspace so the review-agent launch (which needs the path but not the plain-open
+// notification) can reuse the exact same fetch/branch/worktree logic instead of duplicating it.
 @MainActor
-func startPRWorkspace(_ row: PRRow, settings: AppSettings) async -> Result<Void, TaskGHError> {
+func ensurePRWorktree(_ row: PRRow, settings: AppSettings) async -> Result<String, TaskGHError> {
     let headRef = row.pr.headRefName
     guard let path = worktreePath(for: row.repo, branch: headRef, settings: settings),
           let mainPath = mainClonePath(for: row.repo, settings: settings), isMainCloned(for: row.repo, settings: settings)
     else { return .failure(TaskGHError(message: "Clone \(row.repo.defaultBranch) first in Repos")) }
 
-    if FileManager.default.fileExists(atPath: path) {
-        openTaskWorkspace(path: path, name: headRef, folderName: row.repo.name, branchRef: headRef)
-        return .success(())
-    }
+    if FileManager.default.fileExists(atPath: path) { return .success(path) }
 
     let prNumber = row.pr.number
-    let result = await Task.detached { () -> Result<Void, TaskGHError> in
+    return await Task.detached { () -> Result<String, TaskGHError> in
         let fetchP = Process(); let fetchErrPipe = Pipe()
         fetchP.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         fetchP.arguments = ["-C", mainPath, "fetch", "origin", "pull/\(prNumber)/head"]
@@ -469,12 +491,18 @@ func startPRWorkspace(_ row: PRRow, settings: AppSettings) async -> Result<Void,
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return .failure(TaskGHError(message: msg.isEmpty ? "git worktree add failed" : msg))
         }
-        return .success(())
+        return .success(path)
     }.value
-    if case .success = result {
-        openTaskWorkspace(path: path, name: headRef, folderName: row.repo.name, branchRef: headRef)
+}
+
+@MainActor
+func startPRWorkspace(_ row: PRRow, settings: AppSettings) async -> Result<Void, TaskGHError> {
+    switch await ensurePRWorktree(row, settings: settings) {
+    case .failure(let err): return .failure(err)
+    case .success(let path):
+        openTaskWorkspace(path: path, name: row.pr.headRefName, folderName: row.repo.name, branchRef: row.pr.headRefName)
+        return .success(())
     }
-    return result
 }
 
 // MARK: - Repos/Branches tab mutations (clone, worktree, remove worktree)

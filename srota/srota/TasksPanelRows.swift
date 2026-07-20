@@ -686,8 +686,11 @@ struct PRRowView: View {
     let onStart: () -> Void
     let onOpenGitHub: () -> Void
     let onReviewerAction: (String, Bool) -> Void
+    let onReviewAgent: (TerminalPreset) -> Void
 
+    @Environment(PresetsStore.self) private var presetsStore
     @State private var hovered = false
+    @State private var showAgentPicker = false
     private static let openColor = Color(red: 0.35, green: 0.85, blue: 0.55)
     private static let mergedColor = Color(red: 0.6, green: 0.4, blue: 0.9)
 
@@ -706,8 +709,10 @@ struct PRRowView: View {
                     Text(row.pr.title).font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.mgLabel).lineLimit(1)
                     RepoTag(name: row.repo.name)
                 }
-                HStack(spacing: 6) {
+                HStack(spacing: 4) {
                     Text(row.pr.author.login).font(.system(size: 10)).foregroundStyle(Color.mgMuted).lineLimit(1)
+                    Text("· \(row.pr.headRefName) → \(row.pr.baseRefName)")
+                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(Color.mgMuted).lineLimit(1)
                     if row.pr.isDraft {
                         Text("· Draft").font(.system(size: 10)).foregroundStyle(Color.mgMuted)
                     }
@@ -744,6 +749,19 @@ struct PRRowView: View {
                 if isBusy {
                     ProgressView().scaleEffect(0.6)
                 } else {
+                    Button { showAgentPicker = true } label: {
+                        Image(systemName: "sparkles").font(.system(size: 11))
+                            .foregroundStyle(canStart ? Color.mgAccent : Color.mgMuted.opacity(0.5))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canStart)
+                    .help(canStart ? "Review with Agent" : "Clone \(row.repo.defaultBranch) first in Repos")
+                    .popover(isPresented: $showAgentPicker, arrowEdge: .bottom) {
+                        PresetPickerPopover(presets: presetsStore.presets.filter { $0.isAgent }) { preset in
+                            showAgentPicker = false
+                            onReviewAgent(preset)
+                        }
+                    }
                     RowActionPill(title: hasWorkspace ? "Open" : "Start", enabled: canStart, action: onStart)
                         .help(canStart ? "" : "Clone \(row.repo.defaultBranch) first in Repos")
                 }
@@ -768,6 +786,7 @@ struct RepoSidebarRow: View {
     let isSelected: Bool
     let onStart: () -> Void
     let onSelect: () -> Void
+    let onDelete: () -> Void
 
     @State private var hovered = false
     private static let clonedColor = Color(red: 0.35, green: 0.85, blue: 0.55)
@@ -802,6 +821,9 @@ struct RepoSidebarRow: View {
         .onHover { hovered = $0 }
         .overlay(alignment: .bottom) { Rectangle().fill(Color.mgBorder).frame(height: 1) }
         .onTapGesture(perform: onSelect)
+        .contextMenu {
+            Button("Remove Repository", role: .destructive, action: onDelete)
+        }
     }
 }
 
