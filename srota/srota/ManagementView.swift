@@ -351,7 +351,13 @@ private struct AgentsPanel: View {
                                     DaemonAgentRowView(
                                         row: row,
                                         isSelected: splitRoot != nil ? row.stableID == focusedSplitStableID : row.stableID == selectedStableID,
-                                        isInSplit: splitRoot?.containedStableIDs.contains(row.stableID) ?? false,
+                                        // Disables "Add to split" not just for agents already inside an
+                                        // active split, but also for the lone agent currently shown via
+                                        // the plain single-detail view — otherwise right-clicking it
+                                        // wraps that same agent in a redundant, confusing one-pane split.
+                                        isInSplit: splitRoot != nil
+                                            ? splitRoot!.containedStableIDs.contains(row.stableID)
+                                            : row.stableID == selectedStableID,
                                         onSelect: { selectOrSwitch(to: row) },
                                         onAddToSplit: { direction in addToSplit(row, direction: direction) }
                                     )
@@ -509,16 +515,6 @@ private struct AgentsPanel: View {
         focusedSplitStableID = row.stableID
     }
 
-    // Moves a pre-existing single-detail attachment into the split's attachment dictionary instead
-    // of leaving two AgentAttachment instances alive for the same PTY (each spawnOrAttach call
-    // steals ownership from the other, which is wasteful churn even though it self-heals via onStolen).
-    private func adoptSingleAttachmentIntoSplit(for stableID: String) {
-        if let existing = attachment, existing.stableID == stableID {
-            attachments[stableID] = existing
-            attachment = nil
-        }
-    }
-
     private func addToSplit(_ row: DaemonAgentRow, direction: Axis) {
         guard splitRoot?.containedStableIDs.contains(row.stableID) != true else { return }
         if let root = splitRoot {
@@ -526,11 +522,21 @@ private struct AgentsPanel: View {
                 ?? root.containedStableIDs.first
             guard let target else { return }
             splitRoot = root.replacingLeaf(target, addingInDirection: direction, newID: row.stableID)
-        } else if let current = selectedStableID, current != row.stableID {
-            adoptSingleAttachmentIntoSplit(for: current)
+        } else if let current = selectedStableID {
+            // Same agent as the one already shown alone — nothing to split, so no-op instead of
+            // wrapping it in a redundant one-pane split (the menu item is disabled for this case
+            // too, but guard here as well rather than relying solely on the UI).
+            guard current != row.stableID else { return }
+            // Drop the old single-detail attachment rather than moving it into `attachments` —
+            // moving the SAME AgentAttachment into splitPane's view-tree position doesn't actually
+            // preserve its terminal surface (SwiftUI still builds a new NSView there since the
+            // structural position changed), so it just showed a blank pane with no daemon replay.
+            // Letting splitPane's own onAppear→attachSplit path create a fresh attachment (like
+            // re-selecting an agent already does) is simpler and actually renders content. The
+            // daemon's existing steal/onStolen handshake resolves the brief dual ownership safely.
+            attachment = nil
             splitRoot = .split(direction, .leaf(current), .leaf(row.stableID))
         } else {
-            if let current = selectedStableID { adoptSingleAttachmentIntoSplit(for: current) }
             splitRoot = .leaf(row.stableID)
         }
         focusedSplitStableID = row.stableID
@@ -565,9 +571,12 @@ private struct AgentsPanel: View {
     @ViewBuilder
     private func splitPane(for stableID: String) -> some View {
         let row = rows.first { $0.stableID == stableID }
-        VStack(spacing: 0) {
-            splitPaneHeader(stableID: stableID, row: row)
-            Rectangle().fill(Color.mgBorder).frame(height: 1)
+        // Header as an .overlay ON TOP of the content, not stacked before it in a plain VStack —
+        // mirrors TerminalContentView.paneView exactly. TerminalSurfaceView is AppKit-backed and can
+        // win hit-testing over plain SwiftUI siblings stacked above it, which silently swallowed
+        // clicks on this pane's minimize button; .overlay guarantees the header paints and
+        // hit-tests on top regardless of any AppKit view z-order quirks underneath.
+        Group {
             if let row {
                 if let attach = attachments[stableID] {
                     TerminalSurfaceView(context: attach.viewState)
@@ -582,7 +591,14 @@ private struct AgentsPanel: View {
                 Color.clear.onAppear { minimizeFromSplit(stableID) }
             }
         }
+        .padding(.top, 29)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .top) {
+            VStack(spacing: 0) {
+                splitPaneHeader(stableID: stableID, row: row)
+                Rectangle().fill(Color.mgBorder).frame(height: 1)
+            }
+        }
         // Covers the terminal content area too, not just the header — clicking into the terminal
         // to type should also move the focus highlight, matching workspace panes' own behavior
         // (TerminalContentView.paneView attaches its equivalent gesture over the whole pane).
@@ -606,7 +622,11 @@ private struct AgentsPanel: View {
                     Image(systemName: "minus")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(Color.mgMuted)
-                        .frame(width: 16, height: 16)
+                        .frame(width: 20, height: 20)
+                        // .buttonStyle(.plain) on macOS hit-tests the label's drawn content, not
+                        // its frame, unless the hit shape is stated explicitly — without this the
+                        // tappable area shrank to roughly the "minus" glyph's own pixels.
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Minimize (agent keeps running in the background)")
@@ -630,28 +650,38 @@ private struct AgentsPanel: View {
 private struct AgentSplitTreeView: View {
     let node: AgentSplitNode
     let renderLeaf: (String) -> AnyView
-    @State private var size: CGFloat = 320
+    // nil until the user actually drags — defaults to 50% of whatever space is currently
+    // available (measured below) instead of a fixed guess, and locks to an explicit value once set.
+    @State private var size: CGFloat?
 
     var body: some View {
         switch node {
         case .leaf(let stableID):
             renderLeaf(stableID)
         case .split(let axis, let first, let second):
-            if axis == .horizontal {
-                HStack(spacing: 0) {
-                    AgentSplitTreeView(node: first, renderLeaf: renderLeaf)
-                        .frame(width: size)
-                    SidebarDivider(sidebarVisible: true, width: $size, axis: .horizontal)
-                    AgentSplitTreeView(node: second, renderLeaf: renderLeaf)
-                        .frame(maxWidth: .infinity)
-                }
-            } else {
-                VStack(spacing: 0) {
-                    AgentSplitTreeView(node: first, renderLeaf: renderLeaf)
-                        .frame(height: size)
-                    SidebarDivider(sidebarVisible: true, width: $size, axis: .vertical)
-                    AgentSplitTreeView(node: second, renderLeaf: renderLeaf)
-                        .frame(maxHeight: .infinity)
+            GeometryReader { geo in
+                let total = axis == .horizontal ? geo.size.width : geo.size.height
+                let resolvedSize = size ?? total / 2
+                let sizeBinding = Binding(get: { resolvedSize }, set: { size = $0 })
+                if axis == .horizontal {
+                    HStack(spacing: 0) {
+                        AgentSplitTreeView(node: first, renderLeaf: renderLeaf)
+                            .frame(width: resolvedSize)
+                        // No maxWidth cap: unlike the app sidebar, a split pane's sibling is
+                        // flexible (maxWidth: .infinity), so it should be draggable up to most of
+                        // the available space, not the sidebar's fixed 500pt ceiling.
+                        SidebarDivider(sidebarVisible: true, width: sizeBinding, axis: .horizontal, maxWidth: .greatestFiniteMagnitude)
+                        AgentSplitTreeView(node: second, renderLeaf: renderLeaf)
+                            .frame(maxWidth: .infinity)
+                    }
+                } else {
+                    VStack(spacing: 0) {
+                        AgentSplitTreeView(node: first, renderLeaf: renderLeaf)
+                            .frame(height: resolvedSize)
+                        SidebarDivider(sidebarVisible: true, width: sizeBinding, axis: .vertical, maxWidth: .greatestFiniteMagnitude)
+                        AgentSplitTreeView(node: second, renderLeaf: renderLeaf)
+                            .frame(maxHeight: .infinity)
+                    }
                 }
             }
         }

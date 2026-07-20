@@ -4,7 +4,10 @@ enum SidebarResizeLogic {
     static let minWidth: CGFloat = 150
     static let maxWidth: CGFloat = 500
 
-    static func updatedWidth(startWidth: CGFloat, translationWidth: CGFloat) -> CGFloat {
+    static func updatedWidth(
+        startWidth: CGFloat, translationWidth: CGFloat,
+        minWidth: CGFloat = minWidth, maxWidth: CGFloat = maxWidth
+    ) -> CGFloat {
         max(minWidth, min(maxWidth, startWidth + translationWidth))
     }
 }

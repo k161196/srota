@@ -933,7 +933,11 @@ private final class SidebarResizeHandleView: NSView {
     }
 
     private func coord(_ event: NSEvent) -> CGFloat {
-        axis == .horizontal ? event.locationInWindow.x : event.locationInWindow.y
+        // AppKit's locationInWindow.y increases upward (bottom-left origin), the opposite of
+        // SwiftUI's top-down layout coordinates used for `height:` frames — negate it so dragging
+        // down (which should grow the first/top pane, same sense as dragging right for horizontal)
+        // produces a positive delta instead of an inverted one.
+        axis == .horizontal ? event.locationInWindow.x : -event.locationInWindow.y
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -990,6 +994,8 @@ struct SidebarDivider: View {
     // flips relative to the left sidebar, where dragging right grows it).
     var mirrored: Bool = false
     var axis: Axis = .horizontal
+    var minWidth: CGFloat = SidebarResizeLogic.minWidth
+    var maxWidth: CGFloat = SidebarResizeLogic.maxWidth
     @State private var isHovered = false
     @State private var dragStartWidth: CGFloat? = nil
 
@@ -1013,7 +1019,9 @@ struct SidebarDivider: View {
                     let startWidth = dragStartWidth ?? width
                     dragStartWidth = startWidth
                     let translation = mirrored ? -dx : dx
-                    width = SidebarResizeLogic.updatedWidth(startWidth: startWidth, translationWidth: translation)
+                    width = SidebarResizeLogic.updatedWidth(
+                        startWidth: startWidth, translationWidth: translation, minWidth: minWidth, maxWidth: maxWidth
+                    )
                 },
                 onDragEnded: { dragStartWidth = nil },
                 onHoverChanged: { isHovered = $0 }
