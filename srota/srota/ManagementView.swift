@@ -251,8 +251,23 @@ private struct AgentsPanel: View {
     @State private var listWidth: CGFloat = 280
     @State private var listVisible = true
     @State private var regions: [AgentRegion] = []
+    // Which region currently fills the whole content area — like a tab, except a "tab" can be a
+    // lone agent or an entire split-group. Multiple regions/groups can exist at once (defined via
+    // right-click → Add to split), but only one is ever rendered; the rest just sit in the sidebar's
+    // grouped list until clicked into.
+    @State private var viewedRegionID: UUID?
     @State private var focusedStableID: String?
     @State private var attachments: [String: AgentAttachment] = [:]
+
+    // Drag-to-reposition/split, mirroring TerminalContentView's own pane drag-and-drop exactly in
+    // feel (drag a header, see a left/right/top/bottom drop-zone highlight, drop to split or swap)
+    // — but hit-testing measured pane frames (paneFrames, via a PreferenceKey) instead of a stored
+    // fractional PaneLayout dict, since regions are a flat evenly-tiled list, not 2D rects.
+    @State private var isDraggingPane = false
+    @State private var dragSourceID: String?
+    @State private var dragHoverID: String?
+    @State private var dropSide: DropSide?
+    @State private var paneFrames: [String: CGRect] = [:]
 
     private var rows: [DaemonAgentRow] {
         let states = daemon.agentStatesByStableID
@@ -293,13 +308,6 @@ private struct AgentsPanel: View {
 
     private func regionIndex(containing stableID: String) -> Int? {
         regions.firstIndex { $0.memberIDs.contains(stableID) }
-    }
-
-    // The region/member that "Add to split" and plain-click "switch" both target when nothing more
-    // specific is focused: the focused agent's own region if it's still open, else the last region.
-    private func fallbackTargetID() -> String? {
-        if let focusedStableID, regionIndex(containing: focusedStableID) != nil { return focusedStableID }
-        return regions.last?.memberIDs.last
     }
 
     var body: some View {
@@ -372,15 +380,29 @@ private struct AgentsPanel: View {
             // Disables "Add to split" for any agent that's already open somewhere — whether it's
             // one member of a multi-agent region or the sole member of a lone-agent region — since
             // adding an already-open agent again doesn't mean anything.
-            isInSplit: regionIndex(containing: row.stableID) != nil,
+            // Only disables "Add to split" for an agent already in the region CURRENTLY being
+            // viewed — an agent open in some other (not-viewed) region is still a valid target;
+            // addToSplit moves it here instead of duplicating it.
+            isInSplit: viewedRegion?.memberIDs.contains(row.stableID) ?? false,
             onSelect: { selectOrSwitch(to: row) },
             onAddToSplit: { direction in addToSplit(row, direction: direction) }
         )
     }
 
+    private var viewedRegion: AgentRegion? {
+        viewedRegionID.flatMap { id in regions.first { $0.id == id } }
+    }
+
     @ViewBuilder
     private var content: some View {
-        if regions.isEmpty {
+        if let region = viewedRegion {
+            // Only the viewed region renders — like a tab, except a "tab" can be a whole
+            // split-group. Other regions still exist (visible as clusters in the sidebar list) but
+            // aren't in the view tree at all until clicked into.
+            AgentGroupView(ids: region.memberIDs, direction: region.direction) { AnyView(agentPane(for: $0)) }
+                .coordinateSpace(name: "agentPanes")
+                .onPreferenceChange(AgentPaneFramePreferenceKey.self) { paneFrames = $0 }
+        } else {
             VStack {
                 Spacer()
                 Text("Select an agent")
@@ -388,20 +410,52 @@ private struct AgentsPanel: View {
                     .foregroundStyle(Color.mgMuted)
                 Spacer()
             }
-        } else {
-            // All open regions (lone agents and multi-agent splits alike) are tiled evenly side by
-            // side — this is the same "auto-tile evenly" rule AgentGroupView applies *within* a
-            // region, just one level up, across regions.
-            HStack(spacing: 0) {
-                ForEach(Array(regions.enumerated()), id: \.element.id) { index, region in
-                    AgentGroupView(ids: region.memberIDs, direction: region.direction) { AnyView(agentPane(for: $0)) }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    if index < regions.count - 1 {
-                        Rectangle().fill(Color.mgBorder).frame(width: 1)
-                    }
-                }
+        }
+    }
+
+    private func paneAt(_ p: CGPoint) -> String? {
+        paneFrames.first { $0.value.contains(p) }?.key
+    }
+
+    private func sideOf(_ p: CGPoint, paneID: String) -> DropSide? {
+        guard let rect = paneFrames[paneID], rect.width > 0, rect.height > 0 else { return nil }
+        let dx = abs(p.x - rect.midX) / rect.width
+        let dy = abs(p.y - rect.midY) / rect.height
+        if dx > dy { return p.x < rect.midX ? .left : .right }
+        return p.y < rect.midY ? .top : .bottom
+    }
+
+    // Mirrors TerminalTab.performDrop, adapted from fractional-rect halving to a flat list: relocate
+    // `source` out of its current region and insert it beside `target` in target's region, on the
+    // dropped side. If source's old region is left empty, it's removed (same as minimizing the last
+    // member out of a region); if target's region was a lone agent, the drop direction becomes that
+    // region's direction going forward (same "first add decides direction" rule as addToSplit).
+    private func performPaneDrop(source: String, target: String, side: DropSide) {
+        guard source != target, regionIndex(containing: target) != nil else { return }
+        if let sourceIdx = regionIndex(containing: source) {
+            regions[sourceIdx].memberIDs.removeAll { $0 == source }
+            if regions[sourceIdx].memberIDs.isEmpty {
+                regions.remove(at: sourceIdx)
             }
         }
+        guard let targetIdx = regionIndex(containing: target) else { return }
+        if regions[targetIdx].memberIDs.count == 1 {
+            regions[targetIdx].direction = (side == .left || side == .right) ? .horizontal : .vertical
+        }
+        guard let insertAt = regions[targetIdx].memberIDs.firstIndex(of: target) else { return }
+        let before = (side == .left || side == .top)
+        regions[targetIdx].memberIDs.insert(source, at: before ? insertAt : insertAt + 1)
+        focusedStableID = source
+    }
+
+    // Mirrors TerminalTab.swapLayouts: trades the two agents' positions without changing which
+    // region either belongs to (same region: swap list order; different regions: swap slots).
+    private func swapPanePositions(_ a: String, _ b: String) {
+        guard a != b, let aIdx = regionIndex(containing: a), let bIdx = regionIndex(containing: b) else { return }
+        guard let aPos = regions[aIdx].memberIDs.firstIndex(of: a),
+              let bPos = regions[bIdx].memberIDs.firstIndex(of: b) else { return }
+        regions[aIdx].memberIDs[aPos] = b
+        regions[bIdx].memberIDs[bPos] = a
     }
 
     private var header: some View {
@@ -452,38 +506,52 @@ private struct AgentsPanel: View {
         }
     }
 
-    // Plain click on a row: if it's already open somewhere, just focus that pane. Otherwise it
-    // "switches" — replaces whatever agent currently occupies the target slot — rather than opening
-    // a new region; opening a new region alongside what's already there is what "Add to split" (the
-    // right-click menu) is for.
+    // Plain click on a row: switches which region is VIEWED. If the agent is already part of a
+    // region (lone or grouped), that whole region becomes the viewed one and this agent gets
+    // focus within it. Otherwise it opens as its own new, separate region and views that instead
+    // — it never touches an existing group's membership. Explicitly growing a group is what
+    // "Add to split" (the right-click menu) is for.
     private func selectOrSwitch(to row: DaemonAgentRow) {
-        if regionIndex(containing: row.stableID) != nil {
+        if let idx = regionIndex(containing: row.stableID) {
+            viewedRegionID = regions[idx].id
             focusedStableID = row.stableID
             return
         }
-        guard let targetID = fallbackTargetID(), let idx = regionIndex(containing: targetID) else {
-            // Nothing open at all yet.
-            regions.append(AgentRegion(id: UUID(), direction: .horizontal, memberIDs: [row.stableID]))
-            focusedStableID = row.stableID
-            return
-        }
-        attachments[targetID] = nil
-        regions[idx].memberIDs = regions[idx].memberIDs.map { $0 == targetID ? row.stableID : $0 }
+        let region = AgentRegion(id: UUID(), direction: .horizontal, memberIDs: [row.stableID])
+        regions.append(region)
+        viewedRegionID = region.id
         focusedStableID = row.stableID
     }
 
-    // No cap: adding to an already-multi-member region always grows that SAME region (evenly
-    // re-tiling all its members), never nests or replaces. The chosen direction only matters the
-    // first time a lone agent becomes a real split — an existing multi-member region keeps its
-    // original direction regardless of which menu item was used to grow it further.
+    // No cap: always grows whichever region is currently VIEWED (evenly re-tiling all its members),
+    // never nests or replaces — this is how "hover a group, right-click a different non-group agent,
+    // Add to split" pulls that agent into the group you're looking at. The chosen direction only
+    // matters the first time a lone agent becomes a real split; an existing multi-member region
+    // keeps its original direction regardless of which menu item was used to grow it further.
     private func addToSplit(_ row: DaemonAgentRow, direction: Axis) {
-        guard regionIndex(containing: row.stableID) == nil else { return }
-        guard let targetID = fallbackTargetID(), let idx = regionIndex(containing: targetID) else {
-            // Nothing open yet — right-clicking "Add to split" directly opens this as the first region.
-            regions.append(AgentRegion(id: UUID(), direction: direction, memberIDs: [row.stableID]))
+        guard let viewedRegionID else {
+            // Nothing viewed yet. If this agent is already open in some other lingering region,
+            // just switch to viewing that instead of duplicating it; otherwise it becomes a new
+            // region and that becomes the view.
+            if let existingIdx = regionIndex(containing: row.stableID) {
+                self.viewedRegionID = regions[existingIdx].id
+            } else {
+                let region = AgentRegion(id: UUID(), direction: direction, memberIDs: [row.stableID])
+                regions.append(region)
+                self.viewedRegionID = region.id
+            }
             focusedStableID = row.stableID
             return
         }
+        guard !(viewedRegion?.memberIDs.contains(row.stableID) ?? false) else { return }
+        // Already open in a DIFFERENT region — move it here instead of duplicating it.
+        if let oldIdx = regionIndex(containing: row.stableID) {
+            regions[oldIdx].memberIDs.removeAll { $0 == row.stableID }
+            if regions[oldIdx].memberIDs.isEmpty {
+                regions.remove(at: oldIdx)
+            }
+        }
+        guard let idx = regions.firstIndex(where: { $0.id == viewedRegionID }) else { return }
         if regions[idx].memberIDs.count == 1 {
             regions[idx].direction = direction
         }
@@ -494,12 +562,14 @@ private struct AgentsPanel: View {
     private func minimizeFromRegion(_ stableID: String) {
         attachments[stableID] = nil
         guard let idx = regionIndex(containing: stableID) else { return }
+        let regionID = regions[idx].id
         regions[idx].memberIDs.removeAll { $0 == stableID }
         if regions[idx].memberIDs.isEmpty {
             regions.remove(at: idx)
+            if viewedRegionID == regionID { viewedRegionID = nil }
         }
         if focusedStableID == stableID {
-            focusedStableID = regions.first?.memberIDs.first
+            focusedStableID = viewedRegion?.memberIDs.first
         }
     }
 
@@ -525,6 +595,8 @@ private struct AgentsPanel: View {
     @ViewBuilder
     private func agentPane(for stableID: String) -> some View {
         let row = rows.first { $0.stableID == stableID }
+        let isSource = isDraggingPane && dragSourceID == stableID
+        let isTarget = isDraggingPane && dragHoverID == stableID && dragSourceID != stableID
         // Header as an .overlay ON TOP of the content, not stacked before it in a plain VStack —
         // mirrors TerminalContentView.paneView exactly. TerminalSurfaceView is AppKit-backed and can
         // win hit-testing over plain SwiftUI siblings stacked above it, which silently swallowed
@@ -545,8 +617,39 @@ private struct AgentsPanel: View {
                 Color.clear.onAppear { minimizeFromRegion(stableID) }
             }
         }
+        .opacity(isSource ? 0.45 : 1)
         .padding(.top, 29)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: AgentPaneFramePreferenceKey.self,
+                    value: [stableID: proxy.frame(in: .named("agentPanes"))]
+                )
+            }
+        )
+        .overlay {
+            // Drop-zone highlight while dragging another pane over this one — mirrors
+            // TerminalContentView.paneView's isTarget/dropSide visual exactly (same colors
+            // reinterpreted through this file's own mgAccent/mgBorder palette).
+            if isTarget {
+                ZStack {
+                    switch dropSide {
+                    case .left:
+                        HStack(spacing: 0) { Color.mgAccent.opacity(0.22); Color.clear }
+                    case .right:
+                        HStack(spacing: 0) { Color.clear; Color.mgAccent.opacity(0.22) }
+                    case .top:
+                        VStack(spacing: 0) { Color.mgAccent.opacity(0.22); Color.clear }
+                    case .bottom:
+                        VStack(spacing: 0) { Color.clear; Color.mgAccent.opacity(0.22) }
+                    case nil:
+                        Color.mgAccent.opacity(0.18)
+                    }
+                    Rectangle().strokeBorder(Color.mgAccent, lineWidth: 2)
+                }
+            }
+        }
         .overlay(alignment: .top) {
             VStack(spacing: 0) {
                 agentPaneHeader(stableID: stableID, row: row)
@@ -588,11 +691,47 @@ private struct AgentsPanel: View {
             .padding(.horizontal, 10)
             .frame(height: 28)
             .contentShape(Rectangle())
+            // minimumDistance: 4, not a plain tap gesture — this is what lets the minimize Button
+            // above still receive plain clicks (the drag only starts recognizing once movement
+            // crosses the threshold), exactly like PaneHeader's own drag gesture in ContentView.swift.
+            .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named("agentPanes"))
+                .onChanged { value in
+                    isDraggingPane = true
+                    dragSourceID = stableID
+                    if let hovered = paneAt(value.location), hovered != stableID {
+                        dragHoverID = hovered
+                        dropSide = sideOf(value.location, paneID: hovered)
+                    } else {
+                        dragHoverID = nil
+                        dropSide = nil
+                    }
+                }
+                .onEnded { value in
+                    if let target = paneAt(value.location), target != stableID {
+                        if let side = dropSide {
+                            performPaneDrop(source: stableID, target: target, side: side)
+                        } else {
+                            swapPanePositions(stableID, target)
+                        }
+                    }
+                    isDraggingPane = false
+                    dragSourceID = nil
+                    dragHoverID = nil
+                    dropSide = nil
+                }
+            )
 
             Rectangle()
                 .fill(focused ? Color.mgAccent : Color.mgBorder)
                 .frame(height: focused ? 2 : 1)
         }
+    }
+}
+
+private struct AgentPaneFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { $1 })
     }
 }
 
