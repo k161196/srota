@@ -207,21 +207,9 @@ struct ManagementPanel: View {
 }
 
 // MARK: - Agents panel (multiple agents open side by side, evenly tiled)
-
-// A "region" is an ordered group of 1+ agents evenly tiled together in one direction. A lone open
-// agent is simply a region with a single member — there's no separate "standalone" case, which is
-// what lets a freshly-opened agent and a multi-agent split share one attach/render/minimize path
-// instead of two parallel mechanisms (that duplication was the root cause of earlier bugs, e.g. a
-// blank pane when moving an attachment between the single-view and split-view code paths).
 //
-// Multiple regions can be open at once (e.g. a lone agent next to a 3-way split); AgentsPanel tiles
-// all open regions evenly side by side. Within a region, "Add to split" has no cap — a region can
-// grow to any number of members, always evenly divided in whichever direction it was first split.
-private struct AgentRegion: Identifiable {
-    let id: UUID
-    var direction: Axis
-    var memberIDs: [String]
-}
+// AgentRegion and its membership operations (regionIndex/selectOrSwitch/addToSplit) live in
+// AgentRegionLogic.swift, extracted so they're unit-testable outside SwiftUI/GhosttyTerminal.
 
 private struct DaemonAgentRow: Identifiable {
     let stableID: String
@@ -307,7 +295,7 @@ private struct AgentsPanel: View {
     }
 
     private func regionIndex(containing stableID: String) -> Int? {
-        regions.firstIndex { $0.memberIDs.contains(stableID) }
+        AgentRegionLogic.regionIndex(containing: stableID, in: regions)
     }
 
     var body: some View {
@@ -331,7 +319,7 @@ private struct AgentsPanel: View {
         .onChange(of: focusedStableID) { _, newID in
             if let newID, let attach = attachments[newID] { focusTerminalSurface(for: attach.viewState) }
         }
-        .onChange(of: daemon.agentStatesByStableID.count) { _, _ in refresh() }
+        .onChange(of: daemon.paneListRevision) { _, _ in refresh() }
     }
 
     @ViewBuilder
@@ -512,15 +500,10 @@ private struct AgentsPanel: View {
     // — it never touches an existing group's membership. Explicitly growing a group is what
     // "Add to split" (the right-click menu) is for.
     private func selectOrSwitch(to row: DaemonAgentRow) {
-        if let idx = regionIndex(containing: row.stableID) {
-            viewedRegionID = regions[idx].id
-            focusedStableID = row.stableID
-            return
-        }
-        let region = AgentRegion(id: UUID(), direction: .horizontal, memberIDs: [row.stableID])
-        regions.append(region)
-        viewedRegionID = region.id
-        focusedStableID = row.stableID
+        let result = AgentRegionLogic.selectOrSwitch(to: row.stableID, regions: regions)
+        regions = result.regions
+        viewedRegionID = result.viewedRegionID
+        focusedStableID = result.focusedStableID
     }
 
     // No cap: always grows whichever region is currently VIEWED (evenly re-tiling all its members),
@@ -529,34 +512,12 @@ private struct AgentsPanel: View {
     // matters the first time a lone agent becomes a real split; an existing multi-member region
     // keeps its original direction regardless of which menu item was used to grow it further.
     private func addToSplit(_ row: DaemonAgentRow, direction: Axis) {
-        guard let viewedRegionID else {
-            // Nothing viewed yet. If this agent is already open in some other lingering region,
-            // just switch to viewing that instead of duplicating it; otherwise it becomes a new
-            // region and that becomes the view.
-            if let existingIdx = regionIndex(containing: row.stableID) {
-                self.viewedRegionID = regions[existingIdx].id
-            } else {
-                let region = AgentRegion(id: UUID(), direction: direction, memberIDs: [row.stableID])
-                regions.append(region)
-                self.viewedRegionID = region.id
-            }
-            focusedStableID = row.stableID
-            return
+        let result = AgentRegionLogic.addToSplit(row.stableID, direction: direction, regions: regions, viewedRegionID: viewedRegionID)
+        regions = result.regions
+        viewedRegionID = result.viewedRegionID
+        if let focusedStableID = result.focusedStableID {
+            self.focusedStableID = focusedStableID
         }
-        guard !(viewedRegion?.memberIDs.contains(row.stableID) ?? false) else { return }
-        // Already open in a DIFFERENT region — move it here instead of duplicating it.
-        if let oldIdx = regionIndex(containing: row.stableID) {
-            regions[oldIdx].memberIDs.removeAll { $0 == row.stableID }
-            if regions[oldIdx].memberIDs.isEmpty {
-                regions.remove(at: oldIdx)
-            }
-        }
-        guard let idx = regions.firstIndex(where: { $0.id == viewedRegionID }) else { return }
-        if regions[idx].memberIDs.count == 1 {
-            regions[idx].direction = direction
-        }
-        regions[idx].memberIDs.append(row.stableID)
-        focusedStableID = row.stableID
     }
 
     private func minimizeFromRegion(_ stableID: String) {
@@ -744,28 +705,44 @@ private struct AgentGroupView: View {
     let ids: [String]
     let direction: Axis
     let renderLeaf: (String) -> AnyView
-    @State private var sizes: [String: CGFloat] = [:]
+    // Fractions of the group's total extent, not raw pixel widths — a fraction re-scales for free
+    // whenever `total` changes (window resize), unlike a stored pixel width, which stayed fixed
+    // while everything around it moved and could eat the whole group on its own.
+    @State private var fractions: [String: CGFloat] = [:]
 
     var body: some View {
         GeometryReader { geo in
             let total = direction == .horizontal ? geo.size.width : geo.size.height
-            let evenShare = ids.isEmpty ? 0 : total / CGFloat(ids.count)
+            let count = ids.count
+            let evenFraction = PaneGroupResizeLogic.evenFraction(count: count)
+            let minWidth = PaneGroupResizeLogic.minWidth(total: total, count: count)
+            // Current size of every fixed (non-last) member, keyed by id — used to bound each
+            // divider's max by what its siblings are ACTUALLY holding, not an assumed floor.
+            let fixedSizes: [String: CGFloat] = Dictionary(uniqueKeysWithValues: ids.enumerated().compactMap { index, id in
+                index == count - 1 ? nil : (id, (fractions[id] ?? evenFraction) * total)
+            })
             let stack = ForEach(Array(ids.enumerated()), id: \.element) { index, id in
                 let isLast = index == ids.count - 1
+                let size = (fractions[id] ?? evenFraction) * total
                 renderLeaf(id)
                     .frame(
-                        width: direction == .horizontal && !isLast ? (sizes[id] ?? evenShare) : nil,
-                        height: direction == .vertical && !isLast ? (sizes[id] ?? evenShare) : nil
+                        width: direction == .horizontal && !isLast ? size : nil,
+                        height: direction == .vertical && !isLast ? size : nil
                     )
                     .frame(
                         maxWidth: direction == .horizontal && isLast ? .infinity : nil,
                         maxHeight: direction == .vertical && isLast ? .infinity : nil
                     )
                 if !isLast {
+                    let otherFixedSizes = fixedSizes.filter { $0.key != id }.map(\.value)
+                    let maxWidth = PaneGroupResizeLogic.maxWidth(total: total, count: count, otherFixedSizes: otherFixedSizes)
                     SidebarDivider(
                         sidebarVisible: true,
-                        width: Binding(get: { sizes[id] ?? evenShare }, set: { sizes[id] = $0 }),
-                        axis: direction, maxWidth: .greatestFiniteMagnitude
+                        width: Binding(
+                            get: { size },
+                            set: { fractions[id] = total > 0 ? $0 / total : evenFraction }
+                        ),
+                        axis: direction, minWidth: minWidth, maxWidth: maxWidth
                     )
                 }
             }
@@ -775,6 +752,9 @@ private struct AgentGroupView: View {
                 VStack(spacing: 0) { stack }
             }
         }
+        // Stored fractions assumed the old member count/order — a membership change invalidates
+        // them, so drop back to an even split rather than carrying stale proportions forward.
+        .onChange(of: ids) { fractions = [:] }
     }
 }
 

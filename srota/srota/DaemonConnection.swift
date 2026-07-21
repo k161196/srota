@@ -112,6 +112,12 @@ private final class ManagedSession {
 final class DaemonConnection {
     private(set) var isConnected = false
     private(set) var agentStatesByStableID: [String: AgentNotificationState] = [:]
+    // Bumped on every event that can change what a pane list snapshot (PTYInfo, via list()) would
+    // return: exit, in-place status/metadata update, or a stableID reused by a new process. A
+    // dictionary key-count comparison misses all three (in-place updates don't change the count,
+    // and "dead" doesn't touch agentStatesByStableID at all) — this is an explicit signal instead
+    // of a proxy, so consumers refetching the pane list can't silently miss a change.
+    private(set) var paneListRevision = 0
 
     // Fired once a pane is genuinely, permanently closed (not on the ws_panes layout-save churn —
     // see ticket 07 in docs/wayfinder/agent-session-persistence/). Set by whoever owns WorkspaceDB;
@@ -246,6 +252,13 @@ final class DaemonConnection {
                   let paneID = json["paneID"] as? String else { return }
             let cont = stateLock.withLock { pendingCreates.removeValue(forKey: requestID) }
             cont?.resume(returning: paneID)
+            // A new pane is exactly the kind of change a list() snapshot consumer needs to
+            // refetch for — without this, a non-agent terminal (which never fires agent_status)
+            // stayed invisible in "Show all terminals" until some unrelated event happened to
+            // bump this instead.
+            DispatchQueue.main.async {
+                self.paneListRevision += 1
+            }
 
         case "ring_buffer":
             guard let paneID = json["paneID"] as? String,
@@ -287,6 +300,7 @@ final class DaemonConnection {
             let session = stateLock.withLock { detachPaneLocked(paneID: paneID) }
             DispatchQueue.main.async {
                 session?.finish(exitCode: UInt32(bitPattern: code), runtimeMilliseconds: 0)
+                self.paneListRevision += 1
             }
 
         case "agent_status":
@@ -306,6 +320,7 @@ final class DaemonConnection {
                 } else {
                     self.agentStatesByStableID.removeValue(forKey: stableID)
                 }
+                self.paneListRevision += 1
                 self.onAgentEvent?(event)
             }
 

@@ -14,3 +14,19 @@ swiftc -parse-as-library \
   "$ROOT/scripts/test-agent-notification-state.swift" \
   -o /tmp/srota-routing-test
 /tmp/srota-routing-test
+
+swiftc -parse-as-library \
+  "$ROOT/srota/srota/AgentRegionLogic.swift" \
+  "$ROOT/scripts/test-agent-region-logic.swift" \
+  -o /tmp/srota-region-test
+/tmp/srota-region-test
+
+swiftc -parse-as-library \
+  "$ROOT/srota/srota-daemon/RingBuffer.swift" \
+  "$ROOT/srota/srota-daemon/DaemonProtocol.swift" \
+  "$ROOT/srota/srota-daemon/PTYRegistry.swift" \
+  "$ROOT/srota/srota-daemon/ClientSession.swift" \
+  "$ROOT/srota/srota-daemon/PTYProcess.swift" \
+  "$ROOT/scripts/test-daemon-concurrency.swift" \
+  -o /tmp/srota-daemon-concurrency-test
+/tmp/srota-daemon-concurrency-test

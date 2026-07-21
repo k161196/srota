@@ -10,7 +10,7 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
 @main
 struct AgentNotificationStateTests {
     static func main() {
-        expect(AgentRunStatus(event: "SessionStart") == .working, "SessionStart should map to working")
+        expect(AgentRunStatus(event: "SessionStart") == .idle, "SessionStart should map to idle (matches PTYProcess.status(for:) in the daemon)")
         expect(AgentRunStatus(event: "Start") == .working, "Start should map to working")
         expect(AgentRunStatus(event: "Stop") == .idle, "Stop should map to idle")
         expect(AgentRunStatus(event: "SessionEnd") == .done, "SessionEnd should map to done")

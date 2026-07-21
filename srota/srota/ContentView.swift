@@ -1027,7 +1027,10 @@ struct SidebarDivider: View {
                 onHoverChanged: { isHovered = $0 }
             )
         }
-        .frame(width: axis == .horizontal ? 9 : nil, height: axis == .horizontal ? nil : 9)
+        .frame(
+            width: axis == .horizontal ? SidebarResizeLogic.dividerThickness(sidebarVisible: sidebarVisible) : nil,
+            height: axis == .horizontal ? nil : SidebarResizeLogic.dividerThickness(sidebarVisible: sidebarVisible)
+        )
         .opacity(sidebarVisible ? 1 : 0)
         .allowsHitTesting(sidebarVisible)
         .animation(.easeOut(duration: 0.12), value: isHovered)
@@ -1115,9 +1118,10 @@ struct ContentView: View {
                     let hex = String(UUID().uuidString.filter { $0.isHexDigit }.prefix(6).lowercased())
                     let launchersDir = NSHomeDirectory() + "/\(Srota.dir)/launchers"
                     try? FileManager.default.createDirectory(atPath: launchersDir, withIntermediateDirectories: true)
+                    pruneStaleLauncherPrompts(in: launchersDir)
                     let promptFile = launchersDir + "/preset-prompt-\(hex).txt"
                     try? preset.systemPrompt.write(toFile: promptFile, atomically: true, encoding: .utf8)
-                    let spVar = "__SROTA_SP=$(cat '\(promptFile)')"
+                    let spVar = "__SROTA_SP=$(cat '\(promptFile)'); rm -f '\(promptFile)'"
                     let launch = preset.systemPromptFlag.isEmpty
                         ? "\(spVar); \(lastCmd) \"$__SROTA_SP\""
                         : "\(spVar); \(lastCmd) \(preset.systemPromptFlag) \"$__SROTA_SP\""
@@ -1463,6 +1467,31 @@ struct ContentView: View {
         }
     }
 
+    // Best-effort cleanup (the inline `rm -f` after each launch's `cat`) only fires once the
+    // shell we handed the file to actually runs it — a failed tab/send, a shell that never
+    // starts, or a crash leaves the file behind, and nothing ever pruned those afterward. Sweep
+    // anything old enough to be orphaned (not a launch that's merely still starting up) on every
+    // new launch, so orphans from either path can't accumulate indefinitely between the rare
+    // times someone happens to notice and clean ~/.srota manually.
+    //
+    // Only ever touches its own agent-prompt-*/preset-prompt-* files — this directory also holds
+    // long-lived <name>.sh scripts written by makeToolLauncher(), which must never be swept just
+    // for being old.
+    private static let staleLauncherPromptPrefixes = ["agent-prompt-", "preset-prompt-"]
+
+    private func pruneStaleLauncherPrompts(in launchersDir: String, olderThan maxAge: TimeInterval = 3600) {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: launchersDir) else { return }
+        let cutoff = Date().addingTimeInterval(-maxAge)
+        for name in names {
+            guard Self.staleLauncherPromptPrefixes.contains(where: { name.hasPrefix($0) }) else { continue }
+            let path = launchersDir + "/" + name
+            guard let modified = try? fm.attributesOfItem(atPath: path)[.modificationDate] as? Date,
+                  modified < cutoff else { continue }
+            try? fm.removeItem(atPath: path)
+        }
+    }
+
     private func launchAgent(agent: AgentItem, systemPrompt: String, firstMessage: String, preset: TerminalPreset?) {
         // sheet preset wins; fall back to agent's saved presetID so it applies even if user didn't touch the picker
         let resolvedPreset = preset ?? presetsStore.presets.first { $0.id == agent.presetID }
@@ -1487,6 +1516,7 @@ struct ContentView: View {
         let hex = String(UUID().uuidString.filter { $0.isHexDigit }.prefix(6).lowercased())
         let launchersDir = NSHomeDirectory() + "/\(Srota.dir)/launchers"
         try? FileManager.default.createDirectory(atPath: launchersDir, withIntermediateDirectories: true)
+        pruneStaleLauncherPrompts(in: launchersDir)
         let promptFile = launchersDir + "/agent-prompt-\(hex).txt"
         try? promptContent.write(toFile: promptFile, atomically: true, encoding: .utf8)
 
@@ -1494,13 +1524,16 @@ struct ContentView: View {
         let escapedFirst = firstMessage
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+        // rm right after cat, in the same line — the file is a one-shot conduit past send()'s
+        // newline-as-Enter behavior; nothing else ever reads it again, so nothing else should clean it up.
+        let readAndDelete = "__SROTA_SP=$(cat '\(promptFile)'); rm -f '\(promptFile)'"
         let cmd: String
         if flag.isEmpty {
-            cmd = "__SROTA_SP=$(cat '\(promptFile)'); \(base) \"$__SROTA_SP\"\n"
+            cmd = "\(readAndDelete); \(base) \"$__SROTA_SP\"\n"
         } else {
             cmd = firstMessage.isEmpty
-                ? "__SROTA_SP=$(cat '\(promptFile)'); \(base) \(flag) \"$__SROTA_SP\"\n"
-                : "__SROTA_SP=$(cat '\(promptFile)'); echo \"\(escapedFirst)\" | \(base) \(flag) \"$__SROTA_SP\"\n"
+                ? "\(readAndDelete); \(base) \(flag) \"$__SROTA_SP\"\n"
+                : "\(readAndDelete); echo \"\(escapedFirst)\" | \(base) \(flag) \"$__SROTA_SP\"\n"
         }
 
         if agent.runInTempDir {

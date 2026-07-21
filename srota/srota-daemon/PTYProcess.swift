@@ -32,6 +32,130 @@ func ptyEnvironment(
     return mergedEnv
 }
 
+// One subscribed client, plus a serial queue that every send to that client (for this one PTY)
+// goes through. The queue — not PTYProcess's own `lock` — is what makes replay-before-live
+// ordering hold: attach() and handleOutput() both enqueue onto it while holding `lock` (so
+// enqueue order is deterministic), but the actual blocking client.send() I/O runs later, off the
+// lock, on this per-client queue. A slow/stalled reader backs up only its own queue — never
+// PTYProcess's shared lock, which every other subscriber's send, resize(), write(), terminate(),
+// and attach() all need briefly for bookkeeping.
+final class Subscriber {
+    let client: ClientSession
+    let queue = DispatchQueue(label: "srota.pty.subscriber")
+    private let stateLock = NSLock()
+    private var valid = true
+    private var pendingBytes = 0
+    // Bumped every time a new replay supersedes an old one. DispatchWorkItem.cancel() is purely
+    // cooperative — it only sets a flag nobody reads, it does NOT stop an already-queued item from
+    // running when its turn comes. A generation token, checked inside the replay closure itself
+    // (including between chunks, not just once at the top), is what actually stops a superseded
+    // replay from running to completion — without it, every past attach()'s full snapshot would
+    // still get sent in full, defeating the point of bounding a stalled client to one replay.
+    private var replayGeneration = 0
+    // Counts overflows with no confirmed forward progress since the last one. A client whose
+    // ClientSession.writeLock is held forever by one irrecoverably-stuck write (not merely slow —
+    // permanently dead) means NOTHING enqueued for it, on any queue, will ever finish to free its
+    // memory: reusing this one subscriber and capping it to one pending replay each still lets
+    // every retry add another bounded (but nonzero) batch of never-executing work, forever, as
+    // long as PTY output keeps arriving. This is what actually stops that: after a few consecutive
+    // overflows with no proof the queue is moving again, give up and disconnect for good instead
+    // of retrying indefinitely.
+    private var consecutiveOverflows = 0
+    static let maxConsecutiveOverflows = 3
+
+    // Bounds how much not-yet-sent live data can pile up behind a slow/stuck client before new
+    // frames start getting dropped for it instead of growing this queue's backlog (and the memory
+    // each pending closure retains) without limit. Matches RingBuffer's own 256KB cap — a client
+    // this far behind gets a complete, fresh picture from the ring buffer on its next attach()
+    // anyway, so dropped live frames aren't a correctness problem, just a delayed live view.
+    static let maxPendingBytes = 256 * 1024
+
+    init(client: ClientSession) {
+        self.client = client
+    }
+
+    // Called on disconnect (removeSubscriber) or backpressure give-up so any closures already
+    // enqueued on `queue` — which still hold a strong ref to this subscriber and its client
+    // regardless of the array removal — become cheap no-ops instead of writing to what may by
+    // then be a closed, possibly-reused fd. isCurrentReplay() folds this in too, so an in-flight
+    // replay stops at its next chunk boundary the same way a superseded one does.
+    func invalidate() {
+        stateLock.lock()
+        valid = false
+        stateLock.unlock()
+    }
+
+    var isValid: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return valid
+    }
+
+    enum ReserveResult { case reserved, alreadyInvalid, overflowRetry, overflowGiveUp }
+
+    // Reserves room for `byteCount` more pending bytes before enqueueing a live send.
+    // `.overflowRetry`/`.overflowGiveUp` mean this subscriber is too far behind to keep a coherent
+    // stream — dropping a raw chunk could split a multi-byte character or an ANSI escape sequence,
+    // silently corrupting rendering with no way for the client to tell — so the caller must
+    // invalidate it rather than just skip this one frame. `.overflowGiveUp` additionally means
+    // several such overflows happened with no progress in between: retrying further is very
+    // unlikely to help and would just keep growing memory, so the caller must not resync, only disconnect.
+    func tryReserve(_ byteCount: Int) -> ReserveResult {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard valid else { return .alreadyInvalid }
+        guard pendingBytes + byteCount <= Self.maxPendingBytes else {
+            consecutiveOverflows += 1
+            return consecutiveOverflows > Self.maxConsecutiveOverflows ? .overflowGiveUp : .overflowRetry
+        }
+        pendingBytes += byteCount
+        return .reserved
+    }
+
+    func release(_ byteCount: Int) {
+        stateLock.lock()
+        pendingBytes = max(0, pendingBytes - byteCount)
+        stateLock.unlock()
+    }
+
+    // Called the instant a closure actually starts running (before whatever it goes on to do) —
+    // proof this subscriber's queue made forward progress, since that only happens once whatever
+    // was ahead of it finished. A client that's merely occasionally slow keeps getting its full
+    // retry budget back this way; only a queue that's never progressing at all runs out consecutive
+    // overflows without ever hitting this.
+    func recordProgress() {
+        stateLock.lock()
+        consecutiveOverflows = 0
+        stateLock.unlock()
+    }
+
+    // Drops the live-frame budget back to 0 for a resync retry. Releases from the superseded
+    // generation may still arrive later; release() clamps those at zero.
+    func resetBudget() {
+        stateLock.lock()
+        pendingBytes = 0
+        stateLock.unlock()
+    }
+
+    // Starts a new replay generation and returns its token — the caller passes this into the
+    // replay closure, which must check isCurrentReplay(token) before starting AND between every
+    // chunk, since a later attach() bumping the generation is the only thing that actually stops
+    // an earlier, already-queued (or already-running) replay from continuing.
+    func beginReplay() -> Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        replayGeneration += 1
+        return replayGeneration
+    }
+
+    // False once either this subscriber is invalidated, or a newer replay has superseded `token`.
+    func isCurrentReplay(_ token: Int) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return valid && replayGeneration == token
+    }
+}
+
 final class PTYProcess {
     let paneID: String
     let stableID: String
@@ -42,7 +166,7 @@ final class PTYProcess {
 
     private var masterFD: Int32 = -1
     private let ring = RingBuffer()
-    private var subscribers: [ClientSession] = []
+    private var subscribers: [Subscriber] = []
     private let lock = NSLock()
     private var readSource: DispatchSourceRead?
     private var agentStatus: String?
@@ -152,41 +276,131 @@ final class PTYProcess {
 
         let data = Data(buf[..<n])
         let encoded = data.base64EncodedString()
+        let byteCount = encoded.utf8.count
 
+        // ring.write, tryReserve, and queue.async are all non-blocking (bookkeeping plus
+        // scheduling a block — never the actual socket write), so holding `lock` across all three
+        // costs nothing here, and it's what keeps this atomic with attach()'s own snapshot+enqueue
+        // below. Releasing the lock between ring.write and the enqueue (as a prior version did)
+        // left a gap where attach() could slip in, snapshot the ring (now including this chunk),
+        // and enqueue its replay — then this live enqueue for the SAME bytes would land right
+        // after, delivering them to the client twice.
         lock.lock()
+        defer { lock.unlock() }
         ring.write(data)
-        let subs = subscribers
-        lock.unlock()
-
-        for client in subs {
-            client.send(.live(paneID: paneID, data: encoded))
+        // Collected instead of removed in-place — subscribers is being iterated below, and this
+        // keeps the removal a single pass after the loop rather than mutating mid-iteration.
+        var goneForGood: [ObjectIdentifier] = []
+        var toResync: [Subscriber] = []
+        for subscriber in subscribers {
+            switch subscriber.tryReserve(byteCount) {
+            case .reserved:
+                subscriber.queue.async { [paneID] in
+                    subscriber.recordProgress()
+                    defer { subscriber.release(byteCount) }
+                    guard subscriber.isValid else { return }
+                    subscriber.client.send(.live(paneID: paneID, data: encoded))
+                }
+            case .alreadyInvalid:
+                continue
+            case .overflowRetry:
+                // Too far behind to keep sending it a coherent stream — silently dropping this
+                // chunk risks losing text or splitting a multi-byte char/ANSI escape mid-sequence,
+                // corrupting rendering with no way for the client to notice. The app still
+                // believes it's attached and has no reason to ever request a fresh replay on its
+                // own, so leaving it detached would freeze the pane forever. Reuse THIS subscriber
+                // (not a new one) with its budget reset, queued for one resync below.
+                subscriber.resetBudget()
+                toResync.append(subscriber)
+            case .overflowGiveUp:
+                // Several consecutive overflows with no progress in between (see
+                // Subscriber.consecutiveOverflows) — retrying again would just add another bounded
+                // but nonzero batch of work that's very unlikely to ever run, for as long as PTY
+                // output keeps arriving. Stop for good instead of resyncing — and close the
+                // client's whole connection (not just this one subscription): a permanently stuck
+                // write means ClientSession.writeLock is jammed for every pane this client has
+                // open, and merely dropping our own subscriber would leave the app believing it's
+                // still attached, with nothing left to ever tell it otherwise. The app's
+                // DaemonConnection detects the resulting EOF and reconnects + re-attaches every
+                // pane on its own.
+                subscriber.invalidate()
+                goneForGood.append(ObjectIdentifier(subscriber))
+                subscriber.client.disconnect()
+            }
+        }
+        if !goneForGood.isEmpty {
+            subscribers.removeAll { goneForGood.contains(ObjectIdentifier($0)) }
+        }
+        // Exactly one queued replay per resync, on the SAME subscriber object — if the client is
+        // still stuck, this cycles again next overflow (up to maxConsecutiveOverflows) rather than
+        // piling up new Subscriber/queue pairs; if it's genuinely gone, removeSubscriber (via the
+        // client's own read-side disconnect detection) cleans this up like any other subscriber.
+        for subscriber in toResync {
+            scheduleReplay(for: subscriber, client: subscriber.client)
         }
     }
 
     // MARK: - Public interface
 
-    // Register before replay so no bytes fall through the gap.
+    // Register before replay so no bytes fall through the gap. The actual chunk-sending — up to
+    // 256KB of blocking socket I/O — is enqueued onto this client's own serial queue instead of
+    // running inline under `lock`: enqueueing while holding `lock` (matching handleOutput's own
+    // hold above) is what guarantees no live message can jump ahead of replay for this client,
+    // without making every other subscriber/resize/write/terminate call wait on this client's I/O.
+    //
+    // The replay itself isn't reserved against tryReserve's cap (a legitimate first attach against
+    // a full ring needs to send all of it, regardless of the live-frame backpressure budget) — but
+    // repeated attach() calls against the SAME still-stalled subscriber replace any not-yet-started
+    // replay instead of queuing another one alongside it, so this can't grow memory unbounded either.
     func attach(client: ClientSession) {
         lock.lock()
-        if !subscribers.contains(where: { $0 === client }) {
-            subscribers.append(client)
-        }
-        let snapshot = ring.readAll()
-        lock.unlock()
+        defer { lock.unlock() }
+        attachLocked(client: client)
+    }
 
-        var offset = 0
-        while offset < snapshot.count {
-            let end = min(offset + 4096, snapshot.count)
-            let chunk = Data(snapshot[offset..<end])
-            client.send(.ringBuffer(paneID: paneID, data: chunk.base64EncodedString()))
-            offset = end
+    // Shared by attach() and handleOutput()'s overflow-resync path — caller must already hold `lock`.
+    private func attachLocked(client: ClientSession) {
+        let subscriber = subscribers.first(where: { $0.client === client }) ?? {
+            let new = Subscriber(client: client)
+            subscribers.append(new)
+            return new
+        }()
+        scheduleReplay(for: subscriber, client: client)
+    }
+
+    // Builds and enqueues a fresh replay for `subscriber` — shared by attachLocked() (a real
+    // app-initiated attach) and handleOutput()'s overflow-retry path (an internal resync reusing
+    // the SAME subscriber instead of creating a new one). beginReplay() bumps the generation
+    // immediately (while still holding `lock`), so any earlier replay for this subscriber —
+    // queued, or already mid-chunk-loop — sees a stale token on its very next check and stops
+    // there, instead of running to completion.
+    private func scheduleReplay(for subscriber: Subscriber, client: ClientSession) {
+        let snapshot = ring.readAll()
+        let token = subscriber.beginReplay()
+        subscriber.queue.async { [paneID] in
+            subscriber.recordProgress()
+            guard subscriber.isCurrentReplay(token) else { return }
+            var offset = 0
+            while offset < snapshot.count, subscriber.isCurrentReplay(token) {
+                let end = min(offset + 4096, snapshot.count)
+                let chunk = Data(snapshot[offset..<end])
+                client.send(.ringBuffer(paneID: paneID, data: chunk.base64EncodedString()))
+                offset = end
+            }
+            guard subscriber.isCurrentReplay(token) else { return }
+            client.send(.ringBufferDone(paneID: paneID))
         }
-        client.send(.ringBufferDone(paneID: paneID))
     }
 
     func removeSubscriber(_ client: ClientSession) {
         lock.lock()
-        subscribers.removeAll { $0 === client }
+        if let idx = subscribers.firstIndex(where: { $0.client === client }) {
+            // Invalidate before dropping from the array — closures already enqueued on this
+            // subscriber's queue hold their own strong reference to it regardless of the array
+            // removal, so without this they'd still run and write to a closed/reused fd.
+            subscribers[idx].invalidate()
+            subscribers.remove(at: idx)
+        }
         lock.unlock()
     }
 
@@ -308,8 +522,13 @@ final class PTYProcess {
         let subs = subscribers
         lock.unlock()
 
-        for client in subs {
-            client.send(.dead(paneID: paneID, exitCode: code))
+        // Through the same per-subscriber queue as replay/live — otherwise .dead could reach a
+        // client ahead of a still-in-flight replay or live send for the same pane.
+        for subscriber in subs {
+            subscriber.queue.async { [paneID] in
+                guard subscriber.isValid else { return }
+                subscriber.client.send(.dead(paneID: paneID, exitCode: code))
+            }
         }
         readSource?.cancel()
     }

@@ -6,6 +6,11 @@ final class ClientSession {
     private let registry: PTYRegistry
     private var readBuffer = Data()
     private var readSource: DispatchSourceRead?
+    // Multiple PTYProcess instances (each on its own concurrent read-source thread) can call
+    // send() on the same client at once — e.g. ring-buffer replay from attach() racing live
+    // output from another pane. Without this, interleaved write() calls corrupt the newline-
+    // delimited JSON stream the client parses.
+    private let writeLock = NSLock()
 
     // Self-retain: DispatchSource holds event handler closure that captures self.
     // Released when source is cancelled on disconnect.
@@ -67,7 +72,19 @@ final class ClientSession {
     func send(_ response: DaemonResponse) {
         guard var data = try? JSONEncoder().encode(response) else { return }
         data.append(UInt8(ascii: "\n"))
+        writeLock.lock()
+        defer { writeLock.unlock() }
         _ = writeAll(fd: fd, data: data)
+    }
+
+    // Forces this connection closed — used when a PTYProcess subscriber gives up on a
+    // permanently stuck client (see PTYProcess.overflowGiveUp). cancel() only schedules the
+    // cancel handler (registry.removeClient + fd close) to run later on this source's own
+    // queue, so this is safe to call inline from another thread without risking reentrancy.
+    // The app's own DaemonConnection detects the resulting EOF and reconnects/re-attaches
+    // every pane on its own, which is what actually unfreezes the view.
+    func disconnect() {
+        readSource?.cancel()
     }
 }
 
