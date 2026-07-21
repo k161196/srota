@@ -88,7 +88,7 @@ private final class ManagedSession {
     // write-echo suppression all assume a single consumer). Called when a later spawnOrAttach for
     // the same stableID takes over, so the displaced owner can show a "Use Here" reclaim button.
     let onStolen: (() -> Void)?
-    var paneID: String?
+    nonisolated(unsafe) var paneID: String?
     var isClosing = false
 
     init(
@@ -133,9 +133,9 @@ final class DaemonConnection {
     @ObservationIgnored private var readSource: DispatchSourceRead?
     @ObservationIgnored private var pendingCreates: [String: CheckedContinuation<String, Error>] = [:]
     @ObservationIgnored private var pendingLists: [String: CheckedContinuation<[PTYInfo], Error>] = [:]
-    @ObservationIgnored private var sessionsByPaneID: [String: InMemoryTerminalSession] = [:]
+    @ObservationIgnored nonisolated(unsafe) private var sessionsByPaneID: [String: InMemoryTerminalSession] = [:]
     @ObservationIgnored private var stableIDByPaneID: [String: String] = [:]
-    @ObservationIgnored private var managedSessions: [String: ManagedSession] = [:]
+    @ObservationIgnored nonisolated(unsafe) private var managedSessions: [String: ManagedSession] = [:]
     @ObservationIgnored private var restoringStableIDs: Set<String> = []
     @ObservationIgnored private var reconnectScheduled = false
     @ObservationIgnored private let stateLock = NSLock()

@@ -45,6 +45,11 @@ final class Subscriber {
     private let stateLock = NSLock()
     private var valid = true
     private var pendingBytes = 0
+    // Bumped by resetBudget(). Lets release() tell a reservation made before a reset apart from
+    // one made after — without this, a stale pre-reset closure's release() would subtract from
+    // whatever pendingBytes happens to be once new reservations refill it, silently freeing budget
+    // the new reservations still legitimately own and letting tryReserve over-admit past the cap.
+    private var budgetGeneration = 0
     // Bumped every time a new replay supersedes an old one. DispatchWorkItem.cancel() is purely
     // cooperative — it only sets a flag nobody reads, it does NOT stop an already-queued item from
     // running when its turn comes. A generation token, checked inside the replay closure itself
@@ -91,7 +96,7 @@ final class Subscriber {
         return valid
     }
 
-    enum ReserveResult { case reserved, alreadyInvalid, overflowRetry, overflowGiveUp }
+    enum ReserveResult { case reserved(generation: Int), alreadyInvalid, overflowRetry, overflowGiveUp }
 
     // Reserves room for `byteCount` more pending bytes before enqueueing a live send.
     // `.overflowRetry`/`.overflowGiveUp` mean this subscriber is too far behind to keep a coherent
@@ -109,13 +114,18 @@ final class Subscriber {
             return consecutiveOverflows > Self.maxConsecutiveOverflows ? .overflowGiveUp : .overflowRetry
         }
         pendingBytes += byteCount
-        return .reserved
+        return .reserved(generation: budgetGeneration)
     }
 
-    func release(_ byteCount: Int) {
+    // `generation` must be the one returned by the tryReserve() this release corresponds to. A
+    // release whose generation predates the most recent resetBudget() is a no-op: the reservation
+    // it refers to was already wiped out by that reset, so applying it now would instead subtract
+    // from a later generation's unrelated reservations.
+    func release(_ byteCount: Int, generation: Int) {
         stateLock.lock()
+        defer { stateLock.unlock() }
+        guard generation == budgetGeneration else { return }
         pendingBytes = max(0, pendingBytes - byteCount)
-        stateLock.unlock()
     }
 
     // Called the instant a closure actually starts running (before whatever it goes on to do) —
@@ -129,11 +139,13 @@ final class Subscriber {
         stateLock.unlock()
     }
 
-    // Drops the live-frame budget back to 0 for a resync retry. Releases from the superseded
-    // generation may still arrive later; release() clamps those at zero.
+    // Drops the live-frame budget back to 0 for a resync retry. Bumps budgetGeneration so
+    // release() calls from reservations made before this reset become no-ops instead of
+    // subtracting from whatever pendingBytes the next generation reserves.
     func resetBudget() {
         stateLock.lock()
         pendingBytes = 0
+        budgetGeneration += 1
         stateLock.unlock()
     }
 
@@ -294,10 +306,10 @@ final class PTYProcess {
         var toResync: [Subscriber] = []
         for subscriber in subscribers {
             switch subscriber.tryReserve(byteCount) {
-            case .reserved:
+            case .reserved(let generation):
                 subscriber.queue.async { [paneID] in
                     subscriber.recordProgress()
-                    defer { subscriber.release(byteCount) }
+                    defer { subscriber.release(byteCount, generation: generation) }
                     guard subscriber.isValid else { return }
                     subscriber.client.send(.live(paneID: paneID, data: encoded))
                 }

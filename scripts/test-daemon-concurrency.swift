@@ -100,16 +100,20 @@ struct DaemonConcurrencyTests {
         defer { Darwin.close(peerFD) }
         let subscriber = Subscriber(client: ClientSession(fd: clientFD, registry: registry))
 
-        guard case .reserved = subscriber.tryReserve(Subscriber.maxPendingBytes) else {
+        guard case .reserved(let staleGeneration) = subscriber.tryReserve(Subscriber.maxPendingBytes) else {
             expect(false, "failed to fill subscriber budget")
             return
         }
         subscriber.resetBudget()
-        subscriber.release(Subscriber.maxPendingBytes)
         guard case .reserved = subscriber.tryReserve(Subscriber.maxPendingBytes) else {
             expect(false, "failed to refill subscriber budget after reset")
             return
         }
+        // Release from the generation that existed before resetBudget() arrives only now — after
+        // the budget has already been refilled by a new generation's reservation. This is the
+        // order that actually happens in production (a stalled subscriber's queue drains its
+        // pre-reset closures well after the reset), not release-then-refill.
+        subscriber.release(Subscriber.maxPendingBytes, generation: staleGeneration)
         guard case .overflowRetry = subscriber.tryReserve(1) else {
             expect(false, "stale release expanded subscriber budget past its 256KB cap")
             return
