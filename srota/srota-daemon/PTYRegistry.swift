@@ -51,13 +51,13 @@ final class PTYRegistry {
                 client.send(.error(error.localizedDescription, requestID: params.requestID))
             }
 
-        case .attach(let paneID):
+        case .attach(let paneID, let replayBufferBytes):
             let proc = withProcess(paneID: paneID)
             guard let proc else {
                 client.send(.error("pane not found", requestID: nil))
                 return
             }
-            proc.attach(client: client)
+            proc.attach(client: client, replayBufferBytes: replayBufferBytes)
 
         case .input(let paneID, let data):
             guard let proc = withProcess(paneID: paneID), let bytes = Data(base64Encoded: data) else { return }

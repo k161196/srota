@@ -8,7 +8,7 @@ final class RingBuffer {
     private var buf: [UInt8]
     private var writeHead = 0
     private var count = 0
-    let capacity: Int
+    private(set) var capacity: Int
 
     // Clamped so a zero/negative/absurdly large requested capacity (e.g. a malformed
     // replayBufferBytes from a create request) can't divide-by-zero in append()/readAll(),
@@ -16,6 +16,21 @@ final class RingBuffer {
     init(capacity: Int = 256 * 1024) {
         self.capacity = min(max(capacity, Self.minCapacity), Self.maxCapacity)
         buf = [UInt8](repeating: 0, count: self.capacity)
+    }
+
+    // A PTY already running when a caller asks for a bigger buffer (e.g. an Agents-tab attach
+    // against a session that pre-dates this feature) can't be recreated without losing the process —
+    // so growth happens in place instead. Never shrinks: a smaller request would silently drop
+    // history a caller may still rely on, and no caller currently sends one.
+    func growIfNeeded(to requested: Int) {
+        let clamped = min(max(requested, Self.minCapacity), Self.maxCapacity)
+        guard clamped > capacity else { return }
+        let existing = readAll()
+        capacity = clamped
+        buf = [UInt8](repeating: 0, count: clamped)
+        writeHead = 0
+        count = 0
+        write(existing)
     }
 
     func write(_ data: Data) {

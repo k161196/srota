@@ -24,7 +24,7 @@ struct AgentEventParams: Decodable {
 
 enum DaemonRequest: Decodable {
     case create(CreateParams)
-    case attach(paneID: String)
+    case attach(paneID: String, replayBufferBytes: Int?)
     case input(paneID: String, data: String) // data is base64
     case resize(paneID: String, rows: UInt16, cols: UInt16)
     case list(requestID: String?)
@@ -38,6 +38,7 @@ enum DaemonRequest: Decodable {
         case data
         case rows
         case cols
+        case replayBufferBytes
     }
 
     init(from decoder: Decoder) throws {
@@ -46,7 +47,10 @@ enum DaemonRequest: Decodable {
         case "create":
             self = .create(try CreateParams(from: decoder))
         case "attach":
-            self = .attach(paneID: try c.decode(String.self, forKey: .paneID))
+            self = .attach(
+                paneID: try c.decode(String.self, forKey: .paneID),
+                replayBufferBytes: try c.decodeIfPresent(Int.self, forKey: .replayBufferBytes)
+            )
         case "input":
             self = .input(
                 paneID: try c.decode(String.self, forKey: .paneID),

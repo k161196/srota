@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 @discardableResult
@@ -116,6 +117,78 @@ func runDaemonSelfCheck() -> Bool {
     let zeroCapacityRing = RingBuffer(capacity: 0)
     zeroCapacityRing.write(Data([1, 2, 3]))
     assert(zeroCapacityRing.readAll() == Data([1, 2, 3]))
+
+    // growIfNeeded grows an already-running PTY's buffer in place (an attach against a session
+    // that pre-dates a larger request) and preserves what was already buffered...
+    let growable = RingBuffer(capacity: RingBuffer.minCapacity)
+    growable.write(Data([1, 2, 3]))
+    growable.growIfNeeded(to: 1024 * 1024)
+    assert(growable.capacity == 1024 * 1024)
+    assert(growable.readAll() == Data([1, 2, 3]))
+    // ...but never shrinks back down for a smaller/absent request.
+    growable.growIfNeeded(to: RingBuffer.minCapacity)
+    assert(growable.capacity == 1024 * 1024)
+
+    // Same, but after the ring has actually wrapped (write count > capacity) — growIfNeeded's
+    // `readAll()` must follow the wrapped read-head math, not just the unwrapped 3-byte case above.
+    let wrapped = RingBuffer(capacity: RingBuffer.minCapacity)
+    let overfillCount = RingBuffer.minCapacity + 5
+    let overfillBytes = (0..<overfillCount).map { UInt8($0 % 256) }
+    wrapped.write(Data(overfillBytes))
+    let survivingBytes = Data(overfillBytes.suffix(RingBuffer.minCapacity))
+    assert(wrapped.readAll() == survivingBytes) // oldest 5 bytes already overwritten, pre-growth
+    wrapped.growIfNeeded(to: 2 * RingBuffer.minCapacity)
+    assert(wrapped.capacity == 2 * RingBuffer.minCapacity)
+    assert(wrapped.readAll() == survivingBytes) // same content, same order, after reallocation
+
+    // attach requests round-trip replayBufferBytes same as create...
+    let attachSized = try! decoder.decode(
+        DaemonRequest.self,
+        from: Data(#"{"type":"attach","paneID":"pane-1","replayBufferBytes":2097152}"#.utf8)
+    )
+    if case .attach(let paneID, let replayBufferBytes) = attachSized {
+        assert(paneID == "pane-1")
+        assert(replayBufferBytes == 2_097_152)
+    } else {
+        assertionFailure("expected attach request")
+    }
+
+    // ...and default to nil (no resize) when the caller doesn't ask for one.
+    let attachDefault = try! decoder.decode(
+        DaemonRequest.self,
+        from: Data(#"{"type":"attach","paneID":"pane-2"}"#.utf8)
+    )
+    if case .attach(_, let replayBufferBytes) = attachDefault {
+        assert(replayBufferBytes == nil)
+    } else {
+        assertionFailure("expected attach request")
+    }
+
+    // Existing-PTY attach path: re-attaching to an already-running PTY with a larger
+    // replayBufferBytes must grow ITS buffer in place — the bug this fixed was resizing only
+    // happening at creation, so re-attaching (the common case once a PTY outlives one attach)
+    // silently kept the 256 KB default forever.
+    // fds are intentionally left open, not closed: main.swift exits right after this self-check
+    // returns, so the OS reclaims them — closing one end ourselves while the daemon's async
+    // replay dispatch might still write to the other risks an EPIPE-driven SIGPIPE (not yet
+    // ignored at this point in startup) killing the self-check instead of failing an assert.
+    var fds: [Int32] = [0, 0]
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+    let selfCheckRegistry = PTYRegistry()
+    let selfCheckClient = ClientSession(fd: fds[0], registry: selfCheckRegistry)
+
+    let agentPTY = try! PTYProcess(paneID: "self-check-agent", stableID: "self-check-agent", cmd: ["/bin/cat"], cwd: "/tmp", env: [:])
+    defer { agentPTY.terminate() }
+    assert(agentPTY.replayCapacity == 256 * 1024)
+    agentPTY.attach(client: selfCheckClient, replayBufferBytes: 2 * 1024 * 1024)
+    assert(agentPTY.replayCapacity == 2 * 1024 * 1024)
+
+    // Agent/non-agent isolation: a sibling PTY that never requests a larger buffer stays at the
+    // default — growth is per-PTYProcess (each owns its own RingBuffer), never global.
+    let plainPTY = try! PTYProcess(paneID: "self-check-plain", stableID: "self-check-plain", cmd: ["/bin/cat"], cwd: "/tmp", env: [:])
+    defer { plainPTY.terminate() }
+    plainPTY.attach(client: selfCheckClient)
+    assert(plainPTY.replayCapacity == 256 * 1024)
 
     return true
 }

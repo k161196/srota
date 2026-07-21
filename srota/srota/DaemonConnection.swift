@@ -432,10 +432,12 @@ final class DaemonConnection {
         }
     }
 
-    func attach(paneID: String, session: InMemoryTerminalSession) {
+    func attach(paneID: String, session: InMemoryTerminalSession, replayBufferBytes: Int? = nil) {
         ioQueue.async { [self] in
             stateLock.withLock { sessionsByPaneID[paneID] = session }
-            try? send(["type": "attach", "paneID": paneID])
+            var msg: [String: Any] = ["type": "attach", "paneID": paneID]
+            if let replayBufferBytes { msg["replayBufferBytes"] = replayBufferBytes }
+            try? send(msg)
         }
     }
 
@@ -596,7 +598,7 @@ final class DaemonConnection {
                 // (or from creation). Attaching first would replay the ring buffer at that stale
                 // size, rendering garbled until something happens to trigger a resize later.
                 applyPendingResize(for: rebound, paneID: match.paneID)
-                attach(paneID: match.paneID, session: rebound.session)
+                attach(paneID: match.paneID, session: rebound.session, replayBufferBytes: rebound.replayBufferBytes)
             }
             return
         }
