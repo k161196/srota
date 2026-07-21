@@ -150,7 +150,11 @@ final class WorkspaceDB {
         let storage = storage
         writeID += 1
         let id = writeID
-        let task = Task {
+        // .detached: flushWritesBlocking() blocks the main thread synchronously waiting on this
+        // task's `.value`. A plain `Task { }` here would inherit MainActor isolation from this
+        // (@MainActor) method, so completing it would require the main thread's executor — which
+        // is exactly the thread stuck in that blocking wait. Detaching breaks that self-deadlock.
+        let task = Task.detached {
             await previous?.value
             await operation(storage)
         }
