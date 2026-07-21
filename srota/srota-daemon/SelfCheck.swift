@@ -87,6 +87,28 @@ func runDaemonSelfCheck() -> Bool {
     )
     assert(explicitTerminalEnv["TERM"] == "ansi")
 
+    // create request without replayBufferBytes decodes to nil (keeps the 256 KB compat default)...
+    let createDefault = try! decoder.decode(
+        DaemonRequest.self,
+        from: Data(#"{"type":"create","cmd":[],"cwd":"/tmp","stableID":"s1","env":{}}"#.utf8)
+    )
+    if case .create(let params) = createDefault {
+        assert(params.replayBufferBytes == nil)
+    } else {
+        assertionFailure("expected create request")
+    }
+
+    // ...and a caller-supplied size round-trips through decoding untouched (clamping happens later, in RingBuffer).
+    let createSized = try! decoder.decode(
+        DaemonRequest.self,
+        from: Data(#"{"type":"create","cmd":[],"cwd":"/tmp","stableID":"s2","env":{},"replayBufferBytes":2097152}"#.utf8)
+    )
+    if case .create(let params) = createSized {
+        assert(params.replayBufferBytes == 2_097_152)
+    } else {
+        assertionFailure("expected create request")
+    }
+
     assert(RingBuffer(capacity: 0).capacity == RingBuffer.minCapacity)
     assert(RingBuffer(capacity: -1).capacity == RingBuffer.minCapacity)
     assert(RingBuffer(capacity: Int.max).capacity == RingBuffer.maxCapacity)
