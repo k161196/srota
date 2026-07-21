@@ -20,6 +20,10 @@ struct srotaApp: App {
         let db = WorkspaceDB()
         _db = State(initialValue: db)
         _sessionRecorder = State(initialValue: SessionRecorder(db: db))
+        #if DEBUG
+        FileLink.runSelfCheck()
+        EditorsStore.runSelfCheck()
+        #endif
     }
 
     var body: some Scene {
