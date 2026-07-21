@@ -27,7 +27,15 @@ final class EditorsStore {
 
     private static let path = NSHomeDirectory() + "/\(Srota.dir)/editors.json"
 
-    init() { load() }
+    /// Set once at app launch. Lets code outside the SwiftUI environment (the terminal's
+    /// cmd-click link handler, which runs from a Ghostty delegate callback, not a View) reach
+    /// the same store the "Open" button uses.
+    private(set) static var shared: EditorsStore?
+
+    init() {
+        load()
+        Self.shared = self
+    }
 
     func load() {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: Self.path)) else { return }
@@ -75,11 +83,54 @@ final class EditorsStore {
     func open(_ editor: EditorItem, at path: String) {
         lastUsedID = editor.id
         save()
+        let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
+        runShell("cd '\(escaped)' && \(editor.command)")
+    }
+
+    /// Opens `path` at a specific line (and optional column) when the editor's command is one
+    /// of the CLI editors we know the line-jump syntax for; otherwise just opens the file.
+    /// Used by the terminal's clickable file:line links.
+    func openAtLine(_ editor: EditorItem, path: String, line: Int, column: Int? = nil) {
+        lastUsedID = editor.id
+        save()
+        let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
+        let key = editor.command
+            .split(separator: " ").first.map(String.init)
+            .map { ($0 as NSString).lastPathComponent.lowercased() } ?? ""
+        let command = Self.lineJumpFormats[key]?(escaped, line, column) ?? "\(editor.command) '\(escaped)'"
+        runShell(command)
+    }
+
+    private func runShell(_ command: String) {
         let task = Process()
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         task.executableURL = URL(fileURLWithPath: shell)
-        let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
-        task.arguments = ["-i", "-l", "-c", "cd '\(escaped)' && \(editor.command)"]
+        task.arguments = ["-i", "-l", "-c", command]
         try? task.run()
+    }
+
+    /// Line-jump argument syntax per known CLI editor, keyed by the command's base name.
+    /// Unrecognized editors fall back to opening the bare file (no line jump) in `openAtLine`.
+    private static let lineJumpFormats: [String: (String, Int, Int?) -> String] = [
+        "code": goto("code"), "cursor": goto("cursor"), "codium": goto("codium"), "code-insiders": goto("code-insiders"),
+        "zed": inline("zed"), "subl": inline("subl"), "atom": inline("atom"),
+        "vim": plusLine("vim"), "nvim": plusLine("nvim"), "mvim": plusLine("mvim"),
+        "idea": lineFlag("idea"), "webstorm": lineFlag("webstorm"), "pycharm": lineFlag("pycharm"), "xed": lineFlag("xed"),
+    ]
+
+    private static func goto(_ bin: String) -> (String, Int, Int?) -> String {
+        { path, line, col in "\(bin) --goto '\(path)':\(line)\(col.map { ":\($0)" } ?? "")" }
+    }
+
+    private static func inline(_ bin: String) -> (String, Int, Int?) -> String {
+        { path, line, col in "\(bin) '\(path):\(line)\(col.map { ":\($0)" } ?? "")'" }
+    }
+
+    private static func plusLine(_ bin: String) -> (String, Int, Int?) -> String {
+        { path, line, _ in "\(bin) +\(line) '\(path)'" }
+    }
+
+    private static func lineFlag(_ bin: String) -> (String, Int, Int?) -> String {
+        { path, line, _ in "\(bin) --line \(line) '\(path)'" }
     }
 }
