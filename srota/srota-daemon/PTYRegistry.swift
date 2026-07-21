@@ -39,7 +39,8 @@ final class PTYRegistry {
                     cwd: params.cwd,
                     env: params.env,
                     cols: params.cols,
-                    rows: params.rows
+                    rows: params.rows,
+                    replayBufferBytes: params.replayBufferBytes
                 )
                 lock.lock()
                 processes[paneID] = proc

@@ -86,5 +86,14 @@ func runDaemonSelfCheck() -> Bool {
         srotaDir: ".srota"
     )
     assert(explicitTerminalEnv["TERM"] == "ansi")
+
+    assert(RingBuffer(capacity: 0).capacity == RingBuffer.minCapacity)
+    assert(RingBuffer(capacity: -1).capacity == RingBuffer.minCapacity)
+    assert(RingBuffer(capacity: Int.max).capacity == RingBuffer.maxCapacity)
+    assert(RingBuffer(capacity: 1024 * 1024).capacity == 1024 * 1024)
+    let zeroCapacityRing = RingBuffer(capacity: 0)
+    zeroCapacityRing.write(Data([1, 2, 3]))
+    assert(zeroCapacityRing.readAll() == Data([1, 2, 3]))
+
     return true
 }

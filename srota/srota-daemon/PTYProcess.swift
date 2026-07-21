@@ -177,7 +177,7 @@ final class PTYProcess {
     private(set) var exitCode: Int32?
 
     private var masterFD: Int32 = -1
-    private let ring = RingBuffer()
+    private let ring: RingBuffer
     private var subscribers: [Subscriber] = []
     private let lock = NSLock()
     private var readSource: DispatchSourceRead?
@@ -206,10 +206,20 @@ final class PTYProcess {
         )
     }
 
-    init(paneID: String, stableID: String, cmd: [String], cwd: String, env: [String: String], cols: UInt16? = nil, rows: UInt16? = nil) throws {
+    init(
+        paneID: String,
+        stableID: String,
+        cmd: [String],
+        cwd: String,
+        env: [String: String],
+        cols: UInt16? = nil,
+        rows: UInt16? = nil,
+        replayBufferBytes: Int? = nil
+    ) throws {
         self.paneID = paneID
         self.stableID = stableID
         self.initialCWD = cwd
+        self.ring = RingBuffer(capacity: replayBufferBytes ?? 256 * 1024)
         try spawn(cmd: cmd, cwd: cwd, env: env, cols: cols, rows: rows)
     }
 

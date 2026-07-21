@@ -10,6 +10,7 @@ struct CreateParams: Decodable {
     let env: [String: String]
     let rows: UInt16?
     let cols: UInt16?
+    let replayBufferBytes: Int?
 }
 
 struct AgentEventParams: Decodable {
