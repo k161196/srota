@@ -22,6 +22,12 @@ swiftc -parse-as-library \
 /tmp/srota-region-test
 
 swiftc -parse-as-library \
+  "$ROOT/srota/srota/RepositoryFilterState.swift" \
+  "$ROOT/scripts/test-repository-filter-state.swift" \
+  -o /tmp/srota-repository-filter-test
+/tmp/srota-repository-filter-test
+
+swiftc -parse-as-library \
   "$ROOT/srota/srota-daemon/RingBuffer.swift" \
   "$ROOT/srota/srota-daemon/DaemonProtocol.swift" \
   "$ROOT/srota/srota-daemon/PTYRegistry.swift" \
