@@ -71,16 +71,13 @@ final class FlowViewState {
         branchSearch = doc.branchSearch
     }
 
-    /// Drops filter/selection IDs for repos no longer connected. No-ops on an empty catalog —
-    /// WorkspaceDB.repos starts empty until its async startup load completes, and pruning against
-    /// that transient state would wipe a valid persisted filter before it ever had a chance to load.
-    /// ponytail: this also skips pruning if the user genuinely disconnects every repo, leaving
-    /// stale IDs in the saved document — harmless, since connectedRepos/selectedRepo already
-    /// resolve to empty/nil against an empty catalog regardless, and the next real repo list
-    /// prunes them for good. Telling the two empty cases apart needs a "has WorkspaceDB loaded
-    /// at least once" flag that doesn't exist today; add one if this ever needs to be exact.
-    func pruneRepoIDs(existing: [String]) {
-        guard !existing.isEmpty else { return }
+    /// Drops filter/selection IDs for repos no longer connected. `catalogLoaded` distinguishes a
+    /// real (possibly empty, if the user disconnected every repo) catalog from WorkspaceDB.repos'
+    /// transient startup-empty value before its async load completes — pruning against the latter
+    /// would wipe a valid persisted filter before it ever had a chance to load. Pass
+    /// `WorkspaceDB.hasLoadedRepos` here.
+    func pruneRepoIDs(existing: [String], catalogLoaded: Bool) {
+        guard catalogLoaded else { return }
         let ids = Set(existing)
         repositoryFilter = RepositoryFilterState.pruning(repositoryFilter, keeping: ids)
         if let selectedRepoID, !ids.contains(selectedRepoID) { self.selectedRepoID = nil }
@@ -139,14 +136,23 @@ final class FlowViewState {
                && malformed.branchSearch.isEmpty)
         assert((try? Data(contentsOf: URL(fileURLWithPath: malformedPath))) == garbage)
 
-        // Unknown repo IDs are pruned once a catalog is supplied; an empty catalog (async startup) is a no-op.
+        // An empty, not-yet-loaded catalog (async startup) is a no-op regardless of content.
         let pruning = FlowViewState(stateDirectory: root + "/pruning")
         pruning.repositoryFilter = .subset(["keep", "stale"])
         pruning.selectedRepoID = "stale"
-        pruning.pruneRepoIDs(existing: [])
+        pruning.pruneRepoIDs(existing: [], catalogLoaded: false)
         assert(pruning.repositoryFilter == .subset(["keep", "stale"]) && pruning.selectedRepoID == "stale")
-        pruning.pruneRepoIDs(existing: ["keep"])
+
+        // Once loaded, unknown IDs are pruned and valid ones kept.
+        pruning.pruneRepoIDs(existing: ["keep"], catalogLoaded: true)
         assert(pruning.repositoryFilter == .subset(["keep"]) && pruning.selectedRepoID == nil)
+
+        // A genuinely empty *loaded* catalog (the user disconnected every repo) prunes everything —
+        // this is the case catalogLoaded exists to distinguish from the transient startup-empty one.
+        pruning.repositoryFilter = .subset(["keep"])
+        pruning.selectedRepoID = "keep"
+        pruning.pruneRepoIDs(existing: [], catalogLoaded: true)
+        assert(pruning.repositoryFilter == .none && pruning.selectedRepoID == nil)
 
         // Save failure leaves in-memory state unchanged: force the write to fail by putting a
         // directory where the state file needs to go.
@@ -174,11 +180,13 @@ final class FlowViewState {
 
 /// Fires `refetchIfNeeded`/`onRepoFilterChange` for their side effects (e.g. refetching),
 /// calls `save()` after every durable field changes, and prunes stale repo IDs on appear and
-/// whenever `db.repos` changes — re-running `refetchIfNeeded` right after, since WorkspaceDB.repos
-/// can still be empty when this view first appears (its own load is asynchronous), and a restored
-/// selected repo's branches wouldn't otherwise ever get fetched once the catalog does arrive.
-/// Kept next to FlowViewState rather than in the Flow view itself — this is entirely about how a
-/// view attaches to Flow View State, not Flow-view-specific UI.
+/// whenever `db.repos`/`db.hasLoadedRepos` changes (both are watched — `repos` alone misses the
+/// case where it loads to still-empty, since that's not a value change) — re-running
+/// `refetchIfNeeded` right after, since WorkspaceDB.repos can still be empty when this view first
+/// appears (its own load is asynchronous), and a restored selected repo's branches wouldn't
+/// otherwise ever get fetched once the catalog does arrive. Kept next to FlowViewState rather than
+/// in the Flow view itself — this is entirely about how a view attaches to Flow View State, not
+/// Flow-view-specific UI.
 private struct FlowViewStatePersistence: ViewModifier {
     let flow: FlowViewState
     let db: WorkspaceDB
@@ -189,7 +197,7 @@ private struct FlowViewStatePersistence: ViewModifier {
         content
             .onAppear {
                 refetchIfNeeded()
-                flow.pruneRepoIDs(existing: db.repos.map(\.id))
+                flow.pruneRepoIDs(existing: db.repos.map(\.id), catalogLoaded: db.hasLoadedRepos)
             }
             .onChange(of: flow.selectedTab) { refetchIfNeeded(); flow.save() }
             .onChange(of: flow.repositoryFilter) { onRepoFilterChange(); flow.save() }
@@ -199,7 +207,13 @@ private struct FlowViewStatePersistence: ViewModifier {
             .onChange(of: flow.selectedRepoID) { flow.save() }
             .onChange(of: flow.branchSearch) { flow.save() }
             .onChange(of: db.repos) {
-                flow.pruneRepoIDs(existing: db.repos.map(\.id))
+                flow.pruneRepoIDs(existing: db.repos.map(\.id), catalogLoaded: db.hasLoadedRepos)
+                refetchIfNeeded()
+            }
+            // db.repos itself may not change value (e.g. it loads to still-empty, for an install
+            // that's never connected a repo) — watched separately so that transition still prunes.
+            .onChange(of: db.hasLoadedRepos) {
+                flow.pruneRepoIDs(existing: db.repos.map(\.id), catalogLoaded: db.hasLoadedRepos)
                 refetchIfNeeded()
             }
     }

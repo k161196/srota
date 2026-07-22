@@ -84,6 +84,9 @@ final class WorkspaceDB {
     private var writeTail: Task<Void, Never>?
     private var writeID = 0
     var repos: [RepoEntry] = []
+    /// True once `repos` reflects a real load rather than its startup-empty initial value —
+    /// lets callers tell "genuinely zero repos connected" apart from "hasn't loaded yet".
+    var hasLoadedRepos = false
 
     // Fired alongside refresh() on every detected file write, including ones this process
     // didn't make itself (e.g. the srota-mcp server's add_session_note tool, a separate
@@ -128,6 +131,7 @@ final class WorkspaceDB {
     func refresh() async {
         await writeTail?.value
         repos = await storage.loadRepos()
+        hasLoadedRepos = true
     }
 
     func addRepo(name: String, url: String = "", defaultBranch: String = "main") {
