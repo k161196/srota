@@ -777,6 +777,17 @@ final class TerminalManager: ObservableObject {
         folders.first { $0.workspaces.contains { $0.id == wsID } }?.id
     }
 
+    // True only for the one pane actually on screen — a split tab can show the
+    // same workspace in two panes, so workspace membership alone isn't enough.
+    func isActivePane(_ agent: RunningAgent) -> Bool {
+        guard selectedWorkspaceID == agent.workspaceID,
+              let tabID = agent.tabID, let paneID = agent.paneID,
+              let ws = allWorkspaces.first(where: { $0.id == agent.workspaceID }),
+              ws.selectedTabID == tabID,
+              let tab = ws.tabs.first(where: { $0.id == tabID }) else { return false }
+        return tab.focusedPaneID == paneID
+    }
+
     func addWorkspace(colorScheme: ColorScheme, inFolder folderID: UUID? = nil, workingDirectory: String? = nil, name: String? = nil, additionalDirectories: [String] = []) {
         let wsName = name ?? "Workspace \(allWorkspaces.count + 1)"
         let ws = Workspace(name: wsName)
@@ -1911,6 +1922,8 @@ struct AgentStatusBadge: View {
 struct RunningAgent: Identifiable {
     let workspaceID: UUID
     let stableID: String
+    let tabID: UUID?
+    let paneID: UUID?
     let title: String
     let status: AgentRunStatus
     let agentName: String
@@ -1932,7 +1945,7 @@ func collectRunningAgents(_ manager: TerminalManager) -> [RunningAgent] {
                     paneRecords.compactMap { record -> RunningAgent? in
                         guard let state = states[record.id], let status = state.status, status != .done else { return nil }
                         return RunningAgent(
-                            workspaceID: ws.id, stableID: record.id,
+                            workspaceID: ws.id, stableID: record.id, tabID: nil, paneID: nil,
                             title: smartTitle(for: record.initialCWD),
                             status: status, agentName: state.agent, updatedAt: state.updatedAt
                         )
@@ -1947,7 +1960,7 @@ func collectRunningAgents(_ manager: TerminalManager) -> [RunningAgent] {
                     let title = tab.paneNames[pane.id].flatMap { $0.isEmpty ? nil : $0 }
                         ?? smartTitle(for: paneCWD)
                     return RunningAgent(
-                        workspaceID: ws.id, stableID: pane.daemonStableID,
+                        workspaceID: ws.id, stableID: pane.daemonStableID, tabID: tab.id, paneID: pane.id,
                         title: title, status: status, agentName: state.agent, updatedAt: state.updatedAt
                     )
                 }
@@ -2026,7 +2039,7 @@ private struct WorkspaceAgentMiniRow: View {
 
 struct AgentRow: View {
     let agent: RunningAgent
-    let isWorkspaceOpen: Bool
+    let isActivePane: Bool
     let folderName: String?
     let folderTag: String?
     let onSelect: () -> Void
@@ -2050,7 +2063,7 @@ struct AgentRow: View {
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(Color.labelPrimary.opacity(0.9))
                             .lineLimit(1)
-                        if isWorkspaceOpen {
+                        if isActivePane {
                             Image(systemName: "bolt.fill")
                                 .font(.system(size: 9))
                                 .foregroundStyle(Color.accentOrange)
@@ -2311,7 +2324,7 @@ private struct AgentsSidebarSection: View {
                         let folder = manager.folders.first { $0.workspaces.contains { $0.id == agent.workspaceID } }
                         AgentRow(
                             agent: agent,
-                            isWorkspaceOpen: manager.selectedWorkspaceID == agent.workspaceID,
+                            isActivePane: manager.isActivePane(agent),
                             folderName: folder?.name,
                             folderTag: folder?.tag
                         ) {
