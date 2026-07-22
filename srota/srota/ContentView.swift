@@ -3744,6 +3744,17 @@ private struct PaneHeader: View {
 // Each pane can be on a different directory/branch, so detection runs against this pane's own
 // live `cwd`, not the workspace's. `stableID` is the Pane identity IssuePopoverNavigationStore
 // remembers list/detail navigation against — ephemeral (in-memory only), never DB persistence.
+//
+// Detection runs off a single .task(id:) keyed on (cwd, isOpen), not a bare Task{} fired from the
+// button action — same reasoning as IssuePopoverView's LoadTrigger: a bare Task neither gets
+// cancelled by a later repo change nor a close/reopen, so an older, slower lookup could overwrite
+// newer repo/branch state. Keying on cwd also means a pane changing directory while the popover
+// stays open re-detects instead of leaving the previous repository's issues on screen (issue #13).
+private struct RepoDetectTrigger: Equatable {
+    let cwd: String?
+    let isOpen: Bool
+}
+
 private struct PaneIssueButton: View {
     let cwd: String?
     let stableID: String
@@ -3753,7 +3764,7 @@ private struct PaneIssueButton: View {
     @State private var statusMessage: String? = nil
 
     var body: some View {
-        Button(action: toggle) {
+        Button(action: { isOpen = true }) {
             Image(systemName: "exclamationmark.circle")
                 .font(.system(size: 10.5))
                 .foregroundStyle(isOpen ? Color.accentOrange : Color.labelMuted)
@@ -3777,13 +3788,12 @@ private struct PaneIssueButton: View {
                     .padding(12)
             }
         }
-    }
-
-    private func toggle() {
-        repo = nil
-        statusMessage = "Checking…"
-        isOpen = true
-        Task { await detectRepo() }
+        .task(id: RepoDetectTrigger(cwd: cwd, isOpen: isOpen)) {
+            guard isOpen else { return }
+            repo = nil
+            statusMessage = "Checking…"
+            await detectRepo()
+        }
     }
 
     private func detectRepo() async {
@@ -3795,6 +3805,7 @@ private struct PaneIssueButton: View {
             (runGit(["-C", path, "rev-parse", "--abbrev-ref", "HEAD"]),
              runGit(["-C", path, "remote", "get-url", "origin"]))
         }.value
+        guard !Task.isCancelled else { return }
         guard let remote, let components = gitURLComponents(remote) else {
             statusMessage = "Not a GitHub repo"
             return

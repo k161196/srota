@@ -340,18 +340,21 @@ func setIssueAssignee(_ row: IssueRow, login: String, add: Bool) async -> Result
 // prompt, which hangs forever since this process has no TTY. Returns the created issue's number
 // (parsed from the issue URL `gh issue create` prints to stdout) so callers — namely the Issue
 // Popover's Add form — can open its detail immediately instead of just reporting success.
-func createIssue(repo: RepoEntry, title: String, body: String) async -> Result<Int, TaskGHError> {
+//
+// A nil number (as opposed to .failure) means `gh issue create` itself succeeded — the issue
+// exists on GitHub — but its URL couldn't be parsed. Surfacing that as .failure previously let a
+// caller's "creation failed" path keep the draft around for retry, creating a duplicate issue for
+// one that had already been created; callers must treat nil the same as a known number for
+// draft-clearing purposes, just without a number to navigate to.
+func createIssue(repo: RepoEntry, title: String, body: String) async -> Result<Int?, TaskGHError> {
     guard let (org, name) = gitURLComponents(repo.url) else {
         return .failure(TaskGHError(message: "Not a GitHub repo"))
     }
     let args = ["issue", "create", "--repo", "\(org)/\(name)", "--title", title, "--body", body]
     return await Task.detached {
-        runGH(args).flatMap { data in
+        runGH(args).map { data in
             let urlString = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard let number = urlString.split(separator: "/").last.flatMap({ Int($0) }) else {
-                return .failure(TaskGHError(message: "Issue created, but its number couldn't be parsed"))
-            }
-            return .success(number)
+            return urlString.split(separator: "/").last.flatMap { Int($0) }
         }
     }.value
 }

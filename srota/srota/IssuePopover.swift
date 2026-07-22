@@ -140,9 +140,11 @@ struct IssuePopoverView: View {
         IssuePopoverNavigationStore.shared.setDestination(paneID: paneID, .detail(number))
     }
 
-    private func created(_ number: Int) {
+    // number is nil when the issue was created on GitHub but its number couldn't be parsed from
+    // `gh`'s output — still refresh the list so it shows up, just can't navigate to its detail.
+    private func created(_ number: Int?) {
         refreshToken += 1
-        select(number)
+        if let number { select(number) }
     }
 
     private func back() {
@@ -213,7 +215,7 @@ private struct IssueListPane: View {
     let repo: IssueRepoIdentity
     let onSelect: (Int) -> Void
     let onRefresh: () -> Void
-    let onCreated: (Int) -> Void
+    let onCreated: (Int?) -> Void
     let onClose: () -> Void
 
     var body: some View {
@@ -331,7 +333,7 @@ private struct IssueListRow: View {
 private struct AddIssueInlineForm: View {
     let repo: IssueRepoIdentity
     @Binding var isAdding: Bool
-    let onCreated: (Int) -> Void
+    let onCreated: (Int?) -> Void
 
     @State private var title = ""
     @State private var issueBody = ""
@@ -412,7 +414,14 @@ private struct AddIssueInlineForm: View {
     }
 }
 
-// MARK: - Issue Detail
+// Same reasoning as IssuePopoverView's LoadTrigger: folding the manual-refresh counter into the
+// .task(id:) itself means the Refresh button's reload is cancelled by a later navigation (or
+// superseded by yet another refresh) the same way the initial load is, instead of running as a
+// bare Task{} that nothing else can cancel or order against.
+private struct DetailLoadTrigger: Equatable {
+    let key: IssueDetailCacheKey
+    let refreshToken: Int
+}
 
 private struct IssueDetailPane: View {
     let issueNumber: Int
@@ -426,6 +435,8 @@ private struct IssueDetailPane: View {
     @State private var commentText = ""
     @State private var commenting = false
     @State private var commentError: String? = nil
+    @State private var refreshToken = 0
+    @State private var lastLoadedKey: IssueDetailCacheKey? = nil
 
     private var cacheKey: IssueDetailCacheKey { IssueDetailCacheKey(repo: repo, number: issueNumber) }
 
@@ -451,7 +462,14 @@ private struct IssueDetailPane: View {
             commentComposer
         }
         .background(Color.mgBg)
-        .task(id: cacheKey) { await load() }
+        .task(id: DetailLoadTrigger(key: cacheKey, refreshToken: refreshToken)) {
+            // Same key as last time means this firing is a manual Refresh (or the post-comment
+            // reload), so bypass the cache; a different key is real navigation, which should still
+            // get the cache's instant hit.
+            let isRefresh = lastLoadedKey == cacheKey
+            lastLoadedKey = cacheKey
+            await load(force: isRefresh)
+        }
     }
 
     private var header: some View {
@@ -465,7 +483,7 @@ private struct IssueDetailPane: View {
                     .font(.system(size: 11, weight: .semibold)).tracking(0.6)
                     .foregroundStyle(Color.mgMuted)
                 Spacer()
-                Button { Task { await load(force: true) } } label: {
+                Button { refreshToken += 1 } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 11))
                 }
                 .buttonStyle(.plain).foregroundStyle(Color.mgAccent).help("Refresh")
@@ -561,11 +579,19 @@ private struct IssueDetailPane: View {
         errorMessage = nil
         let repoSnapshot = repo
         let number = issueNumber
+        let key = cacheKey
         let (detailData, fetchError) = await Task.detached { fetchIssueDetailData(number: number, repo: repoSnapshot) }.value
+        // Task.detached doesn't inherit the enclosing .task(id: cacheKey)'s cancellation (see
+        // IssuePopoverView.load()'s comment on why), so a slower fetch for a since-abandoned issue
+        // can still resolve after the user has navigated to a different one. `detail`/`loading` are
+        // @State, whose storage is shared across this view's identity regardless of which
+        // issueNumber a given load() call snapshot was for — an unguarded write here would land on
+        // whatever issue is now on screen.
+        guard !Task.isCancelled else { return }
         loading = false
         if let detailData, let fetchedDetail = try? JSONDecoder().decode(GHIssueDetail.self, from: detailData) {
             detail = fetchedDetail
-            GHIssueDetailCache.details[cacheKey] = fetchedDetail
+            GHIssueDetailCache.details[key] = fetchedDetail
         } else {
             errorMessage = fetchError ?? "Could not load issue"
         }
