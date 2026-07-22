@@ -61,7 +61,7 @@ done
 
 HOME_DIR="$TMPDIR/home"
 BIN_DIR="$TMPDIR/bin"
-mkdir -p "$HOME_DIR" "$BIN_DIR"
+mkdir -p "$HOME_DIR/.codex-work" "$BIN_DIR"
 
 export HOME="$HOME_DIR"
 export PATH="$BIN_DIR:${PATH}"
@@ -219,9 +219,8 @@ run_notify_stdin '{"type":"task_complete","working_directory":"/tmp/work","last_
 wait_for_event_count 4
 assert_eq "$(event_count)" "4" "task_complete should push a fourth socket event"
 assert_eq "$(last_event_field event)" "Stop" "task_complete should map to Stop"
-assert_eq "$(notification_count)" "2" "Stop should trigger an idle notification"
-assert_file_contains "$TMPDIR/osascript.log" 'idle' "Stop should notify with an idle title"
-printf 'ok 7 - task_complete maps to Stop, pushes, and notifies idle\n'
+assert_eq "$(notification_count)" "1" "Stop should not trigger a notification"
+printf 'ok 7 - task_complete maps to Stop and pushes without notifying\n'
 
 NO_AGENT_DIR="$TMPDIR/no-agent-bin"
 mkdir -p "$NO_AGENT_DIR"
@@ -247,6 +246,8 @@ assert_file_contains "$HOME_DIR/.claude/settings.json" 'SORA_AGENT_ID=claude' "C
 assert_file_contains "$HOME_DIR/.claude/settings.json" '/tmp/fake-notify.sh' "Claude config should include the notify script path"
 assert_file_contains "$HOME_DIR/.codex/hooks.json" 'SORA_AGENT_ID=codex' "Codex config should include the Codex agent id"
 assert_file_contains "$HOME_DIR/.codex/hooks.json" '/tmp/fake-notify.sh' "Codex config should include the notify script path"
+assert_file_contains "$HOME_DIR/.codex-work/hooks.json" 'SORA_AGENT_ID=codex' "profile Codex config should include the Codex agent id"
+assert_file_contains "$HOME_DIR/.codex-work/hooks.json" '/tmp/fake-notify.sh' "profile Codex config should include the notify script path"
 # Claude: SessionStart, UserPromptSubmit, Stop, SessionEnd, Notification, PreToolUse, PostToolUse.
 assert_eq "$(count_matches "$HOME_DIR/.claude/settings.json" 'SORA_AGENT_ID=claude')" "7" "Claude config should keep one hook per required event"
 # Codex keeps its original flat event list: SessionStart, Stop, UserPromptSubmit, PermissionRequest.
@@ -287,7 +288,7 @@ run_notify_arg '{"type":"exec_approval_request","cwd":"/tmp/second","message":"n
   SORA_AGENT_ID=codex SROTA_TAB_ID=tab-1 SROTA_PANE_ID=pane-2 >/dev/null
 wait_for_event_count 5
 assert_eq "$(event_count)" "5" "new pane permission request should push a fifth socket event"
-assert_eq "$(notification_count)" "3" "new pane permission request should notify again"
+assert_eq "$(notification_count)" "2" "new pane permission request should notify again"
 printf 'ok 12 - permission requests in a new pane notify again\n'
 
 perf_iters="${PERF_ITERS:-100}"

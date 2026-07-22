@@ -24,7 +24,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
-CODEX_HOOKS="$HOME/.codex/hooks.json"
+CODEX_HOMES=("$HOME/.codex")
+for codex_home in "$HOME"/.codex-*; do
+  [[ -d "$codex_home" ]] && CODEX_HOMES+=("$codex_home")
+done
 
 claude_installed() { command -v claude >/dev/null 2>&1; }
 codex_installed() { command -v codex >/dev/null 2>&1; }
@@ -181,16 +184,21 @@ if claude_installed; then
 fi
 
 if codex_installed; then
-  if hooks_ready "$CODEX_HOOKS" codex; then
+  CODEX_READY=1
+  for codex_home in "${CODEX_HOMES[@]}"; do
+    hooks_ready "$codex_home/hooks.json" codex || CODEX_READY=0
+  done
+  if [[ $CODEX_READY -eq 1 ]]; then
     CODEX_STATUS="configured"
   else
     if [[ $CONFIGURE -eq 1 ]]; then
-      if configure_hooks "$CODEX_HOOKS" codex >/dev/null; then
-        CODEX_STATUS="configured"
-      else
-        CODEX_STATUS="configure_failed"
-        EXIT=1
-      fi
+      CODEX_STATUS="configured"
+      for codex_home in "${CODEX_HOMES[@]}"; do
+        if ! configure_hooks "$codex_home/hooks.json" codex >/dev/null; then
+          CODEX_STATUS="configure_failed"
+          EXIT=1
+        fi
+      done
     else
       CODEX_STATUS="missing"
       EXIT=1
