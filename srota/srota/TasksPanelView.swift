@@ -175,18 +175,7 @@ struct TasksPanel: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.mgBg)
-        .onAppear {
-            fetchIfNeeded()
-            flow.pruneRepoIDs(existing: db.repos.map(\.id))
-        }
-        .onChange(of: flow.selectedTab) { fetchIfNeeded(); flow.save() }
-        .onChange(of: flow.repoFilterIDs) { refresh(); flow.save() }
-        .onChange(of: flow.issueQuery) { flow.save() }
-        .onChange(of: flow.prQuery) { flow.save() }
-        .onChange(of: flow.repoSearch) { flow.save() }
-        .onChange(of: flow.selectedRepoID) { flow.save() }
-        .onChange(of: flow.branchSearch) { flow.save() }
-        .onChange(of: db.repos) { flow.pruneRepoIDs(existing: db.repos.map(\.id)) }
+        .persistingFlowViewState(flow, db: db, onSelectedTabChange: fetchIfNeeded, onRepoFilterChange: refresh)
         .alert("Error", isPresented: .init(get: { actionError != nil }, set: { if !$0 { actionError = nil } })) {
             Button("OK", role: .cancel) { actionError = nil }
         } message: { Text(actionError ?? "") }

@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftUI
 
 /// Durable Flow navigation and filter choices — see CONTEXT.md's "Flow View State" entry and
 /// docs/adr/0001-persist-flow-view-state-in-json.md. One instance is owned at app scope and
@@ -167,4 +168,45 @@ final class FlowViewState {
                && afterReset.branchSearch.isEmpty)
     }
     #endif
+}
+
+// MARK: - View wiring
+
+/// Fires `onSelectedTabChange`/`onRepoFilterChange` for their side effects (e.g. refetching),
+/// calls `save()` after every durable field changes, and prunes stale repo IDs on appear and
+/// whenever `db.repos` changes. Kept next to FlowViewState rather than in the Flow view itself —
+/// this is entirely about how a view attaches to Flow View State, not Flow-view-specific UI.
+private struct FlowViewStatePersistence: ViewModifier {
+    let flow: FlowViewState
+    let db: WorkspaceDB
+    let onSelectedTabChange: () -> Void
+    let onRepoFilterChange: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear {
+                onSelectedTabChange()
+                flow.pruneRepoIDs(existing: db.repos.map(\.id))
+            }
+            .onChange(of: flow.selectedTab) { onSelectedTabChange(); flow.save() }
+            .onChange(of: flow.repoFilterIDs) { onRepoFilterChange(); flow.save() }
+            .onChange(of: flow.issueQuery) { flow.save() }
+            .onChange(of: flow.prQuery) { flow.save() }
+            .onChange(of: flow.repoSearch) { flow.save() }
+            .onChange(of: flow.selectedRepoID) { flow.save() }
+            .onChange(of: flow.branchSearch) { flow.save() }
+            .onChange(of: db.repos) { flow.pruneRepoIDs(existing: db.repos.map(\.id)) }
+    }
+}
+
+extension View {
+    /// Wires this view's Flow-hosting body to `flow`'s persistence — see FlowViewStatePersistence.
+    func persistingFlowViewState(
+        _ flow: FlowViewState, db: WorkspaceDB,
+        onSelectedTabChange: @escaping () -> Void, onRepoFilterChange: @escaping () -> Void
+    ) -> some View {
+        modifier(FlowViewStatePersistence(
+            flow: flow, db: db, onSelectedTabChange: onSelectedTabChange, onRepoFilterChange: onRepoFilterChange
+        ))
+    }
 }

@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - Design tokens
 
-private extension Color {
+extension Color {
     static let stBg      = Color(red: 0.067, green: 0.067, blue: 0.075)
     static let stSurface = Color(red: 0.10,  green: 0.10,  blue: 0.11)
     static let stBorder  = Color.white.opacity(0.07)
@@ -665,65 +665,6 @@ struct PresetEditSheet: View {
         }
         .frame(width: 500)
         .background(Color.stBg)
-    }
-}
-
-// MARK: - State settings (Settings → State → Flow reset)
-
-private struct StateSettingsView: View {
-    @Environment(FlowViewState.self) private var flow
-    @State private var showResetConfirm = false
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("State")
-                        .font(.system(size: 20, weight: .semibold))
-                        .foregroundStyle(Color.stLabel)
-                    Text("Durable navigation and filter choices that survive an app restart.")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Color.stMuted)
-                }
-                .padding(.bottom, 28)
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Flow")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Color.stLabel)
-                    Text("Selected tab, repository scope, issue/PR queries, selected repository, and searches.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color.stMuted)
-
-                    Button(role: .destructive) {
-                        showResetConfirm = true
-                    } label: {
-                        Text("Reset Flow View State")
-                            .font(.system(size: 13, weight: .medium))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Color.red.opacity(0.85))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(Color.stSurface)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.stBorder))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .padding(.top, 4)
-                }
-            }
-            .padding(28)
-        }
-        .background(Color.stBg)
-        .confirmationDialog(
-            "Reset Flow View State?",
-            isPresented: $showResetConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("Reset", role: .destructive) { flow.reset() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Clears the selected tab, repository scope, queries, selected repository, and searches.")
-        }
     }
 }
 
