@@ -10,7 +10,7 @@ import SwiftUI
 final class FlowViewState {
     private struct Document: Codable {
         var selectedTab: TasksPanel.SubTab = .issues
-        var repoFilterIDs: Set<String> = []
+        var repositoryFilter: RepositoryFilterState = .all
         var issueQuery = "is:issue is:open"
         var prQuery = "is:pr is:open"
         var repoSearch = ""
@@ -19,7 +19,7 @@ final class FlowViewState {
     }
 
     var selectedTab: TasksPanel.SubTab = .issues
-    var repoFilterIDs: Set<String> = []
+    var repositoryFilter: RepositoryFilterState = .all
     var issueQuery = "is:issue is:open"
     var prQuery = "is:pr is:open"
     var repoSearch = ""
@@ -48,7 +48,7 @@ final class FlowViewState {
     func save() {
         let dir = (path as NSString).deletingLastPathComponent
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        let doc = Document(selectedTab: selectedTab, repoFilterIDs: repoFilterIDs, issueQuery: issueQuery,
+        let doc = Document(selectedTab: selectedTab, repositoryFilter: repositoryFilter, issueQuery: issueQuery,
                             prQuery: prQuery, repoSearch: repoSearch, selectedRepoID: selectedRepoID,
                             branchSearch: branchSearch)
         guard let data = try? JSONEncoder().encode(doc), data != savedData else { return }
@@ -63,7 +63,7 @@ final class FlowViewState {
 
     private func apply(_ doc: Document) {
         selectedTab = doc.selectedTab
-        repoFilterIDs = doc.repoFilterIDs
+        repositoryFilter = doc.repositoryFilter
         issueQuery = doc.issueQuery
         prQuery = doc.prQuery
         repoSearch = doc.repoSearch
@@ -82,7 +82,7 @@ final class FlowViewState {
     func pruneRepoIDs(existing: [String]) {
         guard !existing.isEmpty else { return }
         let ids = Set(existing)
-        if !repoFilterIDs.isEmpty { repoFilterIDs.formIntersection(ids) }
+        repositoryFilter = RepositoryFilterState.pruning(repositoryFilter, keeping: ids)
         if let selectedRepoID, !ids.contains(selectedRepoID) { self.selectedRepoID = nil }
     }
 
@@ -104,13 +104,13 @@ final class FlowViewState {
 
         // Missing file → current defaults.
         let fresh = FlowViewState(stateDirectory: root + "/fresh")
-        assert(fresh.selectedTab == .issues && fresh.repoFilterIDs.isEmpty && fresh.issueQuery == "is:issue is:open"
+        assert(fresh.selectedTab == .issues && fresh.repositoryFilter == .all && fresh.issueQuery == "is:issue is:open"
                && fresh.prQuery == "is:pr is:open" && fresh.repoSearch.isEmpty && fresh.selectedRepoID == nil
                && fresh.branchSearch.isEmpty)
 
         // Every persisted field survives a save/load round trip.
         fresh.selectedTab = .prs
-        fresh.repoFilterIDs = ["a", "b"]
+        fresh.repositoryFilter = .subset(["a", "b"])
         fresh.issueQuery = "is:issue is:open label:bug"
         fresh.prQuery = "is:pr is:open author:@me"
         fresh.repoSearch = "srota"
@@ -120,7 +120,7 @@ final class FlowViewState {
 
         let reloaded = FlowViewState(stateDirectory: root + "/fresh")
         assert(reloaded.selectedTab == .prs)
-        assert(reloaded.repoFilterIDs == ["a", "b"])
+        assert(reloaded.repositoryFilter == .subset(["a", "b"]))
         assert(reloaded.issueQuery == "is:issue is:open label:bug")
         assert(reloaded.prQuery == "is:pr is:open author:@me")
         assert(reloaded.repoSearch == "srota")
@@ -134,19 +134,19 @@ final class FlowViewState {
         let garbage = Data("not json".utf8)
         try? garbage.write(to: URL(fileURLWithPath: malformedPath))
         let malformed = FlowViewState(stateDirectory: malformedDir)
-        assert(malformed.selectedTab == .issues && malformed.repoFilterIDs.isEmpty && malformed.issueQuery == "is:issue is:open"
+        assert(malformed.selectedTab == .issues && malformed.repositoryFilter == .all && malformed.issueQuery == "is:issue is:open"
                && malformed.prQuery == "is:pr is:open" && malformed.repoSearch.isEmpty && malformed.selectedRepoID == nil
                && malformed.branchSearch.isEmpty)
         assert((try? Data(contentsOf: URL(fileURLWithPath: malformedPath))) == garbage)
 
         // Unknown repo IDs are pruned once a catalog is supplied; an empty catalog (async startup) is a no-op.
         let pruning = FlowViewState(stateDirectory: root + "/pruning")
-        pruning.repoFilterIDs = ["keep", "stale"]
+        pruning.repositoryFilter = .subset(["keep", "stale"])
         pruning.selectedRepoID = "stale"
         pruning.pruneRepoIDs(existing: [])
-        assert(pruning.repoFilterIDs == ["keep", "stale"] && pruning.selectedRepoID == "stale")
+        assert(pruning.repositoryFilter == .subset(["keep", "stale"]) && pruning.selectedRepoID == "stale")
         pruning.pruneRepoIDs(existing: ["keep"])
-        assert(pruning.repoFilterIDs == ["keep"] && pruning.selectedRepoID == nil)
+        assert(pruning.repositoryFilter == .subset(["keep"]) && pruning.selectedRepoID == nil)
 
         // Save failure leaves in-memory state unchanged: force the write to fail by putting a
         // directory where the state file needs to go.
@@ -159,11 +159,11 @@ final class FlowViewState {
 
         // Reset restores every default immediately and persists it for a subsequent load.
         reloaded.reset()
-        assert(reloaded.selectedTab == .issues && reloaded.repoFilterIDs.isEmpty && reloaded.issueQuery == "is:issue is:open"
+        assert(reloaded.selectedTab == .issues && reloaded.repositoryFilter == .all && reloaded.issueQuery == "is:issue is:open"
                && reloaded.prQuery == "is:pr is:open" && reloaded.repoSearch.isEmpty && reloaded.selectedRepoID == nil
                && reloaded.branchSearch.isEmpty)
         let afterReset = FlowViewState(stateDirectory: root + "/fresh")
-        assert(afterReset.selectedTab == .issues && afterReset.repoFilterIDs.isEmpty && afterReset.issueQuery == "is:issue is:open"
+        assert(afterReset.selectedTab == .issues && afterReset.repositoryFilter == .all && afterReset.issueQuery == "is:issue is:open"
                && afterReset.prQuery == "is:pr is:open" && afterReset.repoSearch.isEmpty && afterReset.selectedRepoID == nil
                && afterReset.branchSearch.isEmpty)
     }
@@ -189,7 +189,7 @@ private struct FlowViewStatePersistence: ViewModifier {
                 flow.pruneRepoIDs(existing: db.repos.map(\.id))
             }
             .onChange(of: flow.selectedTab) { onSelectedTabChange(); flow.save() }
-            .onChange(of: flow.repoFilterIDs) { onRepoFilterChange(); flow.save() }
+            .onChange(of: flow.repositoryFilter) { onRepoFilterChange(); flow.save() }
             .onChange(of: flow.issueQuery) { flow.save() }
             .onChange(of: flow.prQuery) { flow.save() }
             .onChange(of: flow.repoSearch) { flow.save() }

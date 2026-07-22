@@ -15,3 +15,7 @@ _Avoid_: Event (that's the underlying hook event itself, not its summarized reco
 **Flow View State**:
 The durable user choices that restore the Flow view's navigation and filters, including its selected tab, repository scope, queries, selected repository, and searches. Fetched GitHub data and transient presentation or operation state are not Flow View State.
 _Avoid_: Flow State, cache.
+
+**Repository Filter**:
+The repository scope whose issues and pull requests are shown: all repositories, no repositories, or an explicitly selected subset.
+_Avoid_: Project selection, project filter.
