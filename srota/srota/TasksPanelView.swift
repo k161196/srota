@@ -174,7 +174,7 @@ struct TasksPanel: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.mgBg)
-        .persistingFlowViewState(flow, db: db, onSelectedTabChange: fetchIfNeeded, onRepoFilterChange: refresh)
+        .persistingFlowViewState(flow, db: db, refetchIfNeeded: fetchIfNeeded, onRepoFilterChange: refresh)
         .alert("Error", isPresented: .init(get: { actionError != nil }, set: { if !$0 { actionError = nil } })) {
             Button("OK", role: .cancel) { actionError = nil }
         } message: { Text(actionError ?? "") }

@@ -172,30 +172,36 @@ final class FlowViewState {
 
 // MARK: - View wiring
 
-/// Fires `onSelectedTabChange`/`onRepoFilterChange` for their side effects (e.g. refetching),
+/// Fires `refetchIfNeeded`/`onRepoFilterChange` for their side effects (e.g. refetching),
 /// calls `save()` after every durable field changes, and prunes stale repo IDs on appear and
-/// whenever `db.repos` changes. Kept next to FlowViewState rather than in the Flow view itself —
-/// this is entirely about how a view attaches to Flow View State, not Flow-view-specific UI.
+/// whenever `db.repos` changes — re-running `refetchIfNeeded` right after, since WorkspaceDB.repos
+/// can still be empty when this view first appears (its own load is asynchronous), and a restored
+/// selected repo's branches wouldn't otherwise ever get fetched once the catalog does arrive.
+/// Kept next to FlowViewState rather than in the Flow view itself — this is entirely about how a
+/// view attaches to Flow View State, not Flow-view-specific UI.
 private struct FlowViewStatePersistence: ViewModifier {
     let flow: FlowViewState
     let db: WorkspaceDB
-    let onSelectedTabChange: () -> Void
+    let refetchIfNeeded: () -> Void
     let onRepoFilterChange: () -> Void
 
     func body(content: Content) -> some View {
         content
             .onAppear {
-                onSelectedTabChange()
+                refetchIfNeeded()
                 flow.pruneRepoIDs(existing: db.repos.map(\.id))
             }
-            .onChange(of: flow.selectedTab) { onSelectedTabChange(); flow.save() }
+            .onChange(of: flow.selectedTab) { refetchIfNeeded(); flow.save() }
             .onChange(of: flow.repositoryFilter) { onRepoFilterChange(); flow.save() }
             .onChange(of: flow.issueQuery) { flow.save() }
             .onChange(of: flow.prQuery) { flow.save() }
             .onChange(of: flow.repoSearch) { flow.save() }
             .onChange(of: flow.selectedRepoID) { flow.save() }
             .onChange(of: flow.branchSearch) { flow.save() }
-            .onChange(of: db.repos) { flow.pruneRepoIDs(existing: db.repos.map(\.id)) }
+            .onChange(of: db.repos) {
+                flow.pruneRepoIDs(existing: db.repos.map(\.id))
+                refetchIfNeeded()
+            }
     }
 }
 
@@ -203,10 +209,10 @@ extension View {
     /// Wires this view's Flow-hosting body to `flow`'s persistence — see FlowViewStatePersistence.
     func persistingFlowViewState(
         _ flow: FlowViewState, db: WorkspaceDB,
-        onSelectedTabChange: @escaping () -> Void, onRepoFilterChange: @escaping () -> Void
+        refetchIfNeeded: @escaping () -> Void, onRepoFilterChange: @escaping () -> Void
     ) -> some View {
         modifier(FlowViewStatePersistence(
-            flow: flow, db: db, onSelectedTabChange: onSelectedTabChange, onRepoFilterChange: onRepoFilterChange
+            flow: flow, db: db, refetchIfNeeded: refetchIfNeeded, onRepoFilterChange: onRepoFilterChange
         ))
     }
 }
