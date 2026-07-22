@@ -8,6 +8,7 @@ struct srotaApp: App {
     @State private var editorsStore = EditorsStore()
     @State private var promptsStore = PromptsStore()
     @State private var agentsStore  = AgentsStore()
+    @State private var flowViewState = FlowViewState()
     @State private var shortcuts = KeyboardShortcutManager()
     @State private var daemonConnection = DaemonConnection()
     @State private var hookSetupResult: HookSetupResult? = nil
@@ -23,6 +24,7 @@ struct srotaApp: App {
         #if DEBUG
         FileLink.runSelfCheck()
         EditorsStore.runSelfCheck()
+        FlowViewState.runSelfCheck()
         #endif
     }
 
@@ -36,6 +38,7 @@ struct srotaApp: App {
                 .environment(editorsStore)
                 .environment(promptsStore)
                 .environment(agentsStore)
+                .environment(flowViewState)
                 .environment(shortcuts)
                 .environment(daemonConnection)
                 .environment(sessionRecorder)
