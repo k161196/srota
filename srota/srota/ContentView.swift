@@ -529,6 +529,7 @@ final class Workspace: Identifiable, ObservableObject {
             guard let self, let tab else { return }
             self.closeTab(id: tab.id)
         }
+        tab.customName = record.name
         tabs.append(tab)
         if record.isSelected { selectedTabID = tab.id }
     }
@@ -553,14 +554,16 @@ final class Workspace: Identifiable, ObservableObject {
                     w: CGFloat(firstRecord.lw), h: CGFloat(firstRecord.lh))
                 if firstRecord.lw == 0 || firstRecord.lh == 0 {
                     tab.removePane(id: tab.panes[0].id)
-                } else if activeIDs.contains(firstRecord.id) {
-                    tab.resumePane(id: tab.panes[0].id)
+                } else {
+                    if !firstRecord.name.isEmpty { tab.rename(id: tab.panes[0].id, to: firstRecord.name) }
+                    if activeIDs.contains(firstRecord.id) { tab.resumePane(id: tab.panes[0].id) }
                 }
             }
             for record in sortedPanes.dropFirst() {
                 tab.restorePane(record: record, colorScheme: colorScheme)
-                if activeIDs.contains(record.id), let restored = tab.panes.last {
-                    tab.resumePane(id: restored.id)
+                if let restored = tab.panes.last {
+                    if !record.name.isEmpty { tab.rename(id: restored.id, to: record.name) }
+                    if activeIDs.contains(record.id) { tab.resumePane(id: restored.id) }
                 }
             }
         }
@@ -587,7 +590,8 @@ final class Workspace: Identifiable, ObservableObject {
                 id: tab.id.uuidString, workspaceID: id.uuidString,
                 position: ti,
                 initialCWD: tab.initialWorkingDirectory ?? "",
-                isSelected: tab.id == selectedTabID)
+                isSelected: tab.id == selectedTabID,
+                name: tab.customName)
             let paneRecords = tab.panes.enumerated().compactMap { i, pane -> PaneRecord? in
                 guard let layout = tab.paneLayouts[pane.id] else { return nil }
                 let record = PaneRecord(
@@ -596,7 +600,8 @@ final class Workspace: Identifiable, ObservableObject {
                     lx: Double(layout.x), ly: Double(layout.y),
                     lw: Double(layout.w), lh: Double(layout.h),
                     initialCWD: resolveCWD(pane.viewState.workingDirectory) ?? pane.initialCWD ?? "",
-                    position: i)
+                    position: i,
+                    name: tab.paneNames[pane.id] ?? "")
                 return record
             }
             return (tabRecord, paneRecords)

@@ -24,6 +24,7 @@ struct TabRecord: Identifiable, Sendable {
     var position: Int
     var initialCWD: String
     var isSelected: Bool
+    var name: String = ""
 }
 
 struct PaneRecord: Identifiable, Sendable {
@@ -33,6 +34,7 @@ struct PaneRecord: Identifiable, Sendable {
     var lx, ly, lw, lh: Double
     var initialCWD: String
     var position: Int = 0
+    var name: String = ""
 }
 
 struct RepoEntry: Identifiable, Hashable, Sendable {
@@ -311,6 +313,8 @@ private actor WorkspaceStorage {
         execRaw("ALTER TABLE ws_workspaces ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")
         execRaw("ALTER TABLE ws_workspaces ADD COLUMN directory TEXT NOT NULL DEFAULT ''")
         execRaw("ALTER TABLE ws_workspaces ADD COLUMN additional_directories TEXT NOT NULL DEFAULT ''")
+        execRaw("ALTER TABLE ws_tabs ADD COLUMN name TEXT NOT NULL DEFAULT ''")
+        execRaw("ALTER TABLE ws_panes ADD COLUMN name TEXT NOT NULL DEFAULT ''")
         execRaw("DROP TABLE IF EXISTS organizations")
         execRaw("DROP TABLE IF EXISTS projects")
         execRaw("DROP TABLE IF EXISTS branches")
@@ -349,7 +353,8 @@ private actor WorkspaceStorage {
             tmux_id TEXT,
             tmux_name TEXT,
             initial_cwd TEXT NOT NULL DEFAULT '',
-            is_selected INTEGER NOT NULL DEFAULT 0
+            is_selected INTEGER NOT NULL DEFAULT 0,
+            name TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS ws_panes (
             id TEXT PRIMARY KEY,
@@ -362,7 +367,8 @@ private actor WorkspaceStorage {
             lh REAL NOT NULL DEFAULT 1,
             tmux_id TEXT,
             tmux_name TEXT,
-            initial_cwd TEXT NOT NULL DEFAULT ''
+            initial_cwd TEXT NOT NULL DEFAULT '',
+            name TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
@@ -476,7 +482,8 @@ private actor WorkspaceStorage {
             "workspace_id": tab.workspaceID,
             "position": String(tab.position),
             "initial_cwd": tab.initialCWD,
-            "is_selected": tab.isSelected ? "1" : "0"
+            "is_selected": tab.isSelected ? "1" : "0",
+            "name": tab.name
         ])
     }
 
@@ -492,13 +499,14 @@ private actor WorkspaceStorage {
     }
 
     private func loadTabs(workspaceID: String) -> [TabRecord] {
-        rows(sql("SELECT id,workspace_id,position,initial_cwd,is_selected", sqlFrom, "ws_tabs", sqlWhere, "workspace_id=?", "ORDER BY position"), bind: [workspaceID]) { stmt in
+        rows(sql("SELECT id,workspace_id,position,initial_cwd,is_selected,name", sqlFrom, "ws_tabs", sqlWhere, "workspace_id=?", "ORDER BY position"), bind: [workspaceID]) { stmt in
             TabRecord(
                 id: col(stmt, 0),
                 workspaceID: col(stmt, 1),
                 position: Int(sqlite3_column_int(stmt, 2)),
                 initialCWD: col(stmt, 3),
-                isSelected: sqlite3_column_int(stmt, 4) != 0
+                isSelected: sqlite3_column_int(stmt, 4) != 0,
+                name: col(stmt, 5)
             )
         }
     }
@@ -514,12 +522,13 @@ private actor WorkspaceStorage {
             "ly": String(pane.ly),
             "lw": String(pane.lw),
             "lh": String(pane.lh),
-            "initial_cwd": pane.initialCWD
+            "initial_cwd": pane.initialCWD,
+            "name": pane.name
         ])
     }
 
     private func loadPanes(tabID: String) -> [PaneRecord] {
-        rows(sql("SELECT id,tab_id,is_primary,lx,ly,lw,lh,initial_cwd,position", sqlFrom, "ws_panes", sqlWhere, "tab_id=?", "ORDER BY position ASC"), bind: [tabID]) { stmt in
+        rows(sql("SELECT id,tab_id,is_primary,lx,ly,lw,lh,initial_cwd,position,name", sqlFrom, "ws_panes", sqlWhere, "tab_id=?", "ORDER BY position ASC"), bind: [tabID]) { stmt in
             PaneRecord(
                 id: col(stmt, 0),
                 tabID: col(stmt, 1),
@@ -529,7 +538,8 @@ private actor WorkspaceStorage {
                 lw: sqlite3_column_double(stmt, 5),
                 lh: sqlite3_column_double(stmt, 6),
                 initialCWD: col(stmt, 7),
-                position: Int(sqlite3_column_int(stmt, 8))
+                position: Int(sqlite3_column_int(stmt, 8)),
+                name: col(stmt, 9)
             )
         }
     }
