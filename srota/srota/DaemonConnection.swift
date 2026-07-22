@@ -84,6 +84,7 @@ private final class ManagedSession {
     let env: [String: String]
     let session: InMemoryTerminalSession
     let ref: DaemonPaneRef
+    let replayBufferBytes: Int?
     // A PTY has exactly one live owner at a time (kernel window size, ring-buffer replay, and
     // write-echo suppression all assume a single consumer). Called when a later spawnOrAttach for
     // the same stableID takes over, so the displaced owner can show a "Use Here" reclaim button.
@@ -97,6 +98,7 @@ private final class ManagedSession {
         env: [String: String],
         session: InMemoryTerminalSession,
         ref: DaemonPaneRef,
+        replayBufferBytes: Int? = nil,
         onStolen: (() -> Void)?
     ) {
         self.stableID = stableID
@@ -104,6 +106,7 @@ private final class ManagedSession {
         self.env = env
         self.session = session
         self.ref = ref
+        self.replayBufferBytes = replayBufferBytes
         self.onStolen = onStolen
     }
 }
@@ -403,7 +406,7 @@ final class DaemonConnection {
 
     // MARK: - Public API
 
-    func createPTY(cmd: [String], cwd: String, stableID: String, env: [String: String], rows: UInt16? = nil, cols: UInt16? = nil) async throws -> String {
+    func createPTY(cmd: [String], cwd: String, stableID: String, env: [String: String], rows: UInt16? = nil, cols: UInt16? = nil, replayBufferBytes: Int? = nil) async throws -> String {
         let requestID = UUID().uuidString
         return try await withCheckedThrowingContinuation { cont in
             ioQueue.async { [self] in
@@ -419,6 +422,7 @@ final class DaemonConnection {
                     ]
                     if let rows { msg["rows"] = rows }
                     if let cols { msg["cols"] = cols }
+                    if let replayBufferBytes { msg["replayBufferBytes"] = replayBufferBytes }
                     try send(msg)
                 } catch {
                     let pending = stateLock.withLock { pendingCreates.removeValue(forKey: requestID) }
@@ -428,10 +432,12 @@ final class DaemonConnection {
         }
     }
 
-    func attach(paneID: String, session: InMemoryTerminalSession) {
+    func attach(paneID: String, session: InMemoryTerminalSession, replayBufferBytes: Int? = nil) {
         ioQueue.async { [self] in
             stateLock.withLock { sessionsByPaneID[paneID] = session }
-            try? send(["type": "attach", "paneID": paneID])
+            var msg: [String: Any] = ["type": "attach", "paneID": paneID]
+            if let replayBufferBytes { msg["replayBufferBytes"] = replayBufferBytes }
+            try? send(msg)
         }
     }
 
@@ -474,6 +480,7 @@ final class DaemonConnection {
         env: [String: String],
         session: InMemoryTerminalSession,
         into ref: DaemonPaneRef,
+        replayBufferBytes: Int? = nil,
         onStolen: (() -> Void)? = nil
     ) {
         let stolen = stateLock.withLock { () -> (() -> Void)? in
@@ -485,7 +492,8 @@ final class DaemonConnection {
             }
             existing?.ref.clearID()
             managedSessions[stableID] = ManagedSession(
-                stableID: stableID, cwd: cwd, env: env, session: session, ref: ref, onStolen: onStolen
+                stableID: stableID, cwd: cwd, env: env, session: session, ref: ref,
+                replayBufferBytes: replayBufferBytes, onStolen: onStolen
             )
             return existing?.onStolen
         }
@@ -590,7 +598,7 @@ final class DaemonConnection {
                 // (or from creation). Attaching first would replay the ring buffer at that stale
                 // size, rendering garbled until something happens to trigger a resize later.
                 applyPendingResize(for: rebound, paneID: match.paneID)
-                attach(paneID: match.paneID, session: rebound.session)
+                attach(paneID: match.paneID, session: rebound.session, replayBufferBytes: rebound.replayBufferBytes)
             }
             return
         }
@@ -605,7 +613,10 @@ final class DaemonConnection {
 
         // BUG-1 fix: split the guard so a PTY created during the async gap doesn't get orphaned
         let initialSize = managed.ref.peekPendingResize()
-        guard let paneID = try? await createPTY(cmd: [], cwd: managed.cwd, stableID: stableID, env: managed.env, rows: initialSize?.rows, cols: initialSize?.cols) else { return }
+        guard let paneID = try? await createPTY(
+            cmd: [], cwd: managed.cwd, stableID: stableID, env: managed.env,
+            rows: initialSize?.rows, cols: initialSize?.cols, replayBufferBytes: managed.replayBufferBytes
+        ) else { return }
         guard let rebound = bind(paneID: paneID, stableID: stableID) else {
             // Pane was closed while createPTY was in-flight — kill the orphaned daemon process
             killPane(paneID: paneID)

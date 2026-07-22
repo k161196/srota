@@ -177,7 +177,8 @@ final class PTYProcess {
     private(set) var exitCode: Int32?
 
     private var masterFD: Int32 = -1
-    private let ring = RingBuffer()
+    private let ring: RingBuffer
+    var replayCapacity: Int { ring.capacity } // test seam — see SelfCheck's attach-path coverage
     private var subscribers: [Subscriber] = []
     private let lock = NSLock()
     private var readSource: DispatchSourceRead?
@@ -206,10 +207,20 @@ final class PTYProcess {
         )
     }
 
-    init(paneID: String, stableID: String, cmd: [String], cwd: String, env: [String: String], cols: UInt16? = nil, rows: UInt16? = nil) throws {
+    init(
+        paneID: String,
+        stableID: String,
+        cmd: [String],
+        cwd: String,
+        env: [String: String],
+        cols: UInt16? = nil,
+        rows: UInt16? = nil,
+        replayBufferBytes: Int? = nil
+    ) throws {
         self.paneID = paneID
         self.stableID = stableID
         self.initialCWD = cwd
+        self.ring = replayBufferBytes.map { RingBuffer(capacity: $0) } ?? RingBuffer()
         try spawn(cmd: cmd, cwd: cwd, env: env, cols: cols, rows: rows)
     }
 
@@ -364,9 +375,10 @@ final class PTYProcess {
     // a full ring needs to send all of it, regardless of the live-frame backpressure budget) — but
     // repeated attach() calls against the SAME still-stalled subscriber replace any not-yet-started
     // replay instead of queuing another one alongside it, so this can't grow memory unbounded either.
-    func attach(client: ClientSession) {
+    func attach(client: ClientSession, replayBufferBytes: Int? = nil) {
         lock.lock()
         defer { lock.unlock() }
+        if let replayBufferBytes { ring.growIfNeeded(to: replayBufferBytes) }
         attachLocked(client: client)
     }
 

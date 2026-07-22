@@ -796,7 +796,11 @@ private final class AgentAttachment {
         viewState = state
         daemon.spawnOrAttach(
             stableID: stableID, cwd: cwd.isEmpty ? NSHomeDirectory() : cwd, env: [:],
-            session: session, into: ref, onStolen: onStolen
+            session: session, into: ref,
+            // Agent panes run long and their output matters most after a reconnect —
+            // worth 8x the 256 KB default, still far under RingBuffer.maxCapacity.
+            replayBufferBytes: 2 * 1024 * 1024,
+            onStolen: onStolen
         )
     }
 
