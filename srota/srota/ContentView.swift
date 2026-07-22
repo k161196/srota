@@ -107,6 +107,56 @@ private func gitRepoName(at gitDir: URL) -> String? {
     return nil
 }
 
+#if DEBUG
+/// Runnable regression check — no XCTest target exists in this project (see
+/// FlowViewState.runSelfCheck for the prior art this follows), so this asserts on every debug
+/// launch instead (see srotaApp.init()). Covers the linked-worktree case (`.git` as a `gitdir:`
+/// pointer file, config only reachable via `commondir`) that a bare `.git`-is-a-directory check
+/// gets wrong.
+enum GitWorktreeParsing {
+    static func runSelfCheck() {
+        let fm = FileManager.default
+        let root = NSTemporaryDirectory() + "srota-git-selfcheck-\(UUID().uuidString)"
+        defer { try? fm.removeItem(atPath: root) }
+
+        // Plain checkout: reponame/branch from .git/HEAD + .git/config.
+        let plain = root + "/plain"
+        try? fm.createDirectory(atPath: plain + "/.git", withIntermediateDirectories: true)
+        try? "ref: refs/heads/main\n".write(toFile: plain + "/.git/HEAD", atomically: true, encoding: .utf8)
+        try? "[remote \"origin\"]\n\turl = git@github.com:k161196/srota.git\n"
+            .write(toFile: plain + "/.git/config", atomically: true, encoding: .utf8)
+        assert(gitRepoBranch(for: plain) == "srota/main")
+        assert(smartTitle(for: plain) == "srota/main")
+
+        // Detached HEAD falls back to a short SHA.
+        try? "abcdef0123456789abcdef0123456789abcdef01\n".write(toFile: plain + "/.git/HEAD", atomically: true, encoding: .utf8)
+        assert(gitRepoBranch(for: plain) == "srota/abcdef0")
+
+        // Non-git directory: no badge.
+        let nonGit = root + "/plain-dir"
+        try? fm.createDirectory(atPath: nonGit, withIntermediateDirectories: true)
+        assert(gitRepoBranch(for: nonGit) == nil)
+
+        // Linked worktree: `.git` is a "gitdir: <path>" file pointing at the main repo's
+        // .git/worktrees/<name>, which holds this worktree's own HEAD but no config — that's
+        // only reachable by following `commondir` back to the shared .git.
+        let commonGitDir = root + "/main/.git"
+        let worktreeGitDir = commonGitDir + "/worktrees/wt"
+        try? fm.createDirectory(atPath: worktreeGitDir, withIntermediateDirectories: true)
+        try? "[remote \"origin\"]\n\turl = git@github.com:k161196/srota.git\n"
+            .write(toFile: commonGitDir + "/config", atomically: true, encoding: .utf8)
+        try? "ref: refs/heads/issue-16\n".write(toFile: worktreeGitDir + "/HEAD", atomically: true, encoding: .utf8)
+        try? "../..\n".write(toFile: worktreeGitDir + "/commondir", atomically: true, encoding: .utf8)
+
+        let checkout = root + "/wt-checkout"
+        try? fm.createDirectory(atPath: checkout, withIntermediateDirectories: true)
+        try? "gitdir: \(worktreeGitDir)\n".write(toFile: checkout + "/.git", atomically: true, encoding: .utf8)
+        assert(gitRepoBranch(for: checkout) == "srota/issue-16")
+        assert(smartTitle(for: checkout) == "srota/issue-16")
+    }
+}
+#endif
+
 /// Transparent overlay that intercepts double-clicks natively via NSView.
 /// Single-clicks pass through to SwiftUI gestures underneath.
 private struct DoubleClickOverlay: NSViewRepresentable {
@@ -2744,6 +2794,15 @@ private struct PinnedWorkspaceCard: View {
         return gitRepoBranch(for: cwd)
     }
 
+    // Every shell prompt re-reports its cwd (OSC 7), which already redraws this card via
+    // Workspace's tab-sink forwarding — except TerminalTab skips that forwarding once the tab has
+    // a custom name (its title no longer derives from cwd). Subscribing directly here closes that
+    // gap, so a `git checkout` run in a custom-named tab still refreshes the branch badge.
+    private var cwdPublisher: AnyPublisher<String?, Never> {
+        guard let tab = workspace.selectedTab else { return Empty().eraseToAnyPublisher() }
+        return tab.focusedViewState.$workingDirectory.eraseToAnyPublisher()
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
         Button(action: onSelect) {
@@ -2836,6 +2895,9 @@ private struct PinnedWorkspaceCard: View {
         }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            branchRefreshTick += 1
+        }
+        .onReceive(cwdPublisher) { _ in
             branchRefreshTick += 1
         }
     }

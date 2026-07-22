@@ -25,6 +25,7 @@ struct srotaApp: App {
         FileLink.runSelfCheck()
         EditorsStore.runSelfCheck()
         FlowViewState.runSelfCheck()
+        GitWorktreeParsing.runSelfCheck()
         #endif
     }
 
