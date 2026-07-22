@@ -14,10 +14,10 @@ private extension Color {
 struct TasksPanel: View {
     @Environment(WorkspaceDB.self) private var db
     @Environment(AppSettings.self) private var settings
+    @Environment(FlowViewState.self) private var flow
 
-    enum SubTab { case repos, issues, prs }
+    enum SubTab: String, Codable { case repos, issues, prs }
 
-    @State private var subTab: SubTab = .issues
     @State private var issueRows: [IssueRow] = []
     @State private var prRows: [PRRow] = []
     @State private var issueRowsByQuery: [String: [IssueRow]] = [:]
@@ -28,13 +28,9 @@ struct TasksPanel: View {
     @State private var fetchingPRQueryKeys: Set<String> = []
     @State private var issueLoadError: String?
     @State private var prLoadError: String?
-    @State private var issueQuery = "is:issue is:open"
-    @State private var prQuery = "is:pr is:open"
-    @State private var browseSearch = ""
     @State private var showFilters = false
     @State private var busyRowID: String? = nil
     @State private var actionError: String? = nil
-    @State private var repositoryFilter: RepositoryFilterState = .all
     @State private var showRepositoryFilter = false
     @State private var ghRepoListingsByOwner: [String: [TaskGHRepoListing]] = [:]
     @State private var fetchingGHRepos = false
@@ -46,41 +42,40 @@ struct TasksPanel: View {
     @State private var showAddPR = false
 
     // Repos tab: master-detail — selecting a repo on the left loads its branches on the right.
-    @State private var selectedRepoID: String? = nil
     @State private var branchRowsByRepoID: [String: [BranchRow]] = [:]
     @State private var fetchingBranchRepoIDs: Set<String> = []
-    @State private var branchSearch = ""
 
     private var allConnectedRepos: [RepoEntry] { db.repos.filter { gitURLComponents($0.url) != nil } }
 
     private var connectedRepos: [RepoEntry] {
-        allConnectedRepos.filter { repositoryFilter.isSelected($0.id) }
+        allConnectedRepos.filter { flow.repositoryFilter.isSelected($0.id) }
     }
     private var query: Binding<String> {
-        switch subTab {
-        case .issues: return $issueQuery
-        case .prs: return $prQuery
-        case .repos: return $browseSearch
+        @Bindable var flow = flow
+        switch flow.selectedTab {
+        case .issues: return $flow.issueQuery
+        case .prs: return $flow.prQuery
+        case .repos: return $flow.repoSearch
         }
     }
     private var defaultQueryValue: String {
-        switch subTab {
+        switch flow.selectedTab {
         case .issues: return "is:issue is:open"
         case .prs: return "is:pr is:open"
         case .repos: return ""
         }
     }
-    private var currentIssueQueryKey: String { taskQueryCacheKey(query: issueQuery) }
-    private var currentPRQueryKey: String { taskQueryCacheKey(query: prQuery) }
+    private var currentIssueQueryKey: String { taskQueryCacheKey(query: flow.issueQuery) }
+    private var currentPRQueryKey: String { taskQueryCacheKey(query: flow.prQuery) }
     private var fetching: Bool {
-        switch subTab {
+        switch flow.selectedTab {
         case .issues: return displayedIssueQueryKey.map(fetchingIssueQueryKeys.contains) ?? false
         case .prs: return displayedPRQueryKey.map(fetchingPRQueryKeys.contains) ?? false
         case .repos: return false
         }
     }
     private var loadError: String? {
-        subTab == .issues ? issueLoadError : prLoadError
+        flow.selectedTab == .issues ? issueLoadError : prLoadError
     }
 
     private func taskQueryCacheKey(query: String) -> String {
@@ -90,23 +85,23 @@ struct TasksPanel: View {
     private var filteredRepoRows: [RepoEntry] {
         // Repos tab always lists every connected repo — the cross-tab "All repos" filter
         // (Issues/PRs scoping) isn't shown here, so it shouldn't silently narrow this list either.
-        browseSearch.isEmpty ? allConnectedRepos : allConnectedRepos.filter { $0.name.localizedCaseInsensitiveContains(browseSearch) }
+        flow.repoSearch.isEmpty ? allConnectedRepos : allConnectedRepos.filter { $0.name.localizedCaseInsensitiveContains(flow.repoSearch) }
     }
 
     private var selectedRepo: RepoEntry? {
-        guard let id = selectedRepoID else { return nil }
+        guard let id = flow.selectedRepoID else { return nil }
         return allConnectedRepos.first { $0.id == id }
     }
     private var selectedRepoBranches: [BranchRow] {
-        guard let selectedRepoID else { return [] }
+        guard let selectedRepoID = flow.selectedRepoID else { return [] }
         return branchRowsByRepoID[selectedRepoID] ?? []
     }
     private var fetchingSelectedRepoBranches: Bool {
-        guard let selectedRepoID else { return false }
+        guard let selectedRepoID = flow.selectedRepoID else { return false }
         return fetchingBranchRepoIDs.contains(selectedRepoID)
     }
     private var filteredSelectedRepoBranches: [BranchRow] {
-        let rows = branchSearch.isEmpty ? selectedRepoBranches : selectedRepoBranches.filter { $0.name.localizedCaseInsensitiveContains(branchSearch) }
+        let rows = flow.branchSearch.isEmpty ? selectedRepoBranches : selectedRepoBranches.filter { $0.name.localizedCaseInsensitiveContains(flow.branchSearch) }
         // Branches with an existing worktree directory ("Open") sort above ones that still need
         // one created ("Worktree"/"Clone") — a stable sort keeps everything else in place.
         return rows.enumerated().sorted { a, b in
@@ -117,7 +112,7 @@ struct TasksPanel: View {
     }
 
     private var repositoryFilterLabel: String {
-        switch repositoryFilter {
+        switch flow.repositoryFilter {
         case .all: return "All repos"
         case .none: return "No repos"
         case .subset(let ids):
@@ -130,7 +125,7 @@ struct TasksPanel: View {
 
     private func toggleRepositoryFilter(_ id: String) {
         let allIDs = Set(allConnectedRepos.map(\.id))
-        repositoryFilter = RepositoryFilterState.toggling(id, in: repositoryFilter, allIDs: allIDs)
+        flow.repositoryFilter = RepositoryFilterState.toggling(id, in: flow.repositoryFilter, allIDs: allIDs)
     }
 
     private func fetchTaskGHRepoListingsIfNeeded() {
@@ -162,7 +157,7 @@ struct TasksPanel: View {
     var body: some View {
         VStack(spacing: 0) {
             headerToolbar
-            if subTab == .repos {
+            if flow.selectedTab == .repos {
                 repoSplitView
             } else {
                 VStack(spacing: 0) {
@@ -179,9 +174,7 @@ struct TasksPanel: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.mgBg)
-        .onAppear { fetchIfNeeded() }
-        .onChange(of: subTab) { fetchIfNeeded() }
-        .onChange(of: repositoryFilter) { refresh() }
+        .persistingFlowViewState(flow, db: db, refetchIfNeeded: fetchIfNeeded, onRepoFilterChange: refresh)
         .alert("Error", isPresented: .init(get: { actionError != nil }, set: { if !$0 { actionError = nil } })) {
             Button("OK", role: .cancel) { actionError = nil }
         } message: { Text(actionError ?? "") }
@@ -224,12 +217,13 @@ struct TasksPanel: View {
     // MARK: - Toolbar
 
     private var headerToolbar: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        @Bindable var flow = flow
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                SubTabButton(title: "Repos", isActive: subTab == .repos) { subTab = .repos }
-                SubTabButton(title: "Issues", isActive: subTab == .issues) { subTab = .issues }
-                SubTabButton(title: "PRs", isActive: subTab == .prs) { subTab = .prs }
-                if subTab != .repos {
+                SubTabButton(title: "Repos", isActive: flow.selectedTab == .repos) { flow.selectedTab = .repos }
+                SubTabButton(title: "Issues", isActive: flow.selectedTab == .issues) { flow.selectedTab = .issues }
+                SubTabButton(title: "PRs", isActive: flow.selectedTab == .prs) { flow.selectedTab = .prs }
+                if flow.selectedTab != .repos {
                     Button { showRepositoryFilter = true } label: {
                         HStack(spacing: 7) {
                             Text(repositoryFilterLabel).font(.system(size: 12, weight: .medium)).foregroundStyle(Color.mgLabel)
@@ -244,7 +238,7 @@ struct TasksPanel: View {
                     .popover(isPresented: $showRepositoryFilter, arrowEdge: .bottom) {
                         RepositoryFilterMenu(
                             recent: allConnectedRepos,
-                            filter: $repositoryFilter,
+                            filter: $flow.repositoryFilter,
                             settings: settings,
                             onToggle: toggleRepositoryFilter
                         )
@@ -259,24 +253,24 @@ struct TasksPanel: View {
 
     private var taskToolbar: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if subTab != .repos {
+            if flow.selectedTab != .repos {
                 HStack(spacing: 6) {
-                    if subTab == .issues {
-                        QuickChip(title: "Open", isActive: issueQuery == "is:issue is:open") {
-                            issueQuery = "is:issue is:open"; refreshIssues()
+                    if flow.selectedTab == .issues {
+                        QuickChip(title: "Open", isActive: flow.issueQuery == "is:issue is:open") {
+                            flow.issueQuery = "is:issue is:open"; refreshIssues()
                         }
-                        QuickChip(title: "Assigned to me", isActive: issueQuery.contains("assignee:@me")) {
-                            issueQuery = "is:issue is:open assignee:@me"; refreshIssues()
+                        QuickChip(title: "Assigned to me", isActive: flow.issueQuery.contains("assignee:@me")) {
+                            flow.issueQuery = "is:issue is:open assignee:@me"; refreshIssues()
                         }
                     } else {
-                        QuickChip(title: "Open", isActive: prQuery == "is:pr is:open") {
-                            prQuery = "is:pr is:open"; refreshPRs()
+                        QuickChip(title: "Open", isActive: flow.prQuery == "is:pr is:open") {
+                            flow.prQuery = "is:pr is:open"; refreshPRs()
                         }
-                        QuickChip(title: "Mine", isActive: prQuery.contains("author:@me")) {
-                            prQuery = "is:pr is:open author:@me"; refreshPRs()
+                        QuickChip(title: "Mine", isActive: flow.prQuery.contains("author:@me")) {
+                            flow.prQuery = "is:pr is:open author:@me"; refreshPRs()
                         }
-                        QuickChip(title: "Needs review", isActive: prQuery.contains("review-requested:@me")) {
-                            prQuery = "is:pr is:open review-requested:@me"; refreshPRs()
+                        QuickChip(title: "Needs review", isActive: flow.prQuery.contains("review-requested:@me")) {
+                            flow.prQuery = "is:pr is:open review-requested:@me"; refreshPRs()
                         }
                     }
                     Spacer()
@@ -287,7 +281,7 @@ struct TasksPanel: View {
                         HStack(spacing: 5) {
                             Image(systemName: "line.3.horizontal.decrease").font(.system(size: 10))
                             Text("Filters").font(.system(size: 11, weight: .medium))
-                            let count = activeFilterTokens(query.wrappedValue, subTab: subTab).count
+                            let count = activeFilterTokens(query.wrappedValue, subTab: flow.selectedTab).count
                             if count > 0 {
                                 Text("\(count)").font(.system(size: 9, weight: .semibold))
                                     .padding(.horizontal, 5).padding(.vertical, 1)
@@ -304,7 +298,7 @@ struct TasksPanel: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .popover(isPresented: $showFilters, arrowEdge: .bottom) {
                         FiltersMenuView(
-                            subTab: subTab,
+                            subTab: flow.selectedTab,
                             query: query,
                             assigneeSuggestions: distinctAssignees,
                             authorSuggestions: distinctAuthors,
@@ -337,15 +331,15 @@ struct TasksPanel: View {
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
 
-                    ToolbarIconButton(systemName: "plus", label: subTab == .issues ? "New issue" : "New pull request") {
-                        if subTab == .issues { showAddIssue = true } else { showAddPR = true }
+                    ToolbarIconButton(systemName: "plus", label: flow.selectedTab == .issues ? "New issue" : "New pull request") {
+                        if flow.selectedTab == .issues { showAddIssue = true } else { showAddPR = true }
                     }
-                    .disabled(repositoryFilter == .none)
+                    .disabled(flow.repositoryFilter == .none)
                     ToolbarIconButton(systemName: "arrow.clockwise", label: "Refresh", isLoading: fetching) { forceRefresh() }
-                        .disabled(repositoryFilter == .none)
+                        .disabled(flow.repositoryFilter == .none)
                 }
 
-                let tokens = activeFilterTokens(query.wrappedValue, subTab: subTab)
+                let tokens = activeFilterTokens(query.wrappedValue, subTab: flow.selectedTab)
                 if !tokens.isEmpty {
                     HStack(spacing: 6) {
                         ForEach(tokens) { token in
@@ -380,7 +374,7 @@ struct TasksPanel: View {
             Text("TITLE / CONTEXT")
                 .font(.system(size: 10, weight: .semibold)).tracking(0.6).foregroundStyle(Color.mgMuted)
             Spacer(minLength: 8)
-            if subTab == .prs {
+            if flow.selectedTab == .prs {
                 Text("REVIEWERS").font(.system(size: 10, weight: .semibold)).tracking(0.6)
                     .foregroundStyle(Color.mgMuted)
                     .lineLimit(1)
@@ -410,8 +404,8 @@ struct TasksPanel: View {
 
     @ViewBuilder
     private var content: some View {
-        let isEmpty = subTab == .issues ? issueRows.isEmpty : prRows.isEmpty
-        if repositoryFilter == .none {
+        let isEmpty = flow.selectedTab == .issues ? issueRows.isEmpty : prRows.isEmpty
+        if flow.repositoryFilter == .none {
             TaskStateView(
                 systemName: "square.stack.3d.up.slash",
                 title: "No repositories selected",
@@ -422,7 +416,7 @@ struct TasksPanel: View {
         } else if let loadError, isEmpty {
             TaskStateView(
                 systemName: "exclamationmark.triangle",
-                title: "Couldn’t load \(subTab == .issues ? "issues" : "pull requests")",
+                title: "Couldn’t load \(flow.selectedTab == .issues ? "issues" : "pull requests")",
                 detail: loadError,
                 actionTitle: "Try Again",
                 action: forceRefresh
@@ -430,13 +424,13 @@ struct TasksPanel: View {
         } else if isEmpty && !fetching {
             TaskStateView(
                 systemName: "line.3.horizontal.decrease.circle",
-                title: subTab == .issues ? "No matching issues" : "No matching pull requests",
+                title: flow.selectedTab == .issues ? "No matching issues" : "No matching pull requests",
                 detail: "Adjust the search or filters and try again."
             )
         } else {
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    if subTab == .issues {
+                    if flow.selectedTab == .issues {
                         ForEach(issueRows) { row in
                             IssueRowView(
                                 row: row,
@@ -465,7 +459,7 @@ struct TasksPanel: View {
                     }
                 }
             }
-            .id("\(subTab)-\(query.wrappedValue)")
+            .id("\(flow.selectedTab)-\(query.wrappedValue)")
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
     }
@@ -473,19 +467,20 @@ struct TasksPanel: View {
     // MARK: - Repos tab (master-detail: repo list + selected repo's branches)
 
     private var repoSplitView: some View {
-        HStack(spacing: 0) {
+        @Bindable var flow = flow
+        return HStack(spacing: 0) {
             VStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("REPOS").font(.system(size: 9, weight: .semibold)).tracking(0.6).foregroundStyle(Color.mgMuted)
                     HStack(spacing: 6) {
                         HStack(spacing: 6) {
                             Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(Color.mgMuted)
-                            TextField("Search…", text: $browseSearch)
+                            TextField("Search…", text: $flow.repoSearch)
                                 .textFieldStyle(.plain)
                                 .font(.system(size: 12))
                                 .foregroundStyle(Color.mgLabel)
-                            if !browseSearch.isEmpty {
-                                Button { browseSearch = "" } label: {
+                            if !flow.repoSearch.isEmpty {
+                                Button { flow.repoSearch = "" } label: {
                                     Image(systemName: "xmark.circle.fill").font(.system(size: 11)).foregroundStyle(Color.mgMuted)
                                 }
                                 .buttonStyle(.plain)
@@ -521,7 +516,7 @@ struct TasksPanel: View {
                                     repo: repo,
                                     isBusy: busyRowID == repo.id,
                                     isCloned: isMainCloned(for: repo, settings: settings),
-                                    isSelected: repo.id == selectedRepoID,
+                                    isSelected: repo.id == flow.selectedRepoID,
                                     onStart: { startRepo(repo) },
                                     onSelect: { selectRepo(repo) },
                                     onDelete: { removeRepo(repo) }
@@ -543,6 +538,7 @@ struct TasksPanel: View {
 
     @ViewBuilder
     private var repoDetailPane: some View {
+        @Bindable var flow = flow
         if let repo = selectedRepo {
             VStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: 8) {
@@ -550,10 +546,10 @@ struct TasksPanel: View {
                     HStack(spacing: 6) {
                         HStack(spacing: 6) {
                             Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(Color.mgMuted)
-                            TextField("Search branches…", text: $branchSearch)
+                            TextField("Search branches…", text: $flow.branchSearch)
                                 .textFieldStyle(.plain).font(.system(size: 12)).foregroundStyle(Color.mgLabel)
-                            if !branchSearch.isEmpty {
-                                Button { branchSearch = "" } label: {
+                            if !flow.branchSearch.isEmpty {
+                                Button { flow.branchSearch = "" } label: {
                                     Image(systemName: "xmark.circle.fill").font(.system(size: 11)).foregroundStyle(Color.mgMuted)
                                 }
                                 .buttonStyle(.plain)
@@ -628,7 +624,7 @@ struct TasksPanel: View {
     private var skeletonList: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                ForEach(0..<10, id: \.self) { _ in SkeletonRow(isPR: subTab == .prs) }
+                ForEach(0..<10, id: \.self) { _ in SkeletonRow(isPR: flow.selectedTab == .prs) }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -641,12 +637,12 @@ struct TasksPanel: View {
         Array(Set(issueRows.flatMap { $0.issue.assignees.map(\.login) })).sorted()
     }
     private var distinctAuthors: [String] {
-        subTab == .issues
+        flow.selectedTab == .issues
             ? Array(Set(issueRows.map { $0.issue.author.login })).sorted()
             : Array(Set(prRows.map { $0.pr.author.login })).sorted()
     }
     private var distinctLabels: [String] {
-        subTab == .issues
+        flow.selectedTab == .issues
             ? Array(Set(issueRows.flatMap { $0.issue.labels.map(\.name) })).sorted()
             : Array(Set(prRows.flatMap { $0.pr.labels.map(\.name) })).sorted()
     }
@@ -657,12 +653,16 @@ struct TasksPanel: View {
     // MARK: - Fetch
 
     private func fetchIfNeeded() {
-        if subTab == .issues { refreshIssues() }
-        if subTab == .prs { refreshPRs() }
+        switch FlowRefetchLogic.action(for: flow.selectedTab.rawValue, hasSelectedRepo: selectedRepo != nil) {
+        case .refreshBranches: refreshSelectedRepoBranches()
+        case .refreshIssues: refreshIssues()
+        case .refreshPRs: refreshPRs()
+        case .none: break
+        }
     }
 
     private func refresh() {
-        switch subTab {
+        switch flow.selectedTab {
         case .repos:
             refreshGHRepoListings()
             if selectedRepo != nil { refreshSelectedRepoBranches() }
@@ -672,7 +672,7 @@ struct TasksPanel: View {
     }
 
     private func forceRefresh() {
-        switch subTab {
+        switch flow.selectedTab {
         case .repos: refresh()
         case .issues: refreshIssues(force: true)
         case .prs: refreshPRs(force: true)
@@ -680,7 +680,7 @@ struct TasksPanel: View {
     }
 
     private func refreshIssues(force: Bool = false) {
-        let repos = connectedRepos; let q = issueQuery
+        let repos = connectedRepos; let q = flow.issueQuery
         let key = taskQueryCacheKey(query: q)
         if !force, let cached = issueRowsByQuery[key] {
             issueRows = cached
@@ -703,7 +703,7 @@ struct TasksPanel: View {
     }
 
     private func refreshPRs(force: Bool = false) {
-        let repos = connectedRepos; let q = prQuery
+        let repos = connectedRepos; let q = flow.prQuery
         let key = taskQueryCacheKey(query: q)
         if !force, let cached = prRowsByQuery[key] {
             prRows = cached
@@ -755,16 +755,16 @@ struct TasksPanel: View {
     }
 
     private func selectRepo(_ repo: RepoEntry) {
-        selectedRepoID = repo.id
-        branchSearch = ""
+        flow.selectedRepoID = repo.id
+        flow.branchSearch = ""
         if branchRowsByRepoID[repo.id] == nil { refreshSelectedRepoBranches(for: repo) }
     }
 
     private func removeRepo(_ repo: RepoEntry) {
-        if selectedRepoID == repo.id { selectedRepoID = nil }
+        if flow.selectedRepoID == repo.id { flow.selectedRepoID = nil }
         branchRowsByRepoID.removeValue(forKey: repo.id)
         fetchingBranchRepoIDs.remove(repo.id)
-        repositoryFilter = RepositoryFilterState.removingRepo(repo.id, from: repositoryFilter)
+        flow.repositoryFilter = RepositoryFilterState.removingRepo(repo.id, from: flow.repositoryFilter)
         db.deleteRepo(id: repo.id)
     }
 
@@ -825,7 +825,7 @@ struct TasksPanel: View {
     // step instead of adding a placeholder row to be started later.
     private func createBranch(repo: RepoEntry, name: String, baseBranch: String) {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty, !baseBranch.isEmpty, repo.id == selectedRepoID,
+        guard !trimmed.isEmpty, !baseBranch.isEmpty, repo.id == flow.selectedRepoID,
               !selectedRepoBranches.contains(where: { $0.name == trimmed }) else { return }
         runStartBranch(BranchRow(repo: repo, name: trimmed, isRemote: false, isLocal: false), baseBranch: baseBranch)
     }

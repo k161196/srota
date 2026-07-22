@@ -5,7 +5,7 @@ import Foundation
 // "all repos": that collapse was the bug this type exists to fix (issue #11). Pulled out of
 // TasksPanelView so the transition/collapsing rules are unit-testable without a SwiftUI view
 // harness (same rationale as AgentRegionLogic.swift).
-enum RepositoryFilterState: Equatable {
+enum RepositoryFilterState: Equatable, Codable {
     case all
     case none
     case subset(Set<String>)
@@ -50,6 +50,16 @@ enum RepositoryFilterState: Equatable {
     // The bulk actions themselves: Clear always lands on `.none`, Show all always on `.all`,
     // regardless of the state they're applied from — the model is the source of truth for this
     // transition rather than the view assigning `.none`/`.all` directly.
+    // Bulk version of removingRepo, run when the connected-repo catalog changes wholesale (e.g.
+    // FlowViewState.pruneRepoIDs). Never collapses to `.all` even if the surviving subset happens
+    // to match `existing` — that promotion is a deliberate user action (toggling every repo),
+    // not a side effect of other repos disconnecting.
+    static func pruning(_ state: RepositoryFilterState, keeping existing: Set<String>) -> RepositoryFilterState {
+        guard case .subset(var ids) = state else { return state }
+        ids.formIntersection(existing)
+        return ids.isEmpty ? .none : .subset(ids)
+    }
+
     func applying(_ action: Action) -> RepositoryFilterState {
         switch action {
         case .clear: return .none

@@ -1,0 +1,3 @@
+# Persist Flow View State in app-owned JSON
+
+Flow View State is owned by one app-scoped store shared across all Srota windows and persisted atomically in `~/.srota/states/flow/state.json` (`~/.srota-debug/states/flow/state.json` for debug builds). The file is private app storage rather than an external integration API, so Srota loads it synchronously at app startup, writes each durable user change, and deliberately omits file watching, multi-writer locking, schema migrations, and partial recovery; missing or invalid state falls back to defaults because the data is disposable UI preference state.

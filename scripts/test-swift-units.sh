@@ -28,6 +28,12 @@ swiftc -parse-as-library \
 /tmp/srota-repository-filter-test
 
 swiftc -parse-as-library \
+  "$ROOT/srota/srota/FlowRefetchLogic.swift" \
+  "$ROOT/scripts/test-flow-refetch-logic.swift" \
+  -o /tmp/srota-flow-refetch-test
+/tmp/srota-flow-refetch-test
+
+swiftc -parse-as-library \
   "$ROOT/srota/srota-daemon/RingBuffer.swift" \
   "$ROOT/srota/srota-daemon/DaemonProtocol.swift" \
   "$ROOT/srota/srota-daemon/PTYRegistry.swift" \
