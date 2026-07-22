@@ -41,6 +41,13 @@ swiftc -parse-as-library \
 /tmp/srota-flow-refetch-test
 
 swiftc -parse-as-library \
+  "$ROOT/srota/srota/Settings.swift" \
+  "$ROOT/srota/srota/WorkspaceDB.swift" \
+  "$ROOT/scripts/test-workspace-db-names.swift" \
+  -o /tmp/srota-workspace-db-names-test
+/tmp/srota-workspace-db-names-test
+
+swiftc -parse-as-library \
   "$ROOT/srota/srota-daemon/RingBuffer.swift" \
   "$ROOT/srota/srota-daemon/DaemonProtocol.swift" \
   "$ROOT/srota/srota-daemon/PTYRegistry.swift" \
