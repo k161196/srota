@@ -145,17 +145,24 @@ struct IssuePopoverView: View {
         let (openResult, branchResult) = await Task.detached {
             (fetchOpenIssuesData(repo: repoSnapshot), branchNumber.map { fetchBranchIssueListItem(number: $0, repo: repoSnapshot) })
         }.value
+        // Task.detached deliberately doesn't inherit the enclosing `.task(id: repo)`'s cancellation
+        // (that's what "detached" means), so a slower repo-A fetch can still resolve after the Pane
+        // has already moved on to repo B. Task.isCancelled catches most staleness (repo change,
+        // popover dismissed mid-fetch, ...); the repo-identity check directly guards the one
+        // invariant that must never break even if some future path leaves the task uncancelled: an
+        // issue from the previous repository must never be shown as current context (story 19).
+        guard !Task.isCancelled, repoSnapshot == repo else { return }
         loading = false
-        guard case .success(let issues) = openResult else {
-            if case .failure(let err) = openResult { errorMessage = err.message }
-            return
+        // The two fetches are independent (that's the whole point of fetching the Branch Issue
+        // separately — see fetchBranchIssueListItem), so one failing must not discard the other's
+        // successful result (stories 3, 4) — each is applied from its own result, not gated on the
+        // other's outcome.
+        switch openResult {
+        case .success(let issues):
+            openIssues = IssuePopoverLogic.composeOpenIssues(issues, branchIssueNumber: branchNumber)
+        case .failure(let err):
+            errorMessage = err.message
         }
-        openIssues = IssuePopoverLogic.composeOpenIssues(issues, branchIssueNumber: branchNumber)
-        // A Branch Issue fetch failure must surface as an error too — silently dropping it would
-        // make a closed or out-of-window Branch Issue vanish instead of staying promoted (story 4)
-        // and would contradict "an actionable error shown" on gh CLI failure (story 29). It must
-        // NOT hide the open issues set just above, though — that fetch succeeded independently, so
-        // the error is shown alongside them, not instead of them.
         switch branchResult {
         case nil:
             branchIssue = nil
@@ -163,7 +170,8 @@ struct IssuePopoverView: View {
             branchIssue = item
         case .failure(let err):
             branchIssue = nil
-            errorMessage = "Could not load Branch Issue: \(err.message)"
+            let branchMessage = "Could not load Branch Issue: \(err.message)"
+            errorMessage = errorMessage.map { "\($0)\n\(branchMessage)" } ?? branchMessage
         }
     }
 }
@@ -380,6 +388,7 @@ private struct IssueDetailPane: View {
     @State private var errorMessage: String? = nil
     @State private var commentText = ""
     @State private var commenting = false
+    @State private var commentError: String? = nil
 
     private var cacheKey: IssueDetailCacheKey { IssueDetailCacheKey(repo: repo, number: issueNumber) }
 
@@ -485,6 +494,9 @@ private struct IssueDetailPane: View {
                 .background(Color.mgSurface)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.mgBorder))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
+            if let commentError {
+                Text(commentError).font(.system(size: 11)).foregroundStyle(.red)
+            }
             HStack {
                 Spacer()
                 if commenting {
@@ -524,14 +536,20 @@ private struct IssueDetailPane: View {
 
     private func addComment() async {
         commenting = true
+        commentError = nil
         let repoSnapshot = repo
         let number = issueNumber
         let text = commentText
-        let ok = await Task.detached { postComment(number: number, repo: repoSnapshot, body: text) }.value
+        let result = await Task.detached { postComment(number: number, repo: repoSnapshot, body: text) }.value
         commenting = false
-        if ok {
+        switch result {
+        case .success:
             commentText = ""
             await load(force: true)
+        case .failure(let err):
+            // Left silent before: the draft stayed but nothing told the developer the post
+            // failed (story 29 wants an actionable error, not a comment that quietly vanished).
+            commentError = err.message
         }
     }
 }
@@ -572,8 +590,7 @@ nonisolated private func fetchIssueDetailData(number: Int, repo: IssueRepoIdenti
     }
 }
 
-nonisolated private func postComment(number: Int, repo: IssueRepoIdentity, body: String) -> Bool {
+nonisolated private func postComment(number: Int, repo: IssueRepoIdentity, body: String) -> Result<Void, TaskGHError> {
     let args = ["issue", "comment", String(number), "--repo", "\(repo.org)/\(repo.name)", "--body", body]
-    if case .success = runGH(args) { return true }
-    return false
+    return runGH(args).map { _ in () }
 }
