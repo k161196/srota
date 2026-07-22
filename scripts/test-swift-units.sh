@@ -22,6 +22,13 @@ swiftc -parse-as-library \
 /tmp/srota-region-test
 
 swiftc -parse-as-library \
+  "$ROOT/srota/srota/GitHubHelpers.swift" \
+  "$ROOT/srota/srota/IssuePopoverLogic.swift" \
+  "$ROOT/scripts/test-issue-popover-logic.swift" \
+  -o /tmp/srota-issue-popover-logic-test
+/tmp/srota-issue-popover-logic-test
+
+swiftc -parse-as-library \
   "$ROOT/srota/srota-daemon/RingBuffer.swift" \
   "$ROOT/srota/srota-daemon/DaemonProtocol.swift" \
   "$ROOT/srota/srota-daemon/PTYRegistry.swift" \

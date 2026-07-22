@@ -168,7 +168,10 @@ func taskRelativeTime(_ iso: String) -> String {
 
 struct TaskGHError: Error { let message: String }
 
-nonisolated private func runGH(_ arguments: [String]) -> Result<Data, TaskGHError> {
+// Not private — reused by IssuePopover.swift's `gh` plumbing (fetchOpenIssuesData,
+// fetchBranchIssueListItem, fetchIssueDetailData, postComment) so both surfaces share one
+// Process/Pipe/exit-status implementation instead of drifting copies.
+nonisolated func runGH(_ arguments: [String]) -> Result<Data, TaskGHError> {
     guard let ghPath = resolveGHPath() else {
         return .failure(TaskGHError(message: "gh CLI not found — install from https://cli.github.com"))
     }
@@ -334,14 +337,22 @@ func setIssueAssignee(_ row: IssueRow, login: String, add: Bool) async -> Result
 }
 
 // `--body` is always passed (even empty) — omitting it makes `gh` fall back to an interactive
-// prompt, which hangs forever since this process has no TTY.
-func createIssue(repo: RepoEntry, title: String, body: String) async -> Result<Void, TaskGHError> {
+// prompt, which hangs forever since this process has no TTY. Returns the created issue's number
+// (parsed from the issue URL `gh issue create` prints to stdout) so callers — namely the Issue
+// Popover's Add form — can open its detail immediately instead of just reporting success.
+func createIssue(repo: RepoEntry, title: String, body: String) async -> Result<Int, TaskGHError> {
     guard let (org, name) = gitURLComponents(repo.url) else {
         return .failure(TaskGHError(message: "Not a GitHub repo"))
     }
     let args = ["issue", "create", "--repo", "\(org)/\(name)", "--title", title, "--body", body]
     return await Task.detached {
-        runGH(args).map { _ in () }
+        runGH(args).flatMap { data in
+            let urlString = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard let number = urlString.split(separator: "/").last.flatMap({ Int($0) }) else {
+                return .failure(TaskGHError(message: "Issue created, but its number couldn't be parsed"))
+            }
+            return .success(number)
+        }
     }.value
 }
 

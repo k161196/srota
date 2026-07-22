@@ -3625,7 +3625,7 @@ private struct PaneHeader: View {
                 Spacer(minLength: 0)
 
                 if !isRenaming {
-                    PaneIssueButton(cwd: cwd, isOpen: $issuePopoverOpen)
+                    PaneIssueButton(cwd: cwd, stableID: stableID, isOpen: $issuePopoverOpen)
                         .opacity(isHovered || issuePopoverOpen ? 1 : 0)
                 }
 
@@ -3741,12 +3741,15 @@ private struct PaneHeader: View {
 // button — and the other header icons — visible together while the popover is open;
 // otherwise the moment the mouse leaves the header for the popover, everything but this
 // button would vanish, or vice versa, leaving a lone icon with a detached-looking popover.
-// Each pane can be on a different directory/branch, so detection runs against this
-// pane's own live `cwd`, not the workspace's. Ephemeral — no DB persistence.
+// Each pane can be on a different directory/branch, so detection runs against this pane's own
+// live `cwd`, not the workspace's. `stableID` is the Pane identity IssuePopoverNavigationStore
+// remembers list/detail navigation against — ephemeral (in-memory only), never DB persistence.
 private struct PaneIssueButton: View {
     let cwd: String?
+    let stableID: String
     @Binding var isOpen: Bool
-    @State private var issueNumber: Int? = nil
+    @State private var repo: IssueRepoIdentity? = nil
+    @State private var branchIssueNumber: Int? = nil
     @State private var repoPath: String = ""
     @State private var statusMessage: String? = nil
 
@@ -3759,12 +3762,14 @@ private struct PaneIssueButton: View {
         }
         .buttonStyle(.plain)
         .disabled(cwd == nil)
-        .help("Open issue for this pane's branch")
+        .help("Browse issues for this pane's repo")
         .popover(isPresented: $isOpen, arrowEdge: .bottom) {
             let windowSize = NSApp.keyWindow?.frame.size ?? CGSize(width: 640, height: 550)
             let popoverSize = CGSize(width: windowSize.width * 0.5, height: windowSize.height * 0.8)
-            if let issueNumber {
-                GitHubIssueSidebar(issueNumber: issueNumber, repoPath: repoPath) { isOpen = false }
+            if let repo {
+                IssuePopoverView(
+                    paneID: stableID, repoPath: repoPath, repo: repo, branchIssueNumber: branchIssueNumber
+                ) { isOpen = false }
                     .frame(width: popoverSize.width, height: popoverSize.height)
             } else {
                 Text(statusMessage ?? "Checking…")
@@ -3776,24 +3781,28 @@ private struct PaneIssueButton: View {
     }
 
     private func toggle() {
-        issueNumber = nil
+        repo = nil
         statusMessage = "Checking…"
         isOpen = true
-        Task { await detectIssue() }
+        Task { await detectRepo() }
     }
 
-    private func detectIssue() async {
+    private func detectRepo() async {
         guard let path = cwd, !path.isEmpty else {
-            statusMessage = "Issue not found"
+            statusMessage = "No working directory"
             return
         }
-        let branch = await Task.detached { runGit(["-C", path, "rev-parse", "--abbrev-ref", "HEAD"]) }.value
-        guard let branch, let number = extractIssueNumber(fromBranch: branch) else {
-            statusMessage = "Issue not found"
+        let (branch, remote) = await Task.detached {
+            (runGit(["-C", path, "rev-parse", "--abbrev-ref", "HEAD"]),
+             runGit(["-C", path, "remote", "get-url", "origin"]))
+        }.value
+        guard let remote, let components = gitURLComponents(remote) else {
+            statusMessage = "Not a GitHub repo"
             return
         }
         repoPath = path
-        issueNumber = number
+        branchIssueNumber = branch.flatMap { extractIssueNumber(fromBranch: $0) }
+        repo = IssueRepoIdentity(org: components.org, name: components.repo)
     }
 }
 
