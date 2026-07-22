@@ -52,10 +52,11 @@ struct TasksPanel: View {
         return allConnectedRepos.filter { flow.repoFilterIDs.contains($0.id) }
     }
     private var query: Binding<String> {
+        @Bindable var flow = flow
         switch flow.selectedTab {
-        case .issues: return Binding(get: { flow.issueQuery }, set: { flow.issueQuery = $0 })
-        case .prs: return Binding(get: { flow.prQuery }, set: { flow.prQuery = $0 })
-        case .repos: return Binding(get: { flow.repoSearch }, set: { flow.repoSearch = $0 })
+        case .issues: return $flow.issueQuery
+        case .prs: return $flow.prQuery
+        case .repos: return $flow.repoSearch
         }
     }
     private var defaultQueryValue: String {
@@ -228,7 +229,8 @@ struct TasksPanel: View {
     // MARK: - Toolbar
 
     private var headerToolbar: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        @Bindable var flow = flow
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 SubTabButton(title: "Repos", isActive: flow.selectedTab == .repos) { flow.selectedTab = .repos }
                 SubTabButton(title: "Issues", isActive: flow.selectedTab == .issues) { flow.selectedTab = .issues }
@@ -248,7 +250,7 @@ struct TasksPanel: View {
                     .popover(isPresented: $showProjectFilter, arrowEdge: .bottom) {
                         ProjectFilterMenu(
                             recent: allConnectedRepos,
-                            selected: Binding(get: { flow.repoFilterIDs }, set: { flow.repoFilterIDs = $0 }),
+                            selected: $flow.repoFilterIDs,
                             settings: settings,
                             onToggle: toggleProject
                         )
@@ -469,14 +471,15 @@ struct TasksPanel: View {
     // MARK: - Repos tab (master-detail: repo list + selected repo's branches)
 
     private var repoSplitView: some View {
-        HStack(spacing: 0) {
+        @Bindable var flow = flow
+        return HStack(spacing: 0) {
             VStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("REPOS").font(.system(size: 9, weight: .semibold)).tracking(0.6).foregroundStyle(Color.mgMuted)
                     HStack(spacing: 6) {
                         HStack(spacing: 6) {
                             Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(Color.mgMuted)
-                            TextField("Search…", text: Binding(get: { flow.repoSearch }, set: { flow.repoSearch = $0 }))
+                            TextField("Search…", text: $flow.repoSearch)
                                 .textFieldStyle(.plain)
                                 .font(.system(size: 12))
                                 .foregroundStyle(Color.mgLabel)
@@ -539,6 +542,7 @@ struct TasksPanel: View {
 
     @ViewBuilder
     private var repoDetailPane: some View {
+        @Bindable var flow = flow
         if let repo = selectedRepo {
             VStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: 8) {
@@ -546,7 +550,7 @@ struct TasksPanel: View {
                     HStack(spacing: 6) {
                         HStack(spacing: 6) {
                             Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(Color.mgMuted)
-                            TextField("Search branches…", text: Binding(get: { flow.branchSearch }, set: { flow.branchSearch = $0 }))
+                            TextField("Search branches…", text: $flow.branchSearch)
                                 .textFieldStyle(.plain).font(.system(size: 12)).foregroundStyle(Color.mgLabel)
                             if !flow.branchSearch.isEmpty {
                                 Button { flow.branchSearch = "" } label: {
