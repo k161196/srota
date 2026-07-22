@@ -264,22 +264,21 @@ final class TerminalTab: Identifiable, ObservableObject {
         expandNeighbor(of: id)
         panes.removeAll { $0.id == id }
         paneLayouts.removeValue(forKey: id)
-paneNames.removeValue(forKey: id)
-NSLog("PANEBUG removePane id=%@ tab=%@ panes.count now=%d", id.uuidString, self.id.uuidString, panes.count)
-if panes.isEmpty {
-closeTabCallback?()
-} else if wasFocused {
-focusedPaneID = panes[0].id
-}
-}
+        paneNames.removeValue(forKey: id)
+        if panes.isEmpty {
+            closeTabCallback?()
+        } else if wasFocused {
+            focusedPaneID = panes[0].id
+        }
+    }
 
-func shutdown() {
-for pane in panes {
-daemon?.closeSession(stableID: pane.daemonStableID)
-}
-}
+    func shutdown() {
+        for pane in panes {
+            daemon?.closeSession(stableID: pane.daemonStableID)
+        }
+    }
 
-private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirectory: String? = nil) {
+    private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirectory: String? = nil) {
         let state = TerminalViewState(terminalConfiguration: TerminalConfiguration())
         let ref = DaemonPaneRef()
         let session = InMemoryTerminalSession(
@@ -298,14 +297,14 @@ private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirect
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: workingDirectory)
         state.setTheme(.default)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
-let stableID = UUID().uuidString
-let entry = PaneEntry(hookPaneID: stableID, daemonStableID: stableID, viewState: state, initialCWD: workingDirectory)
-let entryID = entry.id
-state.onClose = { [weak self, ref] _ in
-guard let self else { return }
-self.daemon?.closeSession(stableID: stableID, paneID: ref.id)
-self.removePane(id: entryID, closeDaemon: false)
-}
+        let stableID = UUID().uuidString
+        let entry = PaneEntry(hookPaneID: stableID, daemonStableID: stableID, viewState: state, initialCWD: workingDirectory)
+        let entryID = entry.id
+        state.onClose = { [weak self, ref] _ in
+            guard let self else { return }
+            self.daemon?.closeSession(stableID: stableID, paneID: ref.id)
+            self.removePane(id: entryID, closeDaemon: false)
+        }
         paneLayouts[entry.id] = layout
         panes.append(entry)
         focusedPaneID = entry.id
@@ -333,13 +332,13 @@ self.removePane(id: entryID, closeDaemon: false)
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: cwd)
         state.setTheme(.default)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
- let entry = PaneEntry(hookPaneID: record.id, daemonStableID: record.id, viewState: state, initialCWD: cwd)
- let entryID = entry.id
- state.onClose = { [weak self, ref] _ in
- guard let self else { return }
- self.daemon?.closeSession(stableID: record.id, paneID: ref.id)
- self.removePane(id: entryID, closeDaemon: false)
- }
+        let entry = PaneEntry(hookPaneID: record.id, daemonStableID: record.id, viewState: state, initialCWD: cwd)
+        let entryID = entry.id
+        state.onClose = { [weak self, ref] _ in
+            guard let self else { return }
+            self.daemon?.closeSession(stableID: record.id, paneID: ref.id)
+            self.removePane(id: entryID, closeDaemon: false)
+        }
         paneLayouts[entry.id] = PaneLayout(
             x: CGFloat(record.lx), y: CGFloat(record.ly),
             w: CGFloat(record.lw), h: CGFloat(record.lh))
@@ -580,11 +579,7 @@ final class Workspace: Identifiable, ObservableObject {
     /// there's one place that knows how to turn live tabs/panes into persistable records.
     @discardableResult
     func snapshotTabsAndPanes(db: WorkspaceDB?) -> [(TabRecord, [PaneRecord])]? {
-        guard pendingRestore == nil else {
-            NSLog("PANEBUG snapshotTabsAndPanes SKIPPED (pendingRestore != nil) ws=%@ name=%@", id.uuidString, name)
-            return nil
-        }
-        NSLog("PANEBUG snapshotTabsAndPanes ws=%@ name=%@ tabs=%d panesPerTab=%@", id.uuidString, name, tabs.count, tabs.map { $0.panes.count }.description)
+        guard pendingRestore == nil else { return nil }
         let records = tabs.enumerated().map { ti, tab in
             let tabRecord = TabRecord(
                 id: tab.id.uuidString, workspaceID: id.uuidString,
@@ -633,13 +628,13 @@ final class Workspace: Identifiable, ObservableObject {
         }
     }
 
-func closeTab(id: UUID) {
- if let tab = tabs.first(where: { $0.id == id }) {
- tab.shutdown()
- }
- if selectedTabID == id {
- if let idx = tabs.firstIndex(where: { $0.id == id }) {
- let next = tabs.indices.contains(idx + 1) ? tabs[idx + 1].id
+    func closeTab(id: UUID) {
+        if let tab = tabs.first(where: { $0.id == id }) {
+            tab.shutdown()
+        }
+        if selectedTabID == id {
+            if let idx = tabs.firstIndex(where: { $0.id == id }) {
+                let next = tabs.indices.contains(idx + 1) ? tabs[idx + 1].id
                          : idx > 0 ? tabs[idx - 1].id : nil
                 selectedTabID = next
             }
@@ -1844,9 +1839,7 @@ struct ContentView: View {
                 // Only the workspace about to be shown needs its panes materialized right away —
                 // see Workspace.hydrateIfNeeded for why every other one stays deferred.
                 ws.pendingRestore = tabs.sorted(by: { $0.0.position < $1.0.position }).map { tabRecord, panes in
-                    let panes = panes.sorted { $0.position < $1.position }
-                    NSLog("PANEBUG restore ws=%@ name=%@ tab=%@ paneCount=%d", session.id, session.name, tabRecord.id, panes.count)
-                    return (tabRecord, panes)
+                    (tabRecord, panes.sorted { $0.position < $1.position })
                 }
             }
             if let folder {
@@ -1941,17 +1934,25 @@ struct RunningAgent: Identifiable {
 // (see Workspace.dehydrate), so a tabs-based walk would silently drop every agent
 // belonging to a workspace that isn't the one currently open. PaneRecord.id doubles
 // as its daemonStableID (see restorePane), so pendingRestore alone is enough here.
+// Custom name wins over the CWD-derived fallback, whether it came from a live pane rename
+// (paneNames) or a persisted record.name restored from the DB for a dehydrated workspace.
+private func resolveAgentTitle(customName: String?, cwd: String?) -> String {
+    if let customName, !customName.isEmpty { return customName }
+    return smartTitle(for: cwd)
+}
+
 func collectRunningAgents(_ manager: TerminalManager) -> [RunningAgent] {
     let states = manager.daemon?.agentStatesByStableID ?? [:]
     return manager.allWorkspaces
         .flatMap { ws -> [RunningAgent] in
             if let pending = ws.pendingRestore {
-                return pending.flatMap { _, paneRecords in
+                return pending.flatMap { tabRecord, paneRecords in
                     paneRecords.compactMap { record -> RunningAgent? in
                         guard let state = states[record.id], let status = state.status, status != .done else { return nil }
+                        let customName = record.name.isEmpty ? tabRecord.name : record.name
                         return RunningAgent(
                             workspaceID: ws.id, stableID: record.id, tabID: nil, paneID: nil,
-                            title: smartTitle(for: record.initialCWD),
+                            title: resolveAgentTitle(customName: customName, cwd: record.initialCWD),
                             status: status, agentName: state.agent, updatedAt: state.updatedAt
                         )
                     }
@@ -1962,8 +1963,8 @@ func collectRunningAgents(_ manager: TerminalManager) -> [RunningAgent] {
                     guard let state = states[pane.daemonStableID],
                           let status = state.status, status != .done else { return nil }
                     let paneCWD = resolveCWD(pane.viewState.workingDirectory) ?? pane.initialCWD
-                    let title = tab.paneNames[pane.id].flatMap { $0.isEmpty ? nil : $0 }
-                        ?? smartTitle(for: paneCWD)
+                    let customName = tab.paneNames[pane.id]?.isEmpty == false ? tab.paneNames[pane.id] : tab.customName
+                    let title = resolveAgentTitle(customName: customName, cwd: paneCWD)
                     return RunningAgent(
                         workspaceID: ws.id, stableID: pane.daemonStableID, tabID: tab.id, paneID: pane.id,
                         title: title, status: status, agentName: state.agent, updatedAt: state.updatedAt
