@@ -32,9 +32,9 @@ func smartTitle(for path: String?) -> String {
     guard let path, !path.isEmpty else { return "Terminal" }
     var url = URL(fileURLWithPath: path)
     while url.path != "/" {
-        if FileManager.default.fileExists(atPath: url.appendingPathComponent(".git").path) {
-            let name = gitRepoName(at: url) ?? url.lastPathComponent
-            if let branch = gitBranch(at: url) { return "\(name)/\(branch)" }
+        if let gd = gitDir(at: url) {
+            let name = gitRepoName(at: gd) ?? url.lastPathComponent
+            if let branch = gitBranch(at: gd) { return "\(name)/\(branch)" }
             return name
         }
         let parent = url.deletingLastPathComponent()
@@ -50,15 +50,52 @@ func smartTitle(for path: String?) -> String {
     }
 }
 
-private func gitBranch(at url: URL) -> String? {
-    guard let head = try? String(contentsOf: url.appendingPathComponent(".git/HEAD"), encoding: .utf8) else { return nil }
+/// "reponame/branch" for the workspace sidebar/pinned badge, nil outside a git repo.
+func gitRepoBranch(for path: String?) -> String? {
+    guard let path, !path.isEmpty else { return nil }
+    var url = URL(fileURLWithPath: path)
+    while url.path != "/" {
+        if let gd = gitDir(at: url) {
+            let name = gitRepoName(at: gd) ?? url.lastPathComponent
+            guard let branch = gitBranch(at: gd) else { return nil }
+            return "\(name)/\(branch)"
+        }
+        let parent = url.deletingLastPathComponent()
+        if parent == url { break }
+        url = parent
+    }
+    return nil
+}
+
+/// Resolves `.git` to the directory that actually holds HEAD/config, following linked worktrees:
+/// there `.git` is a file ("gitdir: <path>") pointing at the main repo's `.git/worktrees/<name>`.
+private func gitDir(at repoRoot: URL) -> URL? {
+    let dotGit = repoRoot.appendingPathComponent(".git")
+    var isDirectory: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: dotGit.path, isDirectory: &isDirectory) else { return nil }
+    if isDirectory.boolValue { return dotGit }
+    guard let contents = try? String(contentsOf: dotGit, encoding: .utf8) else { return nil }
+    let line = contents.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard line.hasPrefix("gitdir: ") else { return nil }
+    return URL(fileURLWithPath: String(line.dropFirst(8)), relativeTo: repoRoot).standardizedFileURL
+}
+
+private func gitBranch(at gitDir: URL) -> String? {
+    guard let head = try? String(contentsOf: gitDir.appendingPathComponent("HEAD"), encoding: .utf8) else { return nil }
     let t = head.trimmingCharacters(in: .whitespacesAndNewlines)
     if t.hasPrefix("ref: refs/heads/") { return String(t.dropFirst(16)) }
     return t.count >= 7 ? String(t.prefix(7)) : nil
 }
 
-private func gitRepoName(at url: URL) -> String? {
-    guard let cfg = try? String(contentsOf: url.appendingPathComponent(".git/config"), encoding: .utf8) else { return nil }
+/// Repo name from `config`, read via the worktree's `commondir` when `gitDir` is a linked worktree
+/// (a worktree's own gitdir has no `config`/remote — only the main repo's common gitdir does).
+private func gitRepoName(at gitDir: URL) -> String? {
+    var commonDir = gitDir
+    if let commondirContents = try? String(contentsOf: gitDir.appendingPathComponent("commondir"), encoding: .utf8) {
+        let rel = commondirContents.trimmingCharacters(in: .whitespacesAndNewlines)
+        commonDir = URL(fileURLWithPath: rel, relativeTo: gitDir).standardizedFileURL
+    }
+    guard let cfg = try? String(contentsOf: commonDir.appendingPathComponent("config"), encoding: .utf8) else { return nil }
     for line in cfg.components(separatedBy: "\n") {
         let t = line.trimmingCharacters(in: .whitespaces)
         guard t.hasPrefix("url = ") else { continue }
@@ -264,20 +301,19 @@ final class TerminalTab: Identifiable, ObservableObject {
         expandNeighbor(of: id)
         panes.removeAll { $0.id == id }
         paneLayouts.removeValue(forKey: id)
-paneNames.removeValue(forKey: id)
-NSLog("PANEBUG removePane id=%@ tab=%@ panes.count now=%d", id.uuidString, self.id.uuidString, panes.count)
-if panes.isEmpty {
-closeTabCallback?()
-} else if wasFocused {
-focusedPaneID = panes[0].id
-}
-}
+        paneNames.removeValue(forKey: id)
+        if panes.isEmpty {
+            closeTabCallback?()
+        } else if wasFocused {
+            focusedPaneID = panes[0].id
+        }
+    }
 
-func shutdown() {
-for pane in panes {
-daemon?.closeSession(stableID: pane.daemonStableID)
-}
-}
+    func shutdown() {
+        for pane in panes {
+            daemon?.closeSession(stableID: pane.daemonStableID)
+        }
+    }
 
     // Re-homes a pane (with its live PTY session) from another tab into this one — used for
     // cross-tab pane moves via drag-and-drop onto a tab chip. Unlike addPane/restorePane this
@@ -308,7 +344,7 @@ daemon?.closeSession(stableID: pane.daemonStableID)
         }
     }
 
-private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirectory: String? = nil) {
+    private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirectory: String? = nil) {
         let state = TerminalViewState(terminalConfiguration: TerminalConfiguration())
         let ref = DaemonPaneRef()
         let session = InMemoryTerminalSession(
@@ -327,14 +363,14 @@ private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirect
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: workingDirectory)
         state.setTheme(.default)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
-let stableID = UUID().uuidString
-let entry = PaneEntry(hookPaneID: stableID, daemonStableID: stableID, viewState: state, initialCWD: workingDirectory)
-let entryID = entry.id
-state.onClose = { [weak self, ref] _ in
-guard let self else { return }
-self.daemon?.closeSession(stableID: stableID, paneID: ref.id)
-self.removePane(id: entryID, closeDaemon: false)
-}
+        let stableID = UUID().uuidString
+        let entry = PaneEntry(hookPaneID: stableID, daemonStableID: stableID, viewState: state, initialCWD: workingDirectory)
+        let entryID = entry.id
+        state.onClose = { [weak self, ref] _ in
+            guard let self else { return }
+            self.daemon?.closeSession(stableID: stableID, paneID: ref.id)
+            self.removePane(id: entryID, closeDaemon: false)
+        }
         paneLayouts[entry.id] = layout
         panes.append(entry)
         focusedPaneID = entry.id
@@ -362,13 +398,13 @@ self.removePane(id: entryID, closeDaemon: false)
         state.configuration = TerminalSurfaceOptions(backend: .inMemory(session), workingDirectory: cwd)
         state.setTheme(.default)
         state.controller.setColorScheme(colorScheme == .dark ? .dark : .light)
- let entry = PaneEntry(hookPaneID: record.id, daemonStableID: record.id, viewState: state, initialCWD: cwd)
- let entryID = entry.id
- state.onClose = { [weak self, ref] _ in
- guard let self else { return }
- self.daemon?.closeSession(stableID: record.id, paneID: ref.id)
- self.removePane(id: entryID, closeDaemon: false)
- }
+        let entry = PaneEntry(hookPaneID: record.id, daemonStableID: record.id, viewState: state, initialCWD: cwd)
+        let entryID = entry.id
+        state.onClose = { [weak self, ref] _ in
+            guard let self else { return }
+            self.daemon?.closeSession(stableID: record.id, paneID: ref.id)
+            self.removePane(id: entryID, closeDaemon: false)
+        }
         paneLayouts[entry.id] = PaneLayout(
             x: CGFloat(record.lx), y: CGFloat(record.ly),
             w: CGFloat(record.lw), h: CGFloat(record.lh))
@@ -614,11 +650,7 @@ final class Workspace: Identifiable, ObservableObject {
     /// there's one place that knows how to turn live tabs/panes into persistable records.
     @discardableResult
     func snapshotTabsAndPanes(db: WorkspaceDB?) -> [(TabRecord, [PaneRecord])]? {
-        guard pendingRestore == nil else {
-            NSLog("PANEBUG snapshotTabsAndPanes SKIPPED (pendingRestore != nil) ws=%@ name=%@", id.uuidString, name)
-            return nil
-        }
-        NSLog("PANEBUG snapshotTabsAndPanes ws=%@ name=%@ tabs=%d panesPerTab=%@", id.uuidString, name, tabs.count, tabs.map { $0.panes.count }.description)
+        guard pendingRestore == nil else { return nil }
         let records = tabs.enumerated().map { ti, tab in
             let tabRecord = TabRecord(
                 id: tab.id.uuidString, workspaceID: id.uuidString,
@@ -667,13 +699,13 @@ final class Workspace: Identifiable, ObservableObject {
         }
     }
 
-func closeTab(id: UUID) {
- if let tab = tabs.first(where: { $0.id == id }) {
- tab.shutdown()
- }
- if selectedTabID == id {
- if let idx = tabs.firstIndex(where: { $0.id == id }) {
- let next = tabs.indices.contains(idx + 1) ? tabs[idx + 1].id
+    func closeTab(id: UUID) {
+        if let tab = tabs.first(where: { $0.id == id }) {
+            tab.shutdown()
+        }
+        if selectedTabID == id {
+            if let idx = tabs.firstIndex(where: { $0.id == id }) {
+                let next = tabs.indices.contains(idx + 1) ? tabs[idx + 1].id
                          : idx > 0 ? tabs[idx - 1].id : nil
                 selectedTabID = next
             }
@@ -1878,9 +1910,7 @@ struct ContentView: View {
                 // Only the workspace about to be shown needs its panes materialized right away —
                 // see Workspace.hydrateIfNeeded for why every other one stays deferred.
                 ws.pendingRestore = tabs.sorted(by: { $0.0.position < $1.0.position }).map { tabRecord, panes in
-                    let panes = panes.sorted { $0.position < $1.position }
-                    NSLog("PANEBUG restore ws=%@ name=%@ tab=%@ paneCount=%d", session.id, session.name, tabRecord.id, panes.count)
-                    return (tabRecord, panes)
+                    (tabRecord, panes.sorted { $0.position < $1.position })
                 }
             }
             if let folder {
@@ -1975,17 +2005,25 @@ struct RunningAgent: Identifiable {
 // (see Workspace.dehydrate), so a tabs-based walk would silently drop every agent
 // belonging to a workspace that isn't the one currently open. PaneRecord.id doubles
 // as its daemonStableID (see restorePane), so pendingRestore alone is enough here.
+// Custom name wins over the CWD-derived fallback, whether it came from a live pane rename
+// (paneNames) or a persisted record.name restored from the DB for a dehydrated workspace.
+private func resolveAgentTitle(customName: String?, cwd: String?) -> String {
+    if let customName, !customName.isEmpty { return customName }
+    return smartTitle(for: cwd)
+}
+
 func collectRunningAgents(_ manager: TerminalManager) -> [RunningAgent] {
     let states = manager.daemon?.agentStatesByStableID ?? [:]
     return manager.allWorkspaces
         .flatMap { ws -> [RunningAgent] in
             if let pending = ws.pendingRestore {
-                return pending.flatMap { _, paneRecords in
+                return pending.flatMap { tabRecord, paneRecords in
                     paneRecords.compactMap { record -> RunningAgent? in
                         guard let state = states[record.id], let status = state.status, status != .done else { return nil }
+                        let customName = record.name.isEmpty ? tabRecord.name : record.name
                         return RunningAgent(
                             workspaceID: ws.id, stableID: record.id, tabID: nil, paneID: nil,
-                            title: smartTitle(for: record.initialCWD),
+                            title: resolveAgentTitle(customName: customName, cwd: record.initialCWD),
                             status: status, agentName: state.agent, updatedAt: state.updatedAt
                         )
                     }
@@ -1996,8 +2034,8 @@ func collectRunningAgents(_ manager: TerminalManager) -> [RunningAgent] {
                     guard let state = states[pane.daemonStableID],
                           let status = state.status, status != .done else { return nil }
                     let paneCWD = resolveCWD(pane.viewState.workingDirectory) ?? pane.initialCWD
-                    let title = tab.paneNames[pane.id].flatMap { $0.isEmpty ? nil : $0 }
-                        ?? smartTitle(for: paneCWD)
+                    let customName = tab.paneNames[pane.id]?.isEmpty == false ? tab.paneNames[pane.id] : tab.customName
+                    let title = resolveAgentTitle(customName: customName, cwd: paneCWD)
                     return RunningAgent(
                         workspaceID: ws.id, stableID: pane.daemonStableID, tabID: tab.id, paneID: pane.id,
                         title: title, status: status, agentName: state.agent, updatedAt: state.updatedAt
@@ -2690,9 +2728,20 @@ private struct PinnedWorkspaceCard: View {
     @Environment(WorkspaceDB.self) private var db
     @State private var isHovered = false
     @State private var agentsExpanded = false
+    // Re-reads HEAD on app refocus, since a checkout elsewhere on disk doesn't otherwise
+    // invalidate this view — only bumped, never read, to force repoBranch to recompute.
+    @State private var branchRefreshTick = 0
 
     private var runningAgents: [RunningAgent] {
         collectRunningAgents(manager).filter { $0.workspaceID == workspace.id }
+    }
+
+    private var repoBranch: String? {
+        _ = branchRefreshTick
+        let cwd = workspace.currentWorkingDirectory
+            ?? (workspace.lastCWD.isEmpty ? nil : workspace.lastCWD)
+            ?? (workspace.directory.isEmpty ? nil : workspace.directory)
+        return gitRepoBranch(for: cwd)
     }
 
     var body: some View {
@@ -2712,6 +2761,9 @@ private struct PinnedWorkspaceCard: View {
                         }
                     }
                     HStack(spacing: 4) {
+                        if let repoBranch {
+                            Text(repoBranch)
+                        }
                         if let folderName, !folderName.isEmpty {
                             Text(folderName)
                         }
@@ -2782,6 +2834,9 @@ private struct PinnedWorkspaceCard: View {
             .padding(.trailing, 18)
             .padding(.bottom, 6)
         }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            branchRefreshTick += 1
         }
     }
 }
