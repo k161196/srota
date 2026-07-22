@@ -3,17 +3,24 @@ import Foundation
 // Pure state/list-composition logic for the pane-header Issue Popover (see IssuePopover.swift for
 // the SwiftUI surface). Pulled out so the navigation-restore and list-composition rules are
 // unit-testable without a SwiftUI/AppKit harness — mirrors AgentRegionLogic.swift's split.
+//
+// The app target sets SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor, so every declaration below is
+// explicitly `nonisolated` — these are plain Sendable value types fetched/decoded from
+// `nonisolated`/`Task.detached` gh-CLI code in IssuePopover.swift, and without this, a Swift 6
+// language-mode build would reject using their (implicitly MainActor-isolated) Decodable
+// conformances and static members from that nonisolated context. IssuePopoverNavigationStore below
+// is the one deliberate exception — it's genuinely @MainActor.
 
 // Identifies a GitHub repo the popover is browsing — org+name, not a URL, so equality is exact
 // regardless of "https://github.com/x/y" vs "git@github.com:x/y.git" spelling differences.
-struct IssueRepoIdentity: Hashable, Sendable {
+nonisolated struct IssueRepoIdentity: Hashable, Sendable {
     let org: String
     let name: String
 }
 
 // One row of `gh issue list`/`gh issue view` output — enough to render an Issue List row without
 // fetching full issue detail (body/comments) for every row.
-struct GHIssueListItem: Identifiable, Decodable, Sendable {
+nonisolated struct GHIssueListItem: Identifiable, Decodable, Sendable {
     let number: Int
     let title: String
     let state: String
@@ -27,19 +34,19 @@ struct GHIssueListItem: Identifiable, Decodable, Sendable {
 // A Pane's remembered Issue Popover navigation: either the Issue List, or one selected issue.
 // The Add form is deliberately not representable here — it's transient view state, never a
 // remembered destination (see IssuePopoverLogic.destinationAfterClose).
-enum IssuePopoverDestination: Equatable, Sendable {
+nonisolated enum IssuePopoverDestination: Equatable, Sendable {
     case list
     case detail(Int)
 }
 
 // Keys the issue-detail cache by repo identity + number, not number alone — otherwise issue #12 in
 // repo A and issue #12 in repo B (switching a Pane's repo) would collide and leak stale detail.
-struct IssueDetailCacheKey: Hashable, Sendable {
+nonisolated struct IssueDetailCacheKey: Hashable, Sendable {
     let repo: IssueRepoIdentity
     let number: Int
 }
 
-enum IssuePopoverLogic {
+nonisolated enum IssuePopoverLogic {
     static let openIssuesLimit = 50
 
     // Composes the OPEN ISSUES section: removes the Branch Issue by number (it's shown promoted,
