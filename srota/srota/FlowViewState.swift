@@ -133,7 +133,9 @@ final class FlowViewState {
         let garbage = Data("not json".utf8)
         try? garbage.write(to: URL(fileURLWithPath: malformedPath))
         let malformed = FlowViewState(stateDirectory: malformedDir)
-        assert(malformed.selectedTab == .issues && malformed.issueQuery == "is:issue is:open")
+        assert(malformed.selectedTab == .issues && malformed.repoFilterIDs.isEmpty && malformed.issueQuery == "is:issue is:open"
+               && malformed.prQuery == "is:pr is:open" && malformed.repoSearch.isEmpty && malformed.selectedRepoID == nil
+               && malformed.branchSearch.isEmpty)
         assert((try? Data(contentsOf: URL(fileURLWithPath: malformedPath))) == garbage)
 
         // Unknown repo IDs are pruned once a catalog is supplied; an empty catalog (async startup) is a no-op.
