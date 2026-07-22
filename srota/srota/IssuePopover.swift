@@ -106,6 +106,12 @@ struct IssuePopoverView: View {
         .background(Color.mgBg)
         .task(id: repo) {
             destination = IssuePopoverNavigationStore.shared.destination(paneID: paneID, repo: repo)
+            // Clear the previous repository's issues synchronously, before load()'s first
+            // suspension point — otherwise repo A's issues stay on screen while repo B loads, and
+            // indefinitely if repo B's fetch then fails (story 19: never shown as current context).
+            openIssues = []
+            branchIssue = nil
+            errorMessage = nil
             await load()
         }
     }
