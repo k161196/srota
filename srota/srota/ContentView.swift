@@ -2686,12 +2686,16 @@ private struct PinnedWorkspaceCard: View {
     @Environment(WorkspaceDB.self) private var db
     @State private var isHovered = false
     @State private var agentsExpanded = false
+    // Re-reads HEAD on app refocus, since a checkout elsewhere on disk doesn't otherwise
+    // invalidate this view — only bumped, never read, to force repoBranch to recompute.
+    @State private var branchRefreshTick = 0
 
     private var runningAgents: [RunningAgent] {
         collectRunningAgents(manager).filter { $0.workspaceID == workspace.id }
     }
 
     private var repoBranch: String? {
+        _ = branchRefreshTick
         let cwd = workspace.currentWorkingDirectory
             ?? (workspace.lastCWD.isEmpty ? nil : workspace.lastCWD)
             ?? (workspace.directory.isEmpty ? nil : workspace.directory)
@@ -2788,6 +2792,9 @@ private struct PinnedWorkspaceCard: View {
             .padding(.trailing, 18)
             .padding(.bottom, 6)
         }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            branchRefreshTick += 1
         }
     }
 }
