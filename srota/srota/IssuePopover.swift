@@ -67,7 +67,6 @@ private final class GHIssueDetailCache {
 
 struct IssuePopoverView: View {
     let paneID: String
-    let repoPath: String
     let repo: IssueRepoIdentity
     let branchIssueNumber: Int?
     let onDismiss: () -> Void
@@ -99,7 +98,6 @@ struct IssuePopoverView: View {
                 IssueDetailPane(
                     issueNumber: number,
                     repo: repo,
-                    repoPath: repoPath,
                     onBack: back,
                     onClose: close
                 )
@@ -359,7 +357,6 @@ private struct AddIssueInlineForm: View {
 private struct IssueDetailPane: View {
     let issueNumber: Int
     let repo: IssueRepoIdentity
-    let repoPath: String
     let onBack: () -> Void
     let onClose: () -> Void
 

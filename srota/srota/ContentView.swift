@@ -3750,7 +3750,6 @@ private struct PaneIssueButton: View {
     @Binding var isOpen: Bool
     @State private var repo: IssueRepoIdentity? = nil
     @State private var branchIssueNumber: Int? = nil
-    @State private var repoPath: String = ""
     @State private var statusMessage: String? = nil
 
     var body: some View {
@@ -3768,7 +3767,7 @@ private struct PaneIssueButton: View {
             let popoverSize = CGSize(width: windowSize.width * 0.5, height: windowSize.height * 0.8)
             if let repo {
                 IssuePopoverView(
-                    paneID: stableID, repoPath: repoPath, repo: repo, branchIssueNumber: branchIssueNumber
+                    paneID: stableID, repo: repo, branchIssueNumber: branchIssueNumber
                 ) { isOpen = false }
                     .frame(width: popoverSize.width, height: popoverSize.height)
             } else {
@@ -3800,7 +3799,6 @@ private struct PaneIssueButton: View {
             statusMessage = "Not a GitHub repo"
             return
         }
-        repoPath = path
         branchIssueNumber = branch.flatMap { extractIssueNumber(fromBranch: $0) }
         repo = IssueRepoIdentity(org: components.org, name: components.repo)
     }
