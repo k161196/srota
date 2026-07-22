@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - Design tokens
 
-private extension Color {
+extension Color {
     static let stBg      = Color(red: 0.067, green: 0.067, blue: 0.075)
     static let stSurface = Color(red: 0.10,  green: 0.10,  blue: 0.11)
     static let stBorder  = Color.white.opacity(0.07)
@@ -13,7 +13,7 @@ private extension Color {
 
 // MARK: - Panel
 
-private enum SettingsSection { case terminal, shortcuts, agents, editors, mcp, daemon }
+private enum SettingsSection { case terminal, shortcuts, agents, editors, mcp, daemon, state }
 
 struct SettingsPanel: View {
     @Binding var isPresented: Bool
@@ -58,6 +58,9 @@ struct SettingsPanel: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .daemon:
                 DaemonSettingsView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .state:
+                StateSettingsView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -124,6 +127,8 @@ private struct SettingsSidebar: View {
                 .onTapGesture { section = .mcp }
             SidebarRow(label: "Processes", icon: "square.stack.3d.up", isSelected: section == .daemon)
                 .onTapGesture { section = .daemon }
+            SidebarRow(label: "State", icon: "arrow.counterclockwise", isSelected: section == .state)
+                .onTapGesture { section = .state }
 
             Spacer()
         }
