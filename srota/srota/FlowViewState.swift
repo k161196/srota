@@ -73,6 +73,11 @@ final class FlowViewState {
     /// Drops filter/selection IDs for repos no longer connected. No-ops on an empty catalog —
     /// WorkspaceDB.repos starts empty until its async startup load completes, and pruning against
     /// that transient state would wipe a valid persisted filter before it ever had a chance to load.
+    /// ponytail: this also skips pruning if the user genuinely disconnects every repo, leaving
+    /// stale IDs in the saved document — harmless, since connectedRepos/selectedRepo already
+    /// resolve to empty/nil against an empty catalog regardless, and the next real repo list
+    /// prunes them for good. Telling the two empty cases apart needs a "has WorkspaceDB loaded
+    /// at least once" flag that doesn't exist today; add one if this ever needs to be exact.
     func pruneRepoIDs(existing: [String]) {
         guard !existing.isEmpty else { return }
         let ids = Set(existing)
