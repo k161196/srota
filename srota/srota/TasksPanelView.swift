@@ -653,8 +653,11 @@ struct TasksPanel: View {
     // MARK: - Fetch
 
     private func fetchIfNeeded() {
-        if flow.selectedTab == .issues { refreshIssues() }
-        if flow.selectedTab == .prs { refreshPRs() }
+        switch flow.selectedTab {
+        case .repos: if selectedRepo != nil { refreshSelectedRepoBranches() }
+        case .issues: refreshIssues()
+        case .prs: refreshPRs()
+        }
     }
 
     private func refresh() {
