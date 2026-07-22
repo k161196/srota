@@ -295,6 +295,14 @@ private struct IssueListRow: View {
     let item: GHIssueListItem
     let onSelect: () -> Void
 
+    // Story 9 requires state to be visible on the row; the dot alone (color-only) doesn't satisfy
+    // that for a screen reader, and shouldn't be the only cue for a sighted user either.
+    private var accessibilitySummary: String {
+        var parts = ["Issue #\(item.number)", item.title, item.state.lowercased()]
+        if !item.labels.isEmpty { parts.append("labels: \(item.labels.map(\.name).joined(separator: ", "))") }
+        return parts.joined(separator: ", ")
+    }
+
     var body: some View {
         Button(action: onSelect) {
             VStack(alignment: .leading, spacing: 2) {
@@ -302,6 +310,7 @@ private struct IssueListRow: View {
                     Circle().fill(item.state == "OPEN" ? Color.green : Color.purple).frame(width: 6, height: 6)
                     Text("#\(item.number)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Color.mgMuted)
                     Text(item.title).font(.system(size: 12, weight: .medium)).foregroundStyle(Color.mgLabel).lineLimit(1)
+                    Text(item.state.lowercased()).font(.system(size: 10)).foregroundStyle(Color.mgMuted)
                 }
                 if !item.labels.isEmpty {
                     Text(item.labels.map(\.name).joined(separator: ", "))
@@ -312,6 +321,8 @@ private struct IssueListRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilitySummary)
     }
 }
 
@@ -584,7 +595,14 @@ private struct IssueDetailPane: View {
 // implementation instead of a hand-rolled copy per call site)
 
 nonisolated private func fetchOpenIssuesData(repo: IssueRepoIdentity) -> Result<[GHIssueListItem], TaskGHError> {
+    // Without an explicit sort, gh's own selection (creation order) decides which 50 issues come
+    // back before IssuePopoverLogic.composeOpenIssues ever gets a chance to sort them — a repo with
+    // more than 50 open issues could have its truly most-recently-updated issues truncated away
+    // before the client-side sort runs. --search "sort:updated-desc" makes the CLI itself pick the
+    // right 50 candidates (--state still applies — see TasksPanel.swift's ghStateArg comment on gh
+    // ANDing --state onto --search rather than one overriding the other).
     let args = ["issue", "list", "--repo", "\(repo.org)/\(repo.name)", "--state", "open",
+                "--search", "sort:updated-desc",
                 "--json", "number,title,state,url,labels,updatedAt", "--limit", String(IssuePopoverLogic.openIssuesLimit)]
     return runGH(args).flatMap { data in
         guard let issues = try? JSONDecoder().decode([GHIssueListItem].self, from: data) else {
