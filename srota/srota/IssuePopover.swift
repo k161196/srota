@@ -150,19 +150,21 @@ struct IssuePopoverView: View {
             if case .failure(let err) = openResult { errorMessage = err.message }
             return
         }
+        openIssues = IssuePopoverLogic.composeOpenIssues(issues, branchIssueNumber: branchNumber)
         // A Branch Issue fetch failure must surface as an error too — silently dropping it would
         // make a closed or out-of-window Branch Issue vanish instead of staying promoted (story 4)
-        // and would contradict "an actionable error shown" on gh CLI failure (story 29).
+        // and would contradict "an actionable error shown" on gh CLI failure (story 29). It must
+        // NOT hide the open issues set just above, though — that fetch succeeded independently, so
+        // the error is shown alongside them, not instead of them.
         switch branchResult {
         case nil:
             branchIssue = nil
         case .success(let item):
             branchIssue = item
         case .failure(let err):
+            branchIssue = nil
             errorMessage = "Could not load Branch Issue: \(err.message)"
-            return
         }
-        openIssues = IssuePopoverLogic.composeOpenIssues(issues, branchIssueNumber: branchNumber)
     }
 }
 
@@ -214,27 +216,30 @@ private struct IssueListPane: View {
         .padding(12)
     }
 
+    // An error (e.g. the Branch Issue fetch failing) is shown ALONGSIDE whatever open issues
+    // already loaded successfully, never in place of them — the two fetches are independent, so
+    // one failing says nothing about whether the other's data is still good.
     @ViewBuilder
     private var listBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 if let errorMessage {
                     Text(errorMessage).font(.system(size: 12)).foregroundStyle(Color.mgMuted)
-                } else if loading && branchIssue == nil && openIssues.isEmpty {
+                }
+                if errorMessage == nil && loading && branchIssue == nil && openIssues.isEmpty {
                     Text("Loading…").font(.system(size: 12)).foregroundStyle(Color.mgMuted)
-                } else if branchIssue == nil && openIssues.isEmpty {
+                } else if errorMessage == nil && branchIssue == nil && openIssues.isEmpty {
                     Text("No open issues").font(.system(size: 12)).foregroundStyle(Color.mgMuted)
-                } else {
-                    if let branchIssue {
-                        section(title: "BRANCH ISSUE") {
-                            IssueListRow(item: branchIssue, onSelect: { onSelect(branchIssue.number) })
-                        }
+                }
+                if let branchIssue {
+                    section(title: "BRANCH ISSUE") {
+                        IssueListRow(item: branchIssue, onSelect: { onSelect(branchIssue.number) })
                     }
-                    if !openIssues.isEmpty {
-                        section(title: "OPEN ISSUES") {
-                            ForEach(openIssues) { item in
-                                IssueListRow(item: item, onSelect: { onSelect(item.number) })
-                            }
+                }
+                if !openIssues.isEmpty {
+                    section(title: "OPEN ISSUES") {
+                        ForEach(openIssues) { item in
+                            IssueListRow(item: item, onSelect: { onSelect(item.number) })
                         }
                     }
                 }
