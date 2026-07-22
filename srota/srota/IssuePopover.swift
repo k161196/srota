@@ -142,17 +142,27 @@ struct IssuePopoverView: View {
         errorMessage = nil
         let repoSnapshot = repo
         let branchNumber = branchIssueNumber
-        let (openResult, fetchedBranchIssue) = await Task.detached {
-            (fetchOpenIssuesData(repo: repoSnapshot), branchNumber.flatMap { fetchBranchIssueListItem(number: $0, repo: repoSnapshot) })
+        let (openResult, branchResult) = await Task.detached {
+            (fetchOpenIssuesData(repo: repoSnapshot), branchNumber.map { fetchBranchIssueListItem(number: $0, repo: repoSnapshot) })
         }.value
         loading = false
-        switch openResult {
-        case .success(let issues):
-            openIssues = IssuePopoverLogic.composeOpenIssues(issues, branchIssueNumber: branchNumber)
-            branchIssue = fetchedBranchIssue
-        case .failure(let err):
-            errorMessage = err.message
+        guard case .success(let issues) = openResult else {
+            if case .failure(let err) = openResult { errorMessage = err.message }
+            return
         }
+        // A Branch Issue fetch failure must surface as an error too — silently dropping it would
+        // make a closed or out-of-window Branch Issue vanish instead of staying promoted (story 4)
+        // and would contradict "an actionable error shown" on gh CLI failure (story 29).
+        switch branchResult {
+        case nil:
+            branchIssue = nil
+        case .success(let item):
+            branchIssue = item
+        case .failure(let err):
+            errorMessage = "Could not load Branch Issue: \(err.message)"
+            return
+        }
+        openIssues = IssuePopoverLogic.composeOpenIssues(issues, branchIssueNumber: branchNumber)
     }
 }
 
@@ -537,11 +547,15 @@ nonisolated private func fetchOpenIssuesData(repo: IssueRepoIdentity) -> Result<
 
 // Fetched independently of the open-issues list (rather than derived from it) so a closed issue,
 // or an open issue outside the 50-row recent working set, can still be promoted as the Branch Issue.
-nonisolated private func fetchBranchIssueListItem(number: Int, repo: IssueRepoIdentity) -> GHIssueListItem? {
+nonisolated private func fetchBranchIssueListItem(number: Int, repo: IssueRepoIdentity) -> Result<GHIssueListItem, TaskGHError> {
     let args = ["issue", "view", String(number), "--repo", "\(repo.org)/\(repo.name)",
                 "--json", "number,title,state,url,labels,updatedAt"]
-    guard case .success(let data) = runGH(args) else { return nil }
-    return try? JSONDecoder().decode(GHIssueListItem.self, from: data)
+    return runGH(args).flatMap { data in
+        guard let item = try? JSONDecoder().decode(GHIssueListItem.self, from: data) else {
+            return .failure(TaskGHError(message: "Could not parse Branch Issue"))
+        }
+        return .success(item)
+    }
 }
 
 nonisolated private func fetchIssueDetailData(number: Int, repo: IssueRepoIdentity) -> (Data?, String?) {
