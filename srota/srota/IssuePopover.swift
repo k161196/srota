@@ -65,6 +65,16 @@ private final class GHIssueDetailCache {
 // but has no SwiftUI/AppKit dependency itself, so it's kept in the plain Foundation file that
 // the swiftc self-check compiles (see scripts/test-issue-popover-logic.swift).
 
+// Drives IssuePopoverView's single .task(id:) — repo identifies WHICH repo to load, refreshToken
+// forces a reload of the SAME repo (manual Refresh, post-creation reload) without a value change
+// of its own. Combining both into one id means every load (initial, repo change, manual refresh,
+// post-creation) goes through the one task SwiftUI actually supersedes/cancels — see load()'s
+// comment on why a bare `Task { await load() }` fired from a button action doesn't get that.
+private struct LoadTrigger: Equatable {
+    let repo: IssueRepoIdentity
+    let refreshToken: Int
+}
+
 struct IssuePopoverView: View {
     let paneID: String
     let repo: IssueRepoIdentity
@@ -77,6 +87,8 @@ struct IssuePopoverView: View {
     @State private var loading = false
     @State private var errorMessage: String? = nil
     @State private var isAdding = false
+    @State private var lastLoadedRepo: IssueRepoIdentity? = nil
+    @State private var refreshToken = 0
 
     var body: some View {
         Group {
@@ -90,7 +102,7 @@ struct IssuePopoverView: View {
                     isAdding: $isAdding,
                     repo: repo,
                     onSelect: select,
-                    onRefresh: { Task { await load() } },
+                    onRefresh: { refreshToken += 1 },
                     onCreated: created,
                     onClose: close
                 )
@@ -104,14 +116,21 @@ struct IssuePopoverView: View {
             }
         }
         .background(Color.mgBg)
-        .task(id: repo) {
-            destination = IssuePopoverNavigationStore.shared.destination(paneID: paneID, repo: repo)
-            // Clear the previous repository's issues synchronously, before load()'s first
-            // suspension point — otherwise repo A's issues stay on screen while repo B loads, and
-            // indefinitely if repo B's fetch then fails (story 19: never shown as current context).
-            openIssues = []
-            branchIssue = nil
-            errorMessage = nil
+        .task(id: LoadTrigger(repo: repo, refreshToken: refreshToken)) {
+            // Only reset navigation/clear stale issues on an ACTUAL repo change, not on a manual
+            // Refresh/post-creation reload of the same repo (which must keep the current list
+            // visible while it reloads, not flash it empty).
+            if lastLoadedRepo != repo {
+                destination = IssuePopoverNavigationStore.shared.destination(paneID: paneID, repo: repo)
+                // Clear the previous repository's issues synchronously, before load()'s first
+                // suspension point — otherwise repo A's issues stay on screen while repo B loads,
+                // and indefinitely if repo B's fetch then fails (story 19: never shown as current
+                // context).
+                openIssues = []
+                branchIssue = nil
+                errorMessage = nil
+                lastLoadedRepo = repo
+            }
             await load()
         }
     }
@@ -122,7 +141,7 @@ struct IssuePopoverView: View {
     }
 
     private func created(_ number: Int) {
-        Task { await load() }
+        refreshToken += 1
         select(number)
     }
 
@@ -151,12 +170,13 @@ struct IssuePopoverView: View {
         let (openResult, branchResult) = await Task.detached {
             (fetchOpenIssuesData(repo: repoSnapshot), branchNumber.map { fetchBranchIssueListItem(number: $0, repo: repoSnapshot) })
         }.value
-        // Task.detached deliberately doesn't inherit the enclosing `.task(id: repo)`'s cancellation
-        // (that's what "detached" means), so a slower repo-A fetch can still resolve after the Pane
-        // has already moved on to repo B. Task.isCancelled catches most staleness (repo change,
-        // popover dismissed mid-fetch, ...); the repo-identity check directly guards the one
-        // invariant that must never break even if some future path leaves the task uncancelled: an
-        // issue from the previous repository must never be shown as current context (story 19).
+        // Task.detached deliberately doesn't inherit the enclosing task's cancellation (that's what
+        // "detached" means), so a slower repo-A fetch can still resolve after the Pane has already
+        // moved on to repo B. This only actually protects against that because every load() call
+        // now runs inside the single .task(id: LoadTrigger(...)) above — a bare `Task { await
+        // load() }` fired from a button action would neither be cancelled by a later repo change
+        // nor see a fresh `repo` here (it closes over the `self` live at button-press time), which
+        // is exactly what made this guard a no-op for the old onRefresh/created call sites.
         guard !Task.isCancelled, repoSnapshot == repo else { return }
         loading = false
         // The two fetches are independent (that's the whole point of fetching the Branch Issue
