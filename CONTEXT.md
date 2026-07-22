@@ -19,3 +19,15 @@ _Avoid_: Flow State, cache.
 **Repository Filter**:
 The repository scope whose issues and pull requests are shown: all repositories, no repositories, or an explicitly selected subset.
 _Avoid_: Project selection, project filter.
+
+**Issue Popover**:
+A pane-header overlay that shows either the current repository's issue list or one selected issue.
+_Avoid_: Right sidebar, sidebar, issue sidebar.
+
+**Branch Issue**:
+The repository issue whose number is identified by the pane's current branch name.
+_Avoid_: Current issue, active issue.
+
+**Issue List**:
+The repository's open issues, with the Branch Issue promoted above the remaining issues even when it is closed.
+_Avoid_: Issue index, issue sidebar.
