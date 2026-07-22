@@ -315,6 +315,35 @@ final class TerminalTab: Identifiable, ObservableObject {
         }
     }
 
+    // Re-homes a pane (with its live PTY session) from another tab into this one — used for
+    // cross-tab pane moves via drag-and-drop onto a tab chip. Unlike addPane/restorePane this
+    // never creates a new terminal session; it just moves the existing PaneEntry and rebinds
+    // its onClose, which otherwise would still target the tab it used to belong to.
+    func movePane(_ paneID: UUID, from sourceTab: TerminalTab) {
+        guard sourceTab !== self, let entry = sourceTab.panes.first(where: { $0.id == paneID }) else { return }
+        let name = sourceTab.paneNames[paneID]
+        sourceTab.removePane(id: paneID, closeDaemon: false)
+
+        let layout: PaneLayout
+        if let fl = focusedLayout {
+            let split = PaneTransferLogic.splitLayout(x: fl.x, y: fl.y, w: fl.w, h: fl.h)
+            setFocusedLayout(PaneLayout(x: split.shrunk.x, y: split.shrunk.y, w: split.shrunk.w, h: split.shrunk.h))
+            layout = PaneLayout(x: split.new.x, y: split.new.y, w: split.new.w, h: split.new.h)
+        } else {
+            layout = PaneLayout()
+        }
+        paneLayouts[entry.id] = layout
+        if let name { paneNames[entry.id] = name }
+        panes.append(entry)
+        focusedPaneID = entry.id
+
+        entry.viewState.onClose = { [weak self, weak entry] _ in
+            guard let self, let entry else { return }
+            self.daemon?.closeSession(stableID: entry.daemonStableID)
+            self.removePane(id: entry.id, closeDaemon: false)
+        }
+    }
+
     private func addPane(colorScheme: ColorScheme, layout: PaneLayout, workingDirectory: String? = nil) {
         let state = TerminalViewState(terminalConfiguration: TerminalConfiguration())
         let ref = DaemonPaneRef()
@@ -507,6 +536,11 @@ final class Workspace: Identifiable, ObservableObject {
         didSet { rebindTabSinks() }
     }
     @Published var selectedTabID: UUID?
+    // Global (screen-space) frame of each tab chip, published by TabBarView. TerminalContentView's
+    // pane-drag gesture is scoped to its own per-tab "panes" coordinate space, so it needs these in
+    // a shared space to tell whether a drag ended over another tab's chip, to move the pane there.
+    @Published var tabChipFrames: [UUID: CGRect] = [:]
+    @Published var paneDragHoverTabID: UUID? = nil
     private var lastColorScheme: ColorScheme = .dark
     private var tabSinks: [AnyCancellable] = []
 
@@ -2579,6 +2613,13 @@ private struct FolderFramePreferenceKey: PreferenceKey {
     }
 }
 
+private struct TabChipFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [UUID: CGRect] = [:]
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
 /// Single delegate for the entire sidebar drag-reorder surface — unfiled workspaces, folders,
 /// and workspaces nested inside an expanded folder. This used to be three separate onDrop
 /// registrations at different nesting levels (one per workspace list, one for the folders
@@ -3019,6 +3060,7 @@ private struct TabBarView: View {
                     ForEach(workspace.tabs) { tab in
                         TabChip(
                             tab: tab,
+                            workspace: workspace,
                             isActive: workspace.selectedTabID == tab.id,
                         onSelect: {
                             onUserInteraction()
@@ -3065,6 +3107,7 @@ private struct TabBarView: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.white.opacity(0.05)).frame(height: 1)
         }
+        .onPreferenceChange(TabChipFramePreferenceKey.self) { workspace.tabChipFrames = $0 }
     }
 }
 
@@ -3077,7 +3120,7 @@ private struct WorkspaceContent: View {
     var body: some View {
         ForEach(workspace.tabs) { tab in
             let isSelected = workspace.id == selectedWorkspaceID && tab.id == workspace.selectedTabID
-        TerminalContentView(tab: tab, isSelected: isSelected, onPaneActivated: onPaneActivated, onPaneResizeFinished: onPaneResizeFinished)
+        TerminalContentView(tab: tab, workspace: workspace, isSelected: isSelected, onPaneActivated: onPaneActivated, onPaneResizeFinished: onPaneResizeFinished)
                 .opacity(isSelected ? 1 : 0)
         }
     }
@@ -3085,6 +3128,7 @@ private struct WorkspaceContent: View {
 
 private struct TabChip: View {
     @ObservedObject var tab: TerminalTab
+    @ObservedObject var workspace: Workspace
     let isActive: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
@@ -3133,6 +3177,16 @@ private struct TabChip: View {
             borderTop: isActive ? Color.accentOrange.opacity(0.45) : Color.clear,
             borderBottom: isActive ? Color.accentOrange.opacity(0.25) : Color.clear,
             radius: 6
+        )
+        .overlay {
+            if workspace.paneDragHoverTabID == tab.id {
+                RoundedRectangle(cornerRadius: 6).strokeBorder(Color.accentOrange, lineWidth: 2)
+            }
+        }
+        .background(
+            GeometryReader { g in
+                Color.clear.preference(key: TabChipFramePreferenceKey.self, value: [tab.id: g.frame(in: .global)])
+            }
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
@@ -3402,6 +3456,7 @@ private func findTerminalSurfaceView(for state: TerminalViewState, in view: NSVi
 private struct TerminalContentView: View {
     @Environment(DaemonConnection.self) private var daemon
     @ObservedObject var tab: TerminalTab
+    @ObservedObject var workspace: Workspace
     var isSelected: Bool = false
     let onPaneActivated: () -> Void
     let onPaneResizeFinished: () -> Void
@@ -3413,6 +3468,7 @@ private struct TerminalContentView: View {
     var body: some View {
         GeometryReader { geo in
             let sz = geo.size
+            let paneAreaOrigin = geo.frame(in: .global).origin
 
             ZStack(alignment: .topLeading) {
                 ForEach(tab.panes) { entry in
@@ -3421,6 +3477,7 @@ private struct TerminalContentView: View {
                             entry: entry, layout: l,
                             onClose: { tab.removePane(id: entry.id); onPaneResizeFinished() },
                             sz: sz,
+                            paneAreaOrigin: paneAreaOrigin,
                             focused: tab.focusedPaneID == entry.id
                         )
             .simultaneousGesture(TapGesture().onEnded {
@@ -3469,7 +3526,7 @@ private struct TerminalContentView: View {
     @ViewBuilder
     private func paneView(entry: PaneEntry,
                           layout l: PaneLayout, onClose: @escaping () -> Void,
-                          sz: CGSize, focused: Bool) -> some View {
+                          sz: CGSize, paneAreaOrigin: CGPoint, focused: Bool) -> some View {
         let id = entry.id
         let state = entry.viewState
         let isSource = isDragging && dragSource == id
@@ -3525,6 +3582,14 @@ private struct TerminalContentView: View {
                 onDragChanged: { loc in
                     isDragging = true
                     dragSource = id
+                    let global = CGPoint(x: paneAreaOrigin.x + loc.x, y: paneAreaOrigin.y + loc.y)
+                    if let hitTabID = PaneTransferLogic.tabChipHit(at: global, in: workspace.tabChipFrames, excluding: tab.id) {
+                        workspace.paneDragHoverTabID = hitTabID
+                        dragHover = nil
+                        dropSide  = nil
+                        return
+                    }
+                    workspace.paneDragHoverTabID = nil
                     let h = paneAt(loc, in: sz)
                     if let h = h, h != id {
                         dragHover = h
@@ -3535,6 +3600,15 @@ private struct TerminalContentView: View {
                     }
                 },
                 onDragEnded: { loc in
+                    defer { workspace.paneDragHoverTabID = nil }
+                    let global = CGPoint(x: paneAreaOrigin.x + loc.x, y: paneAreaOrigin.y + loc.y)
+                    if let hitTabID = PaneTransferLogic.tabChipHit(at: global, in: workspace.tabChipFrames, excluding: tab.id),
+                       let destTab = workspace.tabs.first(where: { $0.id == hitTabID }) {
+                        destTab.movePane(id, from: tab)
+                        onPaneResizeFinished()
+                        isDragging = false; dragSource = nil; dragHover = nil; dropSide = nil
+                        return
+                    }
                     let t = paneAt(loc, in: sz)
                     if let t = t, t != id {
                         if let side = dropSide { tab.performDrop(source: id, target: t, side: side) }

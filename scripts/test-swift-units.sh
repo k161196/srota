@@ -29,6 +29,12 @@ swiftc -parse-as-library \
 /tmp/srota-issue-popover-logic-test
 
 swiftc -parse-as-library \
+  "$ROOT/srota/srota/PaneTransferLogic.swift" \
+  "$ROOT/scripts/test-pane-transfer-logic.swift" \
+  -o /tmp/srota-pane-transfer-test
+/tmp/srota-pane-transfer-test
+
+swiftc -parse-as-library \
   "$ROOT/srota/srota/RepositoryFilterState.swift" \
   "$ROOT/scripts/test-repository-filter-state.swift" \
   -o /tmp/srota-repository-filter-test
