@@ -162,7 +162,9 @@ final class FlowViewState {
                && reloaded.prQuery == "is:pr is:open" && reloaded.repoSearch.isEmpty && reloaded.selectedRepoID == nil
                && reloaded.branchSearch.isEmpty)
         let afterReset = FlowViewState(stateDirectory: root + "/fresh")
-        assert(afterReset.selectedTab == .issues && afterReset.issueQuery == "is:issue is:open")
+        assert(afterReset.selectedTab == .issues && afterReset.repoFilterIDs.isEmpty && afterReset.issueQuery == "is:issue is:open"
+               && afterReset.prQuery == "is:pr is:open" && afterReset.repoSearch.isEmpty && afterReset.selectedRepoID == nil
+               && afterReset.branchSearch.isEmpty)
     }
     #endif
 }
