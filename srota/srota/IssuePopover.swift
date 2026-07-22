@@ -91,7 +91,7 @@ struct IssuePopoverView: View {
                     isAdding: $isAdding,
                     repo: repo,
                     onSelect: select,
-                    onRefresh: { Task { await load(force: true) } },
+                    onRefresh: { Task { await load() } },
                     onCreated: created,
                     onClose: close
                 )
@@ -118,7 +118,7 @@ struct IssuePopoverView: View {
     }
 
     private func created(_ number: Int) {
-        Task { await load(force: true) }
+        Task { await load() }
         select(number)
     }
 
@@ -139,7 +139,7 @@ struct IssuePopoverView: View {
         onDismiss()
     }
 
-    private func load(force: Bool = false) async {
+    private func load() async {
         loading = true
         errorMessage = nil
         let repoSnapshot = repo
