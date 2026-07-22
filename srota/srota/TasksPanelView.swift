@@ -34,8 +34,8 @@ struct TasksPanel: View {
     @State private var showFilters = false
     @State private var busyRowID: String? = nil
     @State private var actionError: String? = nil
-    @State private var projectFilter: Set<String> = []
-    @State private var showProjectFilter = false
+    @State private var repositoryFilter: RepositoryFilterState = .all
+    @State private var showRepositoryFilter = false
     @State private var ghRepoListingsByOwner: [String: [TaskGHRepoListing]] = [:]
     @State private var fetchingGHRepos = false
     @State private var ghOrgs: [String] = []
@@ -54,8 +54,7 @@ struct TasksPanel: View {
     private var allConnectedRepos: [RepoEntry] { db.repos.filter { gitURLComponents($0.url) != nil } }
 
     private var connectedRepos: [RepoEntry] {
-        guard !projectFilter.isEmpty else { return allConnectedRepos }
-        return allConnectedRepos.filter { projectFilter.contains($0.id) }
+        allConnectedRepos.filter { repositoryFilter.isSelected($0.id) }
     }
     private var query: Binding<String> {
         switch subTab {
@@ -117,21 +116,21 @@ struct TasksPanel: View {
         }.map(\.element)
     }
 
-    private var projectFilterLabel: String {
-        if projectFilter.isEmpty { return "All repos" }
-        if projectFilter.count == 1, let repo = allConnectedRepos.first(where: { projectFilter.contains($0.id) }) {
-            return repo.name
+    private var repositoryFilterLabel: String {
+        switch repositoryFilter {
+        case .all: return "All repos"
+        case .none: return "No repos"
+        case .subset(let ids):
+            if ids.count == 1, let repo = allConnectedRepos.first(where: { ids.contains($0.id) }) {
+                return repo.name
+            }
+            return "\(ids.count) repos"
         }
-        return "\(projectFilter.count) repos"
     }
 
-    // Selecting toggles from the "all connected repos" baseline, not the full GitHub account —
-    // otherwise unchecking one repo out of hundreds would scope every fetch to the other 199.
-    private func toggleProject(_ id: String) {
-        let connectedIDs = Set(allConnectedRepos.map(\.id))
-        var current = projectFilter.isEmpty ? connectedIDs : projectFilter
-        if current.contains(id) { current.remove(id) } else { current.insert(id) }
-        projectFilter = (current.isEmpty || current == connectedIDs) ? [] : current
+    private func toggleRepositoryFilter(_ id: String) {
+        let allIDs = Set(allConnectedRepos.map(\.id))
+        repositoryFilter = RepositoryFilterState.toggling(id, in: repositoryFilter, allIDs: allIDs)
     }
 
     private func fetchTaskGHRepoListingsIfNeeded() {
@@ -182,7 +181,7 @@ struct TasksPanel: View {
         .background(Color.mgBg)
         .onAppear { fetchIfNeeded() }
         .onChange(of: subTab) { fetchIfNeeded() }
-        .onChange(of: projectFilter) { refresh() }
+        .onChange(of: repositoryFilter) { refresh() }
         .alert("Error", isPresented: .init(get: { actionError != nil }, set: { if !$0 { actionError = nil } })) {
             Button("OK", role: .cancel) { actionError = nil }
         } message: { Text(actionError ?? "") }
@@ -231,9 +230,9 @@ struct TasksPanel: View {
                 SubTabButton(title: "Issues", isActive: subTab == .issues) { subTab = .issues }
                 SubTabButton(title: "PRs", isActive: subTab == .prs) { subTab = .prs }
                 if subTab != .repos {
-                    Button { showProjectFilter = true } label: {
+                    Button { showRepositoryFilter = true } label: {
                         HStack(spacing: 7) {
-                            Text(projectFilterLabel).font(.system(size: 12, weight: .medium)).foregroundStyle(Color.mgLabel)
+                            Text(repositoryFilterLabel).font(.system(size: 12, weight: .medium)).foregroundStyle(Color.mgLabel)
                             Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(Color.mgMuted)
                         }
                         .padding(.horizontal, 12).padding(.vertical, 7)
@@ -242,12 +241,12 @@ struct TasksPanel: View {
                     .background(Color.white.opacity(0.025))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.14), lineWidth: 1))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .popover(isPresented: $showProjectFilter, arrowEdge: .bottom) {
-                        ProjectFilterMenu(
+                    .popover(isPresented: $showRepositoryFilter, arrowEdge: .bottom) {
+                        RepositoryFilterMenu(
                             recent: allConnectedRepos,
-                            selected: $projectFilter,
+                            filter: $repositoryFilter,
                             settings: settings,
-                            onToggle: toggleProject
+                            onToggle: toggleRepositoryFilter
                         )
                     }
                 }
@@ -341,7 +340,9 @@ struct TasksPanel: View {
                     ToolbarIconButton(systemName: "plus", label: subTab == .issues ? "New issue" : "New pull request") {
                         if subTab == .issues { showAddIssue = true } else { showAddPR = true }
                     }
+                    .disabled(repositoryFilter == .none)
                     ToolbarIconButton(systemName: "arrow.clockwise", label: "Refresh", isLoading: fetching) { forceRefresh() }
+                        .disabled(repositoryFilter == .none)
                 }
 
                 let tokens = activeFilterTokens(query.wrappedValue, subTab: subTab)
@@ -410,7 +411,13 @@ struct TasksPanel: View {
     @ViewBuilder
     private var content: some View {
         let isEmpty = subTab == .issues ? issueRows.isEmpty : prRows.isEmpty
-        if fetching && isEmpty {
+        if repositoryFilter == .none {
+            TaskStateView(
+                systemName: "square.stack.3d.up.slash",
+                title: "No repositories selected",
+                detail: "Choose repositories from the filter above."
+            )
+        } else if fetching && isEmpty {
             skeletonList
         } else if let loadError, isEmpty {
             TaskStateView(
@@ -757,7 +764,7 @@ struct TasksPanel: View {
         if selectedRepoID == repo.id { selectedRepoID = nil }
         branchRowsByRepoID.removeValue(forKey: repo.id)
         fetchingBranchRepoIDs.remove(repo.id)
-        projectFilter.remove(repo.id)
+        repositoryFilter = RepositoryFilterState.removingRepo(repo.id, from: repositoryFilter)
         db.deleteRepo(id: repo.id)
     }
 
@@ -982,13 +989,13 @@ struct TasksPanel: View {
     }
 }
 
-// MARK: - Projects filter popover
+// MARK: - Repository Filter popover
 
 // Only lists already-connected repos — browsing/adding repos not yet in the workspace is the
 // dedicated "+" flow (AddRepoSheet) now, not this filter.
-private struct ProjectFilterMenu: View {
+private struct RepositoryFilterMenu: View {
     let recent: [RepoEntry]
-    @Binding var selected: Set<String>
+    @Binding var filter: RepositoryFilterState
     let settings: AppSettings
     let onToggle: (String) -> Void
 
@@ -996,10 +1003,6 @@ private struct ProjectFilterMenu: View {
 
     private var filtered: [RepoEntry] {
         search.isEmpty ? recent : recent.filter { $0.name.localizedCaseInsensitiveContains(search) }
-    }
-
-    private func isChecked(_ repo: RepoEntry) -> Bool {
-        selected.isEmpty || selected.contains(repo.id)
     }
 
     private func subtitle(for repo: RepoEntry) -> String {
@@ -1018,20 +1021,22 @@ private struct ProjectFilterMenu: View {
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .padding(10)
 
-            if !selected.isEmpty {
-                HStack {
-                    Text("\(selected.count) selected").font(.system(size: 11)).foregroundStyle(Color.mgMuted)
-                    Spacer()
-                    Button("Show all") { selected = [] }
+            HStack {
+                Text(filter.summaryText).font(.system(size: 11)).foregroundStyle(Color.mgMuted)
+                Spacer()
+                // Bulk actions always operate on the full connected-repository set, ignoring
+                // `search` — narrowing the visible rows must not make a bulk action ambiguous.
+                ForEach(filter.availableActions, id: \.self) { action in
+                    Button(action.title) { filter = filter.applying(action) }
                         .buttonStyle(.plain).font(.system(size: 11, weight: .medium)).foregroundStyle(Color.mgAccent)
                 }
-                .padding(.horizontal, 12).padding(.bottom, 6)
             }
+            .padding(.horizontal, 12).padding(.bottom, 6)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(filtered) { repo in
-                        ProjectFilterRow(title: repo.name, subtitle: subtitle(for: repo), isChecked: isChecked(repo)) {
+                        RepositoryFilterRow(title: repo.name, subtitle: subtitle(for: repo), isChecked: filter.isSelected(repo.id)) {
                             onToggle(repo.id)
                         }
                     }
@@ -1045,7 +1050,7 @@ private struct ProjectFilterMenu: View {
     }
 }
 
-private struct ProjectFilterRow: View {
+private struct RepositoryFilterRow: View {
     let title: String
     let subtitle: String
     let isChecked: Bool
