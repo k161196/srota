@@ -609,9 +609,20 @@ struct DaemonConcurrencyTests {
         Thread.sleep(forTimeInterval: 0.8)
         proc.attach(client: client)
 
-        // Generous window for everything to fully drain either way — if the old replay wrongly
-        // kept running, this is enough time for both it and the new one to complete.
-        Thread.sleep(forTimeInterval: 6.0)
+        // Poll until the message stream actually goes quiet, instead of a fixed sleep: ~100KB/s is
+        // only a nominal rate (real throughput can fall well short of it under machine load), and a
+        // buggy superseded replay sending its own ~270KB at that same rate could easily still be
+        // mid-flight 0.5s after the first (correct) ring_buffer_done arrives — a short fixed pause
+        // there could see doneCount==1 and pass even though a second one is still en route. Bounded
+        // by a generous overall deadline so a genuine "kept running forever" bug still times out.
+        let overallDeadline = Date().addingTimeInterval(45.0)
+        var lastMessageCount = recorder.snapshot().count
+        while Date() < overallDeadline {
+            Thread.sleep(forTimeInterval: 0.5)
+            let currentCount = recorder.snapshot().count
+            if currentCount == lastMessageCount { break }
+            lastMessageCount = currentCount
+        }
         _ = proc.terminate()
         Thread.sleep(forTimeInterval: 0.3)
         Darwin.close(peerFD)

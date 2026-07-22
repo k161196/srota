@@ -2840,7 +2840,7 @@ private struct PinnedWorkspaceCard: View {
 
                 WorkspaceStatusDot(agents: runningAgents)
 
-                if runningAgents.count > 1 {
+                if !runningAgents.isEmpty {
                     Button(action: { agentsExpanded.toggle() }) {
                         Image(systemName: agentsExpanded ? "chevron.up" : "chevron.down")
                             .font(.system(size: 8, weight: .medium))
@@ -2883,7 +2883,7 @@ private struct PinnedWorkspaceCard: View {
             Button("Close Workspace", role: .destructive) { onClose() }
         }
 
-        if agentsExpanded, runningAgents.count > 1 {
+        if agentsExpanded, !runningAgents.isEmpty {
             VStack(alignment: .leading, spacing: 3) {
                 ForEach(runningAgents) { agent in
                     WorkspaceAgentMiniRow(agent: agent)
@@ -2987,7 +2987,7 @@ private struct WorkspaceRow: View {
 
             WorkspaceStatusDot(agents: runningAgents)
 
-            if runningAgents.count > 1, let expanded = isExpanded, let toggle = onToggleExpand {
+            if !runningAgents.isEmpty, let expanded = isExpanded, let toggle = onToggleExpand {
                 Button(action: toggle) {
                     Image(systemName: expanded ? "chevron.up" : "chevron.down")
                         .font(.system(size: 8, weight: .medium))
@@ -3056,7 +3056,7 @@ private struct WorkspaceRow: View {
             Button("Close Workspace", role: .destructive) { onClose() }
         }
 
-        if isExpanded == true, runningAgents.count > 1 {
+        if isExpanded == true, !runningAgents.isEmpty {
             VStack(alignment: .leading, spacing: 3) {
                 ForEach(runningAgents) { agent in
                     WorkspaceAgentMiniRow(agent: agent)
@@ -3641,6 +3641,11 @@ private struct TerminalContentView: View {
                 stableID: entry.daemonStableID,
                 onClose: onClose,
                 onRename: { tab.rename(id: id, to: $0) },
+                otherTabs: workspace.tabs.filter { $0.id != tab.id },
+                onMoveToTab: { destTab in
+                    destTab.movePane(id, from: tab)
+                    onPaneResizeFinished()
+                },
                 onDragChanged: { loc in
                     isDragging = true
                     dragSource = id
@@ -3763,6 +3768,8 @@ private struct ReactivePaneHeader: View {
     let stableID: String
     let onClose: () -> Void
     let onRename: (String) -> Void
+    let otherTabs: [TerminalTab]
+    let onMoveToTab: (TerminalTab) -> Void
     let onDragChanged: (CGPoint) -> Void
     let onDragEnded:   (CGPoint) -> Void
 
@@ -3778,6 +3785,8 @@ private struct ReactivePaneHeader: View {
             stableID: stableID,
             onClose: onClose,
             onRename: onRename,
+            otherTabs: otherTabs,
+            onMoveToTab: onMoveToTab,
             onDragChanged: onDragChanged,
             onDragEnded: onDragEnded
         )
@@ -3793,6 +3802,8 @@ private struct PaneHeader: View {
     let stableID: String
     let onClose: () -> Void
     let onRename: (String) -> Void
+    let otherTabs: [TerminalTab]
+    let onMoveToTab: (TerminalTab) -> Void
     let onDragChanged: (CGPoint) -> Void
     let onDragEnded:   (CGPoint) -> Void
 
@@ -3921,6 +3932,13 @@ private struct PaneHeader: View {
                 .onEnded   { onDragEnded($0.location)   })
             .contextMenu {
                 Button("Rename") { startRename() }
+                if !otherTabs.isEmpty {
+                    Menu("Move to Tab") {
+                        ForEach(otherTabs) { destTab in
+                            Button(destTab.displayName) { onMoveToTab(destTab) }
+                        }
+                    }
+                }
                 if showClose {
                     Divider()
                     Button("Close", role: .destructive) { onClose() }
