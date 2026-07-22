@@ -32,9 +32,9 @@ func smartTitle(for path: String?) -> String {
     guard let path, !path.isEmpty else { return "Terminal" }
     var url = URL(fileURLWithPath: path)
     while url.path != "/" {
-        if FileManager.default.fileExists(atPath: url.appendingPathComponent(".git").path) {
-            let name = gitRepoName(at: url) ?? url.lastPathComponent
-            if let branch = gitBranch(at: url) { return "\(name)/\(branch)" }
+        if let gd = gitDir(at: url) {
+            let name = gitRepoName(at: gd) ?? url.lastPathComponent
+            if let branch = gitBranch(at: gd) { return "\(name)/\(branch)" }
             return name
         }
         let parent = url.deletingLastPathComponent()
@@ -50,15 +50,52 @@ func smartTitle(for path: String?) -> String {
     }
 }
 
-private func gitBranch(at url: URL) -> String? {
-    guard let head = try? String(contentsOf: url.appendingPathComponent(".git/HEAD"), encoding: .utf8) else { return nil }
+/// "reponame/branch" for the workspace sidebar/pinned badge, nil outside a git repo.
+func gitRepoBranch(for path: String?) -> String? {
+    guard let path, !path.isEmpty else { return nil }
+    var url = URL(fileURLWithPath: path)
+    while url.path != "/" {
+        if let gd = gitDir(at: url) {
+            let name = gitRepoName(at: gd) ?? url.lastPathComponent
+            guard let branch = gitBranch(at: gd) else { return nil }
+            return "\(name)/\(branch)"
+        }
+        let parent = url.deletingLastPathComponent()
+        if parent == url { break }
+        url = parent
+    }
+    return nil
+}
+
+/// Resolves `.git` to the directory that actually holds HEAD/config, following linked worktrees:
+/// there `.git` is a file ("gitdir: <path>") pointing at the main repo's `.git/worktrees/<name>`.
+private func gitDir(at repoRoot: URL) -> URL? {
+    let dotGit = repoRoot.appendingPathComponent(".git")
+    var isDirectory: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: dotGit.path, isDirectory: &isDirectory) else { return nil }
+    if isDirectory.boolValue { return dotGit }
+    guard let contents = try? String(contentsOf: dotGit, encoding: .utf8) else { return nil }
+    let line = contents.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard line.hasPrefix("gitdir: ") else { return nil }
+    return URL(fileURLWithPath: String(line.dropFirst(8)), relativeTo: repoRoot).standardizedFileURL
+}
+
+private func gitBranch(at gitDir: URL) -> String? {
+    guard let head = try? String(contentsOf: gitDir.appendingPathComponent("HEAD"), encoding: .utf8) else { return nil }
     let t = head.trimmingCharacters(in: .whitespacesAndNewlines)
     if t.hasPrefix("ref: refs/heads/") { return String(t.dropFirst(16)) }
     return t.count >= 7 ? String(t.prefix(7)) : nil
 }
 
-private func gitRepoName(at url: URL) -> String? {
-    guard let cfg = try? String(contentsOf: url.appendingPathComponent(".git/config"), encoding: .utf8) else { return nil }
+/// Repo name from `config`, read via the worktree's `commondir` when `gitDir` is a linked worktree
+/// (a worktree's own gitdir has no `config`/remote — only the main repo's common gitdir does).
+private func gitRepoName(at gitDir: URL) -> String? {
+    var commonDir = gitDir
+    if let commondirContents = try? String(contentsOf: gitDir.appendingPathComponent("commondir"), encoding: .utf8) {
+        let rel = commondirContents.trimmingCharacters(in: .whitespacesAndNewlines)
+        commonDir = URL(fileURLWithPath: rel, relativeTo: gitDir).standardizedFileURL
+    }
+    guard let cfg = try? String(contentsOf: commonDir.appendingPathComponent("config"), encoding: .utf8) else { return nil }
     for line in cfg.components(separatedBy: "\n") {
         let t = line.trimmingCharacters(in: .whitespaces)
         guard t.hasPrefix("url = ") else { continue }
@@ -2654,6 +2691,13 @@ private struct PinnedWorkspaceCard: View {
         collectRunningAgents(manager).filter { $0.workspaceID == workspace.id }
     }
 
+    private var repoBranch: String? {
+        let cwd = workspace.currentWorkingDirectory
+            ?? (workspace.lastCWD.isEmpty ? nil : workspace.lastCWD)
+            ?? (workspace.directory.isEmpty ? nil : workspace.directory)
+        return gitRepoBranch(for: cwd)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
         Button(action: onSelect) {
@@ -2671,6 +2715,9 @@ private struct PinnedWorkspaceCard: View {
                         }
                     }
                     HStack(spacing: 4) {
+                        if let repoBranch {
+                            Text(repoBranch)
+                        }
                         if let folderName, !folderName.isEmpty {
                             Text(folderName)
                         }
