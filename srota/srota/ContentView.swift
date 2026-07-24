@@ -2778,20 +2778,27 @@ private struct PinnedWorkspaceCard: View {
     @Environment(WorkspaceDB.self) private var db
     @State private var isHovered = false
     @State private var agentsExpanded = false
-    // Re-reads HEAD on app refocus, since a checkout elsewhere on disk doesn't otherwise
-    // invalidate this view — only bumped, never read, to force repoBranch to recompute.
-    @State private var branchRefreshTick = 0
+    // gitRepoBranch() walks the filesystem and can block on a slow/sandboxed disk read;
+    // doing that inline in `body` froze the whole app (see debug.md hang, 2026-07-22) since
+    // body runs on the main thread. Compute it off-thread and cache the result instead.
+    @State private var repoBranch: String? = nil
 
     private var runningAgents: [RunningAgent] {
         collectRunningAgents(manager).filter { $0.workspaceID == workspace.id }
     }
 
-    private var repoBranch: String? {
-        _ = branchRefreshTick
-        let cwd = workspace.currentWorkingDirectory
+    private var currentCWD: String? {
+        workspace.currentWorkingDirectory
             ?? (workspace.lastCWD.isEmpty ? nil : workspace.lastCWD)
             ?? (workspace.directory.isEmpty ? nil : workspace.directory)
-        return gitRepoBranch(for: cwd)
+    }
+
+    private func refreshRepoBranch() {
+        let cwd = currentCWD
+        Task.detached(priority: .utility) {
+            let branch = gitRepoBranch(for: cwd)
+            await MainActor.run { repoBranch = branch }
+        }
     }
 
     // Every shell prompt re-reports its cwd (OSC 7), which already redraws this card via
@@ -2894,11 +2901,12 @@ private struct PinnedWorkspaceCard: View {
             .padding(.bottom, 6)
         }
         }
+        .onAppear { refreshRepoBranch() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            branchRefreshTick += 1
+            refreshRepoBranch()
         }
         .onReceive(cwdPublisher) { _ in
-            branchRefreshTick += 1
+            refreshRepoBranch()
         }
     }
 }
